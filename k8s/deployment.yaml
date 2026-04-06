@@ -1,0 +1,95 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gw-ipinfo-nginx
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: gw-ipinfo-nginx
+  template:
+    metadata:
+      labels:
+        app: gw-ipinfo-nginx
+    spec:
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: gw-ipinfo-nginx
+      containers:
+        - name: gw-ipinfo-nginx-gateway
+          image: your-registry/gw-ipinfo-nginx:latest
+          args: ["-config", "/etc/gw-ipinfo-nginx/config.yaml"]
+          envFrom:
+            - secretRef:
+                name: gw-ipinfo-nginx-secret
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          ports:
+            - containerPort: 8080
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          volumeMounts:
+            - name: app-config
+              mountPath: /etc/gw-ipinfo-nginx/config.yaml
+              subPath: config.yaml
+            - name: shared-efs
+              mountPath: /data/shared
+            - name: nginx-logs
+              mountPath: /var/log/nginx
+        - name: nginx-sidecar
+          image: nginx:1.27-alpine
+          ports:
+            - containerPort: 8081
+              name: nginx-http
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+            - name: shared-efs
+              mountPath: /data/shared
+            - name: nginx-logs
+              mountPath: /var/log/nginx
+      volumes:
+        - name: app-config
+          configMap:
+            name: gw-ipinfo-nginx-config
+        - name: shared-efs
+          persistentVolumeClaim:
+            claimName: gw-ipinfo-nginx-efs
+        - name: nginx-logs
+          emptyDir: {}
+        - name: nginx-config
+          configMap:
+            name: gw-ipinfo-nginx-nginx

@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gw-ipinfo-nginx-nginx
+data:
+  nginx.conf: |
+    worker_processes auto;
+    events { worker_connections 1024; }
+    http {
+      server {
+        listen 8081;
+        location /healthz { return 200 "ok"; }
+        location / {
+          root /usr/share/nginx/html;
+          index index.html;
+          try_files $uri $uri/ /index.html;
+        }
+      }
+    }

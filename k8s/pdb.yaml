@@ -1,0 +1,9 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: gw-ipinfo-nginx
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: gw-ipinfo-nginx

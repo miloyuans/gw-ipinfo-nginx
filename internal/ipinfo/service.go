@@ -1,0 +1,185 @@
+package ipinfo
+
+import (
+	"context"
+	"errors"
+	"time"
+
+	"gw-ipinfo-nginx/internal/cache"
+	"gw-ipinfo-nginx/internal/config"
+	"gw-ipinfo-nginx/internal/ipctx"
+	"gw-ipinfo-nginx/internal/metrics"
+
+	"golang.org/x/sync/singleflight"
+)
+
+type CacheRepository interface {
+	Get(ctx context.Context, ip string) (cache.Entry, bool, error)
+	Upsert(ctx context.Context, ip string, entry cache.Entry) error
+}
+
+type LookupService struct {
+	enabled                bool
+	enableResidentialProxy bool
+	l1                     *cache.L1
+	repo                   CacheRepository
+	client                 *Client
+	ttls                   config.CacheTTLConfig
+	failureTTL             time.Duration
+	metrics                *metrics.GatewayMetrics
+	group                  singleflight.Group
+}
+
+func NewLookupService(cfg *config.Config, l1 *cache.L1, repo CacheRepository, client *Client, metricsSet *metrics.GatewayMetrics) *LookupService {
+	return &LookupService{
+		enabled:                cfg.IPInfo.Enabled,
+		enableResidentialProxy: cfg.Security.Privacy.EnableResidentialProxy || cfg.IPInfo.IncludeResidentialProxy,
+		l1:                     l1,
+		repo:                   repo,
+		client:                 client,
+		ttls:                   cfg.Cache.TTL,
+		failureTTL:             cfg.Cache.FailureTTL,
+		metrics:                metricsSet,
+	}
+}
+
+func (s *LookupService) Lookup(ctx context.Context, ip string) (ipctx.Context, ipctx.CacheSource, error) {
+	if !s.enabled || s.client == nil {
+		return ipctx.Context{}, ipctx.CacheSourceNone, nil
+	}
+
+	now := time.Now().UTC()
+	if entry, ok := s.l1.Get(ip, now, s.enableResidentialProxy); ok {
+		s.recordLookup(ipctx.CacheSourceL1, entry.Failure == "")
+		if entry.Failure != "" {
+			return ipctx.Context{}, ipctx.CacheSourceL1, errors.New(entry.Failure)
+		}
+		return entry.IPContext, ipctx.CacheSourceL1, nil
+	}
+
+	if s.repo != nil {
+		repoStart := time.Now()
+		entry, found, err := s.repo.Get(ctx, ip)
+		s.recordMongoLatency(time.Since(repoStart))
+		if err == nil && found && entry.Fresh(now, s.enableResidentialProxy) {
+			s.l1.Set(ip, entry)
+			s.recordLookup(ipctx.CacheSourceMongo, entry.Failure == "")
+			if entry.Failure != "" {
+				return ipctx.Context{}, ipctx.CacheSourceMongo, errors.New(entry.Failure)
+			}
+			return entry.IPContext, ipctx.CacheSourceMongo, nil
+		}
+		if err != nil {
+			s.recordLookup(ipctx.CacheSourceMongo, false)
+		}
+	}
+
+	value, _, _ := s.group.Do(ip, func() (any, error) {
+		now := time.Now().UTC()
+		if entry, ok := s.l1.Get(ip, now, s.enableResidentialProxy); ok {
+			if entry.Failure != "" {
+				return lookupResult{source: ipctx.CacheSourceL1, err: errors.New(entry.Failure)}, nil
+			}
+			return lookupResult{source: ipctx.CacheSourceL1, value: entry.IPContext}, nil
+		}
+		if s.repo != nil {
+			repoStart := time.Now()
+			entry, found, err := s.repo.Get(ctx, ip)
+			s.recordMongoLatency(time.Since(repoStart))
+			if err == nil && found && entry.Fresh(now, s.enableResidentialProxy) {
+				s.l1.Set(ip, entry)
+				if entry.Failure != "" {
+					return lookupResult{source: ipctx.CacheSourceMongo, err: errors.New(entry.Failure)}, nil
+				}
+				return lookupResult{source: ipctx.CacheSourceMongo, value: entry.IPContext}, nil
+			}
+		}
+
+		ipinfoStart := time.Now()
+		result, err := s.client.Lookup(ctx, ip)
+		s.recordIPInfoRequest(time.Since(ipinfoStart), err)
+		if err != nil {
+			entry := cache.Entry{
+				Failure:          err.Error(),
+				FailureExpiresAt: now.Add(s.failureTTL),
+				ExpiresAt:        now.Add(s.failureTTL),
+				UpdatedAt:        now,
+			}
+			s.l1.Set(ip, entry)
+			if s.repo != nil {
+				_ = s.repo.Upsert(ctx, ip, entry)
+			}
+			return lookupResult{source: ipctx.CacheSourceIPInfo, err: err}, nil
+		}
+
+		entry := cache.Entry{
+			IPContext:         result,
+			GeoExpiresAt:      now.Add(s.ttls.Geo),
+			PrivacyExpiresAt:  now.Add(s.ttls.Privacy),
+			ResProxyExpiresAt: now.Add(s.ttls.ResidentialProxy),
+			ExpiresAt:         maxTime(now.Add(s.ttls.Geo), now.Add(s.ttls.Privacy), now.Add(s.ttls.ResidentialProxy)),
+			UpdatedAt:         now,
+		}
+		s.l1.Set(ip, entry)
+		if s.repo != nil {
+			_ = s.repo.Upsert(ctx, ip, entry)
+		}
+		return lookupResult{source: ipctx.CacheSourceIPInfo, value: result}, nil
+	})
+
+	result := value.(lookupResult)
+	s.recordLookup(result.source, result.err == nil)
+	return result.value, result.source, result.err
+}
+
+type lookupResult struct {
+	source ipctx.CacheSource
+	value  ipctx.Context
+	err    error
+}
+
+func (s *LookupService) recordLookup(source ipctx.CacheSource, success bool) {
+	if s.metrics == nil {
+		return
+	}
+	status := "hit"
+	if source == ipctx.CacheSourceIPInfo {
+		status = "miss"
+	}
+	if !success {
+		status = "error"
+	}
+	s.metrics.LookupResults.Inc(metrics.Labels{
+		"source": string(source),
+		"status": status,
+	})
+}
+
+func (s *LookupService) recordMongoLatency(duration time.Duration) {
+	if s.metrics == nil {
+		return
+	}
+	s.metrics.MongoLatency.Observe(nil, duration.Seconds())
+}
+
+func (s *LookupService) recordIPInfoRequest(duration time.Duration, err error) {
+	if s.metrics == nil {
+		return
+	}
+	status := "success"
+	if err != nil {
+		status = "error"
+	}
+	s.metrics.IPInfoRequests.Inc(metrics.Labels{"status": status})
+	s.metrics.IPInfoLatency.Observe(metrics.Labels{"status": status}, duration.Seconds())
+}
+
+func maxTime(values ...time.Time) time.Time {
+	var best time.Time
+	for _, value := range values {
+		if value.After(best) {
+			best = value
+		}
+	}
+	return best
+}
