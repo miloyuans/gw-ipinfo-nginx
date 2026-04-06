@@ -9,8 +9,7 @@ import (
 	"gw-ipinfo-nginx/internal/config"
 	"gw-ipinfo-nginx/internal/ipctx"
 	"gw-ipinfo-nginx/internal/metrics"
-
-	"golang.org/x/sync/singleflight"
+	"gw-ipinfo-nginx/internal/syncx"
 )
 
 type CacheRepository interface {
@@ -27,7 +26,7 @@ type LookupService struct {
 	ttls                   config.CacheTTLConfig
 	failureTTL             time.Duration
 	metrics                *metrics.GatewayMetrics
-	group                  singleflight.Group
+	group                  syncx.Group
 }
 
 func NewLookupService(cfg *config.Config, l1 *cache.L1, repo CacheRepository, client *Client, metricsSet *metrics.GatewayMetrics) *LookupService {
