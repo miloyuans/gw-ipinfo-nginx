@@ -3,10 +3,15 @@ FROM golang:1.22 AS builder
 WORKDIR /src
 
 COPY go.mod ./
+# Generate go.sum inside the build context when the working tree does not
+# have one checked in yet.
+RUN go mod download
+
 COPY . .
 
 ENV CGO_ENABLED=0
-RUN go build -trimpath -ldflags="-s -w" -o /out/gw-ipinfo-nginx ./cmd/gateway
+RUN go mod tidy && \
+    go build -trimpath -ldflags="-s -w" -o /out/gw-ipinfo-nginx ./cmd/gateway
 
 FROM alpine:3.20
 
