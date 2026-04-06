@@ -73,7 +73,7 @@ k8s
 
 ## Local Development
 
-### One-click debug stack
+### Linux one-click debug stack
 
 This is the fastest local path when you only want to debug the gateway request path.
 It starts:
@@ -88,31 +88,29 @@ Files:
 - [config.debug.yaml](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/configs/config.debug.yaml)
 - [docker-compose.debug.yml](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/docker-compose.debug.yml)
 - [.env.debug.example](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/.env.debug.example)
-- [dev-up.ps1](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/scripts/dev-up.ps1)
-- [dev-down.ps1](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/scripts/dev-down.ps1)
+- [dev-up.sh](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/scripts/dev-up.sh)
+- [dev-down.sh](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/scripts/dev-down.sh)
+- [dev-logs.sh](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/scripts/dev-logs.sh)
+- [Makefile](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/Makefile)
 
-Windows PowerShell:
-
-```powershell
-.\scripts\dev-up.ps1
-```
-
-Windows PowerShell with live logs:
-
-```powershell
-.\scripts\dev-up.ps1 -Logs
-```
-
-Linux/macOS shell:
+Linux shell:
 
 ```bash
+chmod +x ./scripts/*.sh
 sh ./scripts/dev-up.sh
+```
+
+Or with `make`:
+
+```bash
+make debug-up
+make debug-logs
 ```
 
 Stop the debug stack:
 
-```powershell
-.\scripts\dev-down.ps1
+```bash
+sh ./scripts/dev-down.sh
 ```
 
 Debug endpoints:
@@ -151,13 +149,14 @@ The bundled compose file starts:
 - nginx on `http://localhost:8081`
 - MongoDB on `mongodb://localhost:27017`
 
-### Full local stack close to production
+### Linux production-like local stack
 
 Use the production-style compose when you want to debug IPinfo, Mongo cache, and later Telegram worker behavior:
 
 ```bash
+chmod +x ./scripts/*.sh
 cp .env.prod.example .env.prod
-docker compose -f docker-compose.prod.yml --env-file .env.prod up --build
+sh ./scripts/prod-up.sh
 ```
 
 Files:
@@ -165,6 +164,32 @@ Files:
 - [config.prod.yaml](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/configs/config.prod.yaml)
 - [docker-compose.prod.yml](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/docker-compose.prod.yml)
 - [.env.prod.example](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/.env.prod.example)
+- [prod-up.sh](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/scripts/prod-up.sh)
+- [prod-down.sh](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/scripts/prod-down.sh)
+- [prod-logs.sh](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/scripts/prod-logs.sh)
+
+Or with `make`:
+
+```bash
+make prod-up
+make prod-logs
+```
+
+Recommended Linux flow:
+
+```bash
+chmod +x ./scripts/*.sh
+make debug-up
+make debug-logs
+```
+
+When you need the full stack with Mongo and IPinfo:
+
+```bash
+cp .env.prod.example .env.prod
+make prod-up
+make prod-logs
+```
 
 ## Validation
 
