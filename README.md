@@ -73,6 +73,11 @@ k8s
 
 ## Local Development
 
+Chinese config reference:
+
+- [config.reference.zh.yaml](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/configs/config.reference.zh.yaml)
+- [config-reference.zh-CN.md](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/docs/config-reference.zh-CN.md)
+
 ### Linux one-click debug stack
 
 This is the fastest local path when you only want to debug the gateway request path.

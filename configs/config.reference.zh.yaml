@@ -1,0 +1,179 @@
+# gw-ipinfo-nginx 中文配置参考
+#
+# 说明：
+# 1. 这是“完整字段参考模板”，适合做生产或联调时的起点。
+# 2. 本地快速调试推荐优先使用 configs/config.debug.yaml。
+# 3. 只有当 ipinfo.enabled=true 或 alerts.telegram.enabled=true
+#    或 alerts.delivery.worker_enabled=true 时，才必须配置 mongo。
+# 4. 只有当 alerts.telegram.enabled=true 时，才必须配置 bot_token/chat_id。
+
+server:
+  # 网关监听地址
+  listen_address: ":8080"
+  # HTTP 读超时
+  read_timeout: 10s
+  # HTTP 写超时
+  write_timeout: 15s
+  # keep-alive 空闲超时
+  idle_timeout: 60s
+  # 优雅停机超时
+  shutdown_timeout: 15s
+  # 拒绝请求时返回的状态码
+  deny_status_code: 403
+
+real_ip:
+  # 只有请求来源 IP 落在这些 CIDR 中时，才信任下列透传头
+  trusted_proxy_cidrs:
+    - "127.0.0.1/32"
+    - "::1/128"
+    - "10.0.0.0/8"
+    - "172.16.0.0/12"
+    - "192.168.0.0/16"
+  # 真实 IP 提取优先级
+  header_priority:
+    - "CF-Connecting-IP"
+    - "True-Client-IP"
+    - "X-Real-IP"
+    - "X-Forwarded-For"
+  # 非可信代理来源如何处理：
+  # deny            = 直接拒绝
+  # use_remote_addr = 回退使用 TCP 对端地址，适合本地调试
+  untrusted_proxy_action: "use_remote_addr"
+
+ipinfo:
+  # 本地不测 IP 风险能力时设为 false
+  enabled: false
+  # IPinfo API 地址
+  base_url: "https://api.ipinfo.io"
+  # 当前代码默认使用 /lookup/%s
+  lookup_path_template: "/lookup/%s"
+  # 只有 enabled=true 时才必须提供
+  token: "${IPINFO_TOKEN}"
+  timeout: 2s
+  max_retries: 2
+  retry_backoff: 250ms
+  # 是否启用 residential proxy 信息
+  include_residential_proxy: true
+
+mongo:
+  # 只有 ipinfo/alerts 开启时才需要
+  uri: "${MONGO_URI}"
+  database: "${MONGO_APP_DATABASE}"
+  connect_timeout: 5s
+  operation_timeout: 3s
+
+cache:
+  l1:
+    enabled: true
+    max_entries: 10000
+    cleanup_interval_sec: 300
+  ttl:
+    # 地理信息缓存 TTL
+    geo: 24h
+    # privacy/vpn/proxy 等缓存 TTL
+    privacy: 6h
+    # residential proxy 缓存 TTL
+    residential_proxy: 6h
+  # lookup 失败时的负缓存 TTL
+  failure_ttl: 5m
+  mongo_collections:
+    ip_cache: "ip_risk_cache"
+    alert_outbox: "alerts_outbox"
+    alert_dedupe: "alerts_dedupe"
+
+security:
+  ua:
+    enabled: true
+    # 默认关键字，命中即拒绝
+    deny_keywords:
+      - "bot"
+      - "crawler"
+      - "spider"
+      - "facebookexternalhit"
+      - "facebot"
+    # 额外正则表达式
+    deny_patterns: []
+
+  accept_language:
+    # true  = 没有 Accept-Language 就拒绝
+    # false = 不校验
+    require_header: false
+    # 可对单个 service 覆盖
+    service_overrides:
+      default:
+        allow_missing: true
+
+  geo:
+    # 当前仅支持 deny
+    default_action: "deny"
+    # 语义：
+    # US: {}                     => 放行整个美国
+    # JP: { cities: [...] }      => 只放行日本指定城市
+    whitelist:
+      US: {}
+      JP:
+        cities:
+          - "Tokyo"
+          - "Osaka"
+
+  privacy:
+    # true 时，vpn/proxy/tor/relay/hosting/residential_proxy 默认拒绝
+    deny_by_default: true
+    # 允许放行的风险类型，可选值：
+    # vpn / proxy / tor / relay / hosting / residential_proxy
+    allow_types: []
+    enable_residential_proxy: true
+
+routing:
+  default_service: "default"
+  services:
+    - name: "default"
+      match_path_prefixes:
+        - "/"
+      # 本地 Docker 调试一般是 nginx 容器名
+      # K8s sidecar 场景一般是 http://127.0.0.1:8081
+      target_url: "http://nginx:8081"
+      preserve_host: true
+
+alerts:
+  telegram:
+    # 本地不测告警时设为 false
+    enabled: false
+    # 只有 enabled=true 时才必须填写
+    bot_token: "${TELEGRAM_BOT_TOKEN}"
+    # 只有 enabled=true 时才必须填写
+    chat_id: "${TELEGRAM_CHAT_ID}"
+    api_base_url: "https://api.telegram.org"
+    timeout: 5s
+    parse_mode: ""
+    # true 时，告警里默认不带 query string
+    mask_query: true
+    # 是否在告警中附带 User-Agent
+    include_user_agent: true
+
+  delivery:
+    # true 时会启动 outbox worker
+    worker_enabled: false
+    poll_interval: 2s
+    batch_size: 10
+    claim_lease: 30s
+    max_attempts: 8
+    base_backoff: 5s
+    max_backoff: 5m
+    rate_limit_per_second: 2
+
+  dedupe:
+    # 同类告警去重窗口
+    window: 10m
+
+logging:
+  level: "info"
+  # 当前支持 json / text
+  format: "json"
+  # true 时日志中不记录 query string
+  redact_query: true
+  access_log: true
+
+metrics:
+  enabled: true
+  path: "/metrics"
