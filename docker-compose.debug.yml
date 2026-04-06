@@ -1,0 +1,44 @@
+version: "3.9"
+
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: gw-ipinfo-nginx:${GW_IMAGE_TAG}
+    command: ["/app/gw-ipinfo-nginx", "-config", "/app/configs/config.debug.yaml"]
+    ports:
+      - "127.0.0.1:${GW_DEBUG_HTTP_PORT}:8080"
+    depends_on:
+      nginx:
+        condition: service_healthy
+    volumes:
+      - ./configs/config.debug.yaml:/app/configs/config.debug.yaml:ro
+    restart: unless-stopped
+    init: true
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -T 2 -O - http://127.0.0.1:8080/readyz >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    networks:
+      - debug
+
+  nginx:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./deployments/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./deployments/nginx/index.html:/usr/share/nginx/html/index.html:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -T 2 -O - http://127.0.0.1:8081/ >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    networks:
+      - debug
+
+networks:
+  debug:

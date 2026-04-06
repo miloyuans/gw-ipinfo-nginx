@@ -73,6 +73,55 @@ k8s
 
 ## Local Development
 
+### One-click debug stack
+
+This is the fastest local path when you only want to debug the gateway request path.
+It starts:
+
+- gateway
+- nginx sidecar backend
+
+It does not require IPinfo or MongoDB.
+
+Files:
+
+- [config.debug.yaml](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/configs/config.debug.yaml)
+- [docker-compose.debug.yml](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/docker-compose.debug.yml)
+- [.env.debug.example](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/.env.debug.example)
+- [dev-up.ps1](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/scripts/dev-up.ps1)
+- [dev-down.ps1](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/scripts/dev-down.ps1)
+
+Windows PowerShell:
+
+```powershell
+.\scripts\dev-up.ps1
+```
+
+Windows PowerShell with live logs:
+
+```powershell
+.\scripts\dev-up.ps1 -Logs
+```
+
+Linux/macOS shell:
+
+```bash
+sh ./scripts/dev-up.sh
+```
+
+Stop the debug stack:
+
+```powershell
+.\scripts\dev-down.ps1
+```
+
+Debug endpoints:
+
+- gateway: `http://127.0.0.1:8080`
+- health: `http://127.0.0.1:8080/healthz`
+- readiness: `http://127.0.0.1:8080/readyz`
+- metrics: `http://127.0.0.1:8080/metrics`
+
 ### Run stage 1 without Mongo
 
 1. Start nginx with the example config:
@@ -101,6 +150,21 @@ The bundled compose file starts:
 - gateway on `http://localhost:8080`
 - nginx on `http://localhost:8081`
 - MongoDB on `mongodb://localhost:27017`
+
+### Full local stack close to production
+
+Use the production-style compose when you want to debug IPinfo, Mongo cache, and later Telegram worker behavior:
+
+```bash
+cp .env.prod.example .env.prod
+docker compose -f docker-compose.prod.yml --env-file .env.prod up --build
+```
+
+Files:
+
+- [config.prod.yaml](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/configs/config.prod.yaml)
+- [docker-compose.prod.yml](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/docker-compose.prod.yml)
+- [.env.prod.example](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/.env.prod.example)
 
 ## Validation
 

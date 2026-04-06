@@ -1,0 +1,81 @@
+server:
+  listen_address: ":8080"
+  read_timeout: 10s
+  write_timeout: 15s
+  idle_timeout: 60s
+  shutdown_timeout: 15s
+  deny_status_code: 403
+
+real_ip:
+  trusted_proxy_cidrs:
+    - "127.0.0.1/32"
+    - "::1/128"
+    - "10.0.0.0/8"
+    - "172.16.0.0/12"
+    - "192.168.0.0/16"
+  header_priority:
+    - "CF-Connecting-IP"
+    - "True-Client-IP"
+    - "X-Real-IP"
+    - "X-Forwarded-For"
+  untrusted_proxy_action: "use_remote_addr"
+
+ipinfo:
+  enabled: false
+
+cache:
+  l1:
+    enabled: true
+    max_entries: 10000
+    cleanup_interval_sec: 300
+
+security:
+  ua:
+    enabled: true
+    deny_keywords:
+      - "bot"
+      - "crawler"
+      - "spider"
+      - "facebookexternalhit"
+      - "facebot"
+    deny_patterns: []
+  accept_language:
+    require_header: false
+    service_overrides:
+      default:
+        allow_missing: true
+  geo:
+    default_action: "deny"
+    whitelist:
+      US: {}
+  privacy:
+    deny_by_default: true
+    allow_types: []
+    enable_residential_proxy: false
+
+routing:
+  default_service: "default"
+  services:
+    - name: "default"
+      match_path_prefixes:
+        - "/"
+      target_url: "http://nginx:8081"
+      preserve_host: true
+
+alerts:
+  telegram:
+    enabled: false
+  delivery:
+    worker_enabled: false
+  dedupe:
+    window: 10m
+
+logging:
+  level: "debug"
+  format: "json"
+  redact_query: true
+  access_log: true
+
+metrics:
+  enabled: true
+  path: "/metrics"

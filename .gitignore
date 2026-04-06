@@ -1,0 +1,4 @@
+.env
+.env.debug
+.env.prod
+*.log
