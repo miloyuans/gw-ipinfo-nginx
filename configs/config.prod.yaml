@@ -109,7 +109,7 @@ alerts:
     window: 10m
 
 logging:
-  level: "info"
+  level: "debug"
   format: "json"
   redact_query: true
   access_log: true
