@@ -29,18 +29,22 @@ func NewClient(cfg config.IPInfoConfig) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse ipinfo base url: %w", err)
 	}
+
 	return &Client{
 		baseURL:            baseURL,
 		lookupPathTemplate: cfg.LookupPathTemplate,
 		token:              cfg.Token,
-		httpClient:         &http.Client{Timeout: cfg.Timeout},
-		maxRetries:         cfg.MaxRetries,
-		retryBackoff:       cfg.RetryBackoff,
+		httpClient: &http.Client{
+			Timeout: cfg.Timeout,
+		},
+		maxRetries:   cfg.MaxRetries,
+		retryBackoff: cfg.RetryBackoff,
 	}, nil
 }
 
 func (c *Client) Lookup(ctx context.Context, ip string) (ipctx.Context, error) {
 	var lastErr error
+
 	for attempt := 0; attempt <= c.maxRetries; attempt++ {
 		if attempt > 0 {
 			select {
@@ -54,29 +58,33 @@ func (c *Client) Lookup(ctx context.Context, ip string) (ipctx.Context, error) {
 		if err == nil {
 			return value, nil
 		}
+
 		lastErr = err
 		if !isRetryable(err) {
 			break
 		}
 	}
+
 	if lastErr == nil {
 		lastErr = errors.New("ipinfo lookup failed")
 	}
+
 	return ipctx.Context{}, lastErr
 }
 
 func (c *Client) doLookup(ctx context.Context, ip string) (ipctx.Context, error) {
-	requestURL := c.baseURL.ResolveReference(&url.URL{Path: fmt.Sprintf(c.lookupPathTemplate, ip)})
-	query := requestURL.Query()
-	if c.token != "" {
-		query.Set("token", c.token)
-	}
-	requestURL.RawQuery = query.Encode()
+	requestURL := c.baseURL.ResolveReference(&url.URL{
+		Path: fmt.Sprintf(c.lookupPathTemplate, ip),
+	})
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL.String(), nil)
 	if err != nil {
 		return ipctx.Context{}, fmt.Errorf("build ipinfo request: %w", err)
 	}
+
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "gw-ipinfo-nginx/1.0")
+
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
@@ -91,9 +99,11 @@ func (c *Client) doLookup(ctx context.Context, ip string) (ipctx.Context, error)
 	if err != nil {
 		return ipctx.Context{}, fmt.Errorf("read ipinfo response: %w", err)
 	}
+
 	if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
 		return ipctx.Context{}, retryableError{err: fmt.Errorf("ipinfo http %d", resp.StatusCode)}
 	}
+
 	if resp.StatusCode >= 400 {
 		return ipctx.Context{}, fmt.Errorf("ipinfo http %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
@@ -107,17 +117,17 @@ func (c *Client) doLookup(ctx context.Context, ip string) (ipctx.Context, error)
 }
 
 type response struct {
-	Country           string           `json:"country"`
-	CountryCode       string           `json:"country_code"`
-	CountryName       string           `json:"country_name"`
-	Region            string           `json:"region"`
-	RegionName        string           `json:"region_name"`
-	City              string           `json:"city"`
-	Privacy           privacyResponse  `json:"privacy"`
-	Anonymous         anonymousResponse `json:"anonymous"`
-	ResidentialProxy  bool             `json:"residential_proxy"`
-	ResProxy          bool             `json:"res_proxy"`
-	ResProxyCamel     bool             `json:"resProxy"`
+	Country          string            `json:"country"`
+	CountryCode      string            `json:"country_code"`
+	CountryName      string            `json:"country_name"`
+	Region           string            `json:"region"`
+	RegionName       string            `json:"region_name"`
+	City             string            `json:"city"`
+	Privacy          privacyResponse   `json:"privacy"`
+	Anonymous        anonymousResponse `json:"anonymous"`
+	ResidentialProxy bool              `json:"residential_proxy"`
+	ResProxy         bool              `json:"res_proxy"`
+	ResProxyCamel    bool              `json:"resProxy"`
 }
 
 type privacyResponse struct {
@@ -140,6 +150,7 @@ func (r response) normalize(ip string) ipctx.Context {
 	if countryCode == "" {
 		countryCode = strings.ToUpper(strings.TrimSpace(r.Country))
 	}
+
 	region := strings.TrimSpace(r.Region)
 	if region == "" {
 		region = strings.TrimSpace(r.RegionName)

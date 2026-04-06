@@ -1,0 +1,119 @@
+server:
+  listen_address: ":8080"
+  read_timeout: 10s
+  write_timeout: 15s
+  idle_timeout: 60s
+  shutdown_timeout: 15s
+  deny_status_code: 403
+
+real_ip:
+  trusted_proxy_cidrs:
+    - "127.0.0.1/32"
+    - "::1/128"
+    - "10.0.0.0/8"
+    - "172.16.0.0/12"
+    - "192.168.0.0/16"
+  header_priority:
+    - "CF-Connecting-IP"
+    - "True-Client-IP"
+    - "X-Real-IP"
+    - "X-Forwarded-For"
+  untrusted_proxy_action: "use_remote_addr"
+
+ipinfo:
+  enabled: true
+  base_url: "https://api.ipinfo.io"
+  lookup_path_template: "/lookup/%s"
+  token: "${IPINFO_TOKEN}"
+  timeout: 2s
+  max_retries: 2
+  retry_backoff: 250ms
+  include_residential_proxy: true
+
+mongo:
+  uri: "${MONGO_URI}"
+  database: "${MONGO_APP_DATABASE}"
+  connect_timeout: 5s
+  operation_timeout: 3s
+
+cache:
+  l1:
+    enabled: true
+    max_entries: 10000
+    cleanup_interval_sec: 300
+  ttl:
+    geo: 24h
+    privacy: 6h
+    residential_proxy: 6h
+  failure_ttl: 5m
+  mongo_collections:
+    ip_cache: "ip_risk_cache"
+    alert_outbox: "alerts_outbox"
+    alert_dedupe: "alerts_dedupe"
+
+security:
+  ua:
+    enabled: true
+    deny_keywords:
+      - "bot"
+      - "crawler"
+      - "spider"
+      - "facebookexternalhit"
+      - "facebot"
+    deny_patterns: []
+  accept_language:
+    require_header: false
+    service_overrides:
+      default:
+        allow_missing: true
+  geo:
+    default_action: "deny"
+    whitelist:
+      US: {}
+      DE: {}
+  privacy:
+    deny_by_default: true
+    allow_types:
+      - "residential_proxy"
+    enable_residential_proxy: true
+
+routing:
+  default_service: "default"
+  services:
+    - name: "default"
+      match_path_prefixes:
+        - "/"
+      target_url: "http://nginx:8081"
+      preserve_host: true
+
+alerts:
+  telegram:
+    enabled: false
+    bot_token: ""
+    chat_id: ""
+    api_base_url: "https://api.telegram.org"
+    timeout: 5s
+    parse_mode: ""
+    mask_query: true
+    include_user_agent: true
+  delivery:
+    worker_enabled: false
+    poll_interval: 2s
+    batch_size: 10
+    claim_lease: 30s
+    max_attempts: 8
+    base_backoff: 5s
+    max_backoff: 5m
+    rate_limit_per_second: 2
+  dedupe:
+    window: 10m
+
+logging:
+  level: "info"
+  format: "json"
+  redact_query: true
+  access_log: true
+
+metrics:
+  enabled: false
+  path: "/metrics"
