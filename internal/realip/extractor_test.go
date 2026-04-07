@@ -10,7 +10,7 @@ import (
 func TestExtractorUsesTrustedHeaderPriority(t *testing.T) {
 	extractor, err := NewExtractor(config.RealIPConfig{
 		TrustedProxyCIDRs:    []string{"10.0.0.0/8"},
-		HeaderPriority:       []string{"CF-Connecting-IP", "X-Forwarded-For"},
+		HeaderPriority:       []string{"CF-Connecting-IP", "CF-Connecting-IPv6", "X-Forwarded-For"},
 		UntrustedProxyAction: "deny",
 	})
 	if err != nil {
@@ -28,6 +28,29 @@ func TestExtractorUsesTrustedHeaderPriority(t *testing.T) {
 	}
 	if ip != "1.1.1.1" {
 		t.Fatalf("Extract() = %s, want 1.1.1.1", ip)
+	}
+}
+
+func TestExtractorSupportsCFConnectingIPv6(t *testing.T) {
+	extractor, err := NewExtractor(config.RealIPConfig{
+		TrustedProxyCIDRs:    []string{"10.0.0.0/8"},
+		HeaderPriority:       []string{"CF-Connecting-IPv6"},
+		UntrustedProxyAction: "deny",
+	})
+	if err != nil {
+		t.Fatalf("NewExtractor() error = %v", err)
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, "http://example.com", nil)
+	req.RemoteAddr = "10.1.2.3:1234"
+	req.Header.Set("CF-Connecting-IPv6", "2606:4700:4700::1111")
+
+	ip, err := extractor.Extract(req)
+	if err != nil {
+		t.Fatalf("Extract() error = %v", err)
+	}
+	if ip != "2606:4700:4700::1111" {
+		t.Fatalf("Extract() = %s, want 2606:4700:4700::1111", ip)
 	}
 }
 
@@ -114,5 +137,25 @@ func TestExtractorTrustsAllSourcesWhenNoCIDRsConfigured(t *testing.T) {
 	}
 	if ip != "1.1.1.1" {
 		t.Fatalf("Extract() = %s, want 1.1.1.1", ip)
+	}
+}
+
+func TestExtractorRejectsPrivateOrLoopbackHeaderValues(t *testing.T) {
+	extractor, err := NewExtractor(config.RealIPConfig{
+		TrustedProxyCIDRs:    []string{"10.0.0.0/8"},
+		HeaderPriority:       []string{"CF-Connecting-IP", "CF-Connecting-IPv6"},
+		UntrustedProxyAction: "deny",
+	})
+	if err != nil {
+		t.Fatalf("NewExtractor() error = %v", err)
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, "http://example.com", nil)
+	req.RemoteAddr = "10.1.2.3:1234"
+	req.Header.Set("CF-Connecting-IP", "127.0.0.1")
+	req.Header.Set("CF-Connecting-IPv6", "::1")
+
+	if _, err := extractor.Extract(req); err == nil {
+		t.Fatal("Extract() error = nil, want rejection for private/loopback header values")
 	}
 }

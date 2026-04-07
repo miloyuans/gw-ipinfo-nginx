@@ -236,6 +236,7 @@ func (c *Config) applyDefaults() {
 	if len(c.RealIP.HeaderPriority) == 0 {
 		c.RealIP.HeaderPriority = []string{
 			"CF-Connecting-IP",
+			"CF-Connecting-IPv6",
 			"True-Client-IP",
 			"X-Real-IP",
 			"X-Forwarded-For",
@@ -382,10 +383,11 @@ func (c *Config) Validate() error {
 		}
 	}
 	validHeaders := map[string]struct{}{
-		"CF-Connecting-IP": {},
-		"True-Client-IP":   {},
-		"X-Real-IP":        {},
-		"X-Forwarded-For":  {},
+		"CF-Connecting-IP":   {},
+		"CF-Connecting-IPv6": {},
+		"True-Client-IP":     {},
+		"X-Real-IP":          {},
+		"X-Forwarded-For":    {},
 	}
 	for _, header := range c.RealIP.HeaderPriority {
 		if _, ok := validHeaders[header]; !ok {

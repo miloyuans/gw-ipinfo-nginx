@@ -117,59 +117,45 @@ func (c *Client) doLookup(ctx context.Context, ip string) (ipctx.Context, error)
 }
 
 type response struct {
-	Country          string            `json:"country"`
-	CountryCode      string            `json:"country_code"`
-	CountryName      string            `json:"country_name"`
-	Region           string            `json:"region"`
-	RegionName       string            `json:"region_name"`
-	City             string            `json:"city"`
-	Privacy          privacyResponse   `json:"privacy"`
+	Geo              geoResponse       `json:"geo"`
 	Anonymous        anonymousResponse `json:"anonymous"`
+	IsHosting        bool              `json:"is_hosting"`
 	ResidentialProxy bool              `json:"residential_proxy"`
 	ResProxy         bool              `json:"res_proxy"`
 	ResProxyCamel    bool              `json:"resProxy"`
 }
 
-type privacyResponse struct {
-	VPN              bool   `json:"vpn"`
-	Proxy            bool   `json:"proxy"`
-	Tor              bool   `json:"tor"`
-	Relay            bool   `json:"relay"`
-	Hosting          bool   `json:"hosting"`
-	Service          string `json:"service"`
-	ResidentialProxy bool   `json:"residential_proxy"`
-	ResProxy         bool   `json:"res_proxy"`
+type geoResponse struct {
+	CountryCode string `json:"country_code"`
+	Country     string `json:"country"`
+	Region      string `json:"region"`
+	City        string `json:"city"`
 }
 
 type anonymousResponse struct {
-	ResidentialProxy bool `json:"is_residential_proxy"`
+	Proxy            bool   `json:"is_proxy"`
+	Relay            bool   `json:"is_relay"`
+	Tor              bool   `json:"is_tor"`
+	VPN              bool   `json:"is_vpn"`
+	ResidentialProxy bool   `json:"is_residential_proxy"`
+	Service          string `json:"name"`
 }
 
 func (r response) normalize(ip string) ipctx.Context {
-	countryCode := strings.ToUpper(strings.TrimSpace(r.CountryCode))
-	if countryCode == "" {
-		countryCode = strings.ToUpper(strings.TrimSpace(r.Country))
-	}
-
-	region := strings.TrimSpace(r.Region)
-	if region == "" {
-		region = strings.TrimSpace(r.RegionName)
-	}
-
 	return ipctx.Context{
 		IP:          ip,
-		CountryCode: countryCode,
-		CountryName: strings.TrimSpace(r.CountryName),
-		Region:      region,
-		City:        strings.TrimSpace(r.City),
+		CountryCode: strings.ToUpper(strings.TrimSpace(r.Geo.CountryCode)),
+		CountryName: strings.TrimSpace(r.Geo.Country),
+		Region:      strings.TrimSpace(r.Geo.Region),
+		City:        strings.TrimSpace(r.Geo.City),
 		Privacy: ipctx.PrivacyFlags{
-			VPN:              r.Privacy.VPN,
-			Proxy:            r.Privacy.Proxy,
-			Tor:              r.Privacy.Tor,
-			Relay:            r.Privacy.Relay,
-			Hosting:          r.Privacy.Hosting,
-			Service:          strings.TrimSpace(r.Privacy.Service),
-			ResidentialProxy: r.ResidentialProxy || r.ResProxy || r.ResProxyCamel || r.Privacy.ResidentialProxy || r.Privacy.ResProxy || r.Anonymous.ResidentialProxy,
+			VPN:              r.Anonymous.VPN,
+			Proxy:            r.Anonymous.Proxy,
+			Tor:              r.Anonymous.Tor,
+			Relay:            r.Anonymous.Relay,
+			Hosting:          r.IsHosting,
+			Service:          strings.TrimSpace(r.Anonymous.Service),
+			ResidentialProxy: r.ResidentialProxy || r.ResProxy || r.ResProxyCamel || r.Anonymous.ResidentialProxy,
 		},
 		LookupTime: time.Now().UTC(),
 	}

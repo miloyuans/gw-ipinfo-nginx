@@ -31,6 +31,7 @@ func NewExtractor(cfg config.RealIPConfig) (*Extractor, error) {
 	if len(headerPriority) == 0 {
 		headerPriority = []string{
 			"CF-Connecting-IP",
+			"CF-Connecting-IPv6",
 			"True-Client-IP",
 			"X-Real-IP",
 			"X-Forwarded-For",
@@ -77,7 +78,7 @@ func (e *Extractor) Extract(r *http.Request) (string, error) {
 
 func parseHeaderValue(header, value string) (netip.Addr, error) {
 	switch header {
-	case "CF-Connecting-IP", "True-Client-IP", "X-Real-IP":
+	case "CF-Connecting-IP", "CF-Connecting-IPv6", "True-Client-IP", "X-Real-IP":
 		addr, err := netip.ParseAddr(strings.TrimSpace(value))
 		if err != nil || !isPublicIP(addr) {
 			return netip.Addr{}, fmt.Errorf("header %s did not contain a public ip", header)
