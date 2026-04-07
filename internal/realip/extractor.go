@@ -14,6 +14,7 @@ import (
 type Extractor struct {
 	trustedCIDRs         []netip.Prefix
 	headerPriority       []string
+	trustAllSources      bool
 	untrustedProxyAction string
 }
 
@@ -39,6 +40,7 @@ func NewExtractor(cfg config.RealIPConfig) (*Extractor, error) {
 	return &Extractor{
 		trustedCIDRs:         prefixes,
 		headerPriority:       headerPriority,
+		trustAllSources:      cfg.TrustAllSources || len(prefixes) == 0,
 		untrustedProxyAction: cfg.UntrustedProxyAction,
 	}, nil
 }
@@ -49,25 +51,28 @@ func (e *Extractor) Extract(r *http.Request) (string, error) {
 		return "", err
 	}
 
-	if !e.isTrusted(remoteAddr) {
-		if e.untrustedProxyAction == "use_remote_addr" && isPublicIP(remoteAddr) {
+	if e.trustAllSources || e.isTrusted(remoteAddr) {
+		for _, header := range e.headerPriority {
+			value := r.Header.Get(header)
+			if value == "" {
+				continue
+			}
+			ip, err := parseHeaderValue(header, value)
+			if err == nil {
+				return ip.String(), nil
+			}
+		}
+		if isPublicIP(remoteAddr) {
 			return remoteAddr.String(), nil
 		}
-		return "", fmt.Errorf("request source %s is not in trusted proxy cidrs", remoteAddr)
+		return "", errors.New("no valid public client ip found in request headers or remote address")
 	}
 
-	for _, header := range e.headerPriority {
-		value := r.Header.Get(header)
-		if value == "" {
-			continue
-		}
-		ip, err := parseHeaderValue(header, value)
-		if err == nil {
-			return ip.String(), nil
-		}
+	if e.untrustedProxyAction == "use_remote_addr" && isPublicIP(remoteAddr) {
+		return remoteAddr.String(), nil
 	}
 
-	return "", errors.New("no trusted client ip header contained a valid public ip")
+	return "", errors.New("no valid public client ip found in request headers or remote address")
 }
 
 func parseHeaderValue(header, value string) (netip.Addr, error) {

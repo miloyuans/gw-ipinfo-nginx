@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -25,9 +26,10 @@ type Metadata struct {
 type Manager struct {
 	proxies map[string]*httputil.ReverseProxy
 	metrics *metrics.GatewayMetrics
+	logger  *slog.Logger
 }
 
-func NewManager(services []config.ServiceConfig, metricsSet *metrics.GatewayMetrics) (*Manager, error) {
+func NewManager(services []config.ServiceConfig, metricsSet *metrics.GatewayMetrics, logger *slog.Logger) (*Manager, error) {
 	proxies := make(map[string]*httputil.ReverseProxy, len(services))
 	for _, service := range services {
 		target, err := url.Parse(service.TargetURL)
@@ -60,11 +62,20 @@ func NewManager(services []config.ServiceConfig, metricsSet *metrics.GatewayMetr
 				if metricsSet != nil {
 					metricsSet.ProxyErrors.Inc(metrics.Labels{"service": svc.Name})
 				}
+				if logger != nil {
+					logger.Error("proxy_upstream_error",
+						"event", "proxy_upstream_error",
+						"service_name", svc.Name,
+						"upstream_url", svc.TargetURL,
+						"path", r.URL.Path,
+						"error", err,
+					)
+				}
 				http.Error(w, "bad gateway", http.StatusBadGateway)
 			},
 		}
 	}
-	return &Manager{proxies: proxies, metrics: metricsSet}, nil
+	return &Manager{proxies: proxies, metrics: metricsSet, logger: logger}, nil
 }
 
 func (m *Manager) ServeHTTP(w http.ResponseWriter, r *http.Request, service config.ServiceConfig, clientIP string, context *ipctx.Context) {

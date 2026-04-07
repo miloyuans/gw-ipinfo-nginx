@@ -15,14 +15,15 @@ import (
 )
 
 type Config struct {
-	Server  ServerConfig  `yaml:"server"`
-	RealIP  RealIPConfig  `yaml:"real_ip"`
-	IPInfo  IPInfoConfig  `yaml:"ipinfo"`
-	Mongo   MongoConfig   `yaml:"mongo"`
-	Cache   CacheConfig   `yaml:"cache"`
+	Server   ServerConfig   `yaml:"server"`
+	RealIP   RealIPConfig   `yaml:"real_ip"`
+	IPInfo   IPInfoConfig   `yaml:"ipinfo"`
+	Mongo    MongoConfig    `yaml:"mongo"`
+	Cache    CacheConfig    `yaml:"cache"`
 	Security SecurityConfig `yaml:"security"`
 	Routing  RoutingConfig  `yaml:"routing"`
 	Alerts   AlertsConfig   `yaml:"alerts"`
+	DenyPage DenyPageConfig `yaml:"deny_page"`
 	Logging  LoggingConfig  `yaml:"logging"`
 	Metrics  MetricsConfig  `yaml:"metrics"`
 }
@@ -39,6 +40,7 @@ type ServerConfig struct {
 type RealIPConfig struct {
 	TrustedProxyCIDRs    []string `yaml:"trusted_proxy_cidrs"`
 	HeaderPriority       []string `yaml:"header_priority"`
+	TrustAllSources      bool     `yaml:"trust_all_sources"`
 	UntrustedProxyAction string   `yaml:"untrusted_proxy_action"`
 }
 
@@ -140,6 +142,13 @@ type AlertsConfig struct {
 	Dedupe   DedupeConfig   `yaml:"dedupe"`
 }
 
+type DenyPageConfig struct {
+	Title   string `yaml:"title"`
+	Heading string `yaml:"heading"`
+	Message string `yaml:"message"`
+	Hint    string `yaml:"hint"`
+}
+
 type TelegramConfig struct {
 	Enabled          bool   `yaml:"enabled"`
 	BotToken         string `yaml:"bot_token"`
@@ -220,6 +229,9 @@ func (c *Config) applyDefaults() {
 
 	if c.RealIP.UntrustedProxyAction == "" {
 		c.RealIP.UntrustedProxyAction = "deny"
+	}
+	if len(c.RealIP.TrustedProxyCIDRs) == 0 {
+		c.RealIP.TrustAllSources = true
 	}
 	if len(c.RealIP.HeaderPriority) == 0 {
 		c.RealIP.HeaderPriority = []string{
@@ -323,11 +335,24 @@ func (c *Config) applyDefaults() {
 		c.Alerts.Dedupe.Window = 10 * time.Minute
 	}
 
+	if c.DenyPage.Title == "" {
+		c.DenyPage.Title = "Access Unavailable"
+	}
+	if c.DenyPage.Heading == "" {
+		c.DenyPage.Heading = "Request Blocked"
+	}
+	if c.DenyPage.Message == "" {
+		c.DenyPage.Message = "Your request did not pass the gateway security checks."
+	}
+	if c.DenyPage.Hint == "" {
+		c.DenyPage.Hint = "If you believe this is a mistake, contact support and provide the request ID."
+	}
+
 	if c.Logging.Level == "" {
 		c.Logging.Level = "info"
 	}
 	if c.Logging.Format == "" {
-		c.Logging.Format = "json"
+		c.Logging.Format = "text"
 	}
 
 	if c.Metrics.Path == "" {
@@ -347,6 +372,9 @@ func (c *Config) Validate() error {
 
 	if !slices.Contains([]string{"deny", "use_remote_addr"}, c.RealIP.UntrustedProxyAction) {
 		errs = append(errs, errors.New("real_ip.untrusted_proxy_action must be deny or use_remote_addr"))
+	}
+	if !c.RealIP.TrustAllSources && len(c.RealIP.TrustedProxyCIDRs) == 0 {
+		errs = append(errs, errors.New("real_ip.trusted_proxy_cidrs is required when real_ip.trust_all_sources is false"))
 	}
 	for _, cidr := range c.RealIP.TrustedProxyCIDRs {
 		if _, _, err := net.ParseCIDR(cidr); err != nil {
@@ -427,6 +455,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Alerts.Delivery.WorkerEnabled && !c.Alerts.Telegram.Enabled {
 		errs = append(errs, errors.New("alerts.delivery.worker_enabled requires alerts.telegram.enabled to be true"))
+	}
+	if !slices.Contains([]string{"json", "text"}, strings.ToLower(c.Logging.Format)) {
+		errs = append(errs, errors.New("logging.format must be json or text"))
 	}
 
 	if len(errs) == 0 {

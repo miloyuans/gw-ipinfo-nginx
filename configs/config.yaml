@@ -1,9 +1,3 @@
-# gw-ipinfo-nginx 中文配置参考
-#
-# 这份文件按当前主线版本整理。
-# 推荐你先从 configs/config.yaml 开始改，
-# 如果想看带注释说明的版本，再参考这份文件。
-
 server:
   listen_address: ":8080"
   read_timeout: 10s
@@ -13,23 +7,15 @@ server:
   deny_status_code: 403
 
 real_ip:
-  # true 时，不再先校验请求来源是否来自可信 CDN / 代理网段
-  # 网关会直接从请求头中尝试提取真实公网客户端 IP
   trust_all_sources: true
   header_priority:
     - "CF-Connecting-IP"
     - "True-Client-IP"
     - "X-Real-IP"
     - "X-Forwarded-For"
-  # 只有 trust_all_sources=false 时，这个选项才有意义
-  # deny            = 非可信来源直接拒绝
-  # use_remote_addr = 回退使用 remote addr
   untrusted_proxy_action: "deny"
-  # 如果未来你要恢复“只信任指定代理来源”，再填写这些网段
-  trusted_proxy_cidrs: []
 
 ipinfo:
-  # 本地只调网关和 nginx 时建议 false
   enabled: false
   base_url: "https://api.ipinfo.io"
   lookup_path_template: "/lookup/%s"
@@ -40,7 +26,6 @@ ipinfo:
   include_residential_proxy: true
 
 mongo:
-  # 只有 ipinfo.enabled=true 或 alerts 开启时才必须填写
   uri: "${MONGO_URI}"
   database: "${MONGO_APP_DATABASE}"
   connect_timeout: 5s
@@ -71,14 +56,11 @@ security:
       - "facebookexternalhit"
       - "facebot"
     deny_patterns: []
-
   accept_language:
-    # true 时，没有 Accept-Language 就会被拦截
     require_header: false
     service_overrides:
       default:
         allow_missing: true
-
   geo:
     default_action: "deny"
     whitelist:
@@ -87,11 +69,8 @@ security:
         cities:
           - "Tokyo"
           - "Osaka"
-
   privacy:
     deny_by_default: true
-    # 可选值：
-    # vpn / proxy / tor / relay / hosting / residential_proxy
     allow_types: []
     enable_residential_proxy: true
 
@@ -101,7 +80,6 @@ routing:
     - name: "default"
       match_path_prefixes:
         - "/"
-      # 可以是同 Pod nginx，也可以是外部 nginx
       target_url: "${NGINX_TARGET_URL}"
       preserve_host: true
 
@@ -135,7 +113,6 @@ deny_page:
 
 logging:
   level: "info"
-  # 支持 json / text，主线默认 text，更方便直接看
   format: "text"
   redact_query: true
   access_log: true

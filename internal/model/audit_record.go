@@ -6,6 +6,7 @@ type AuditRecord struct {
 	RequestID   string
 	ClientIP    string
 	ServiceName string
+	UpstreamURL string
 	Method      string
 	Path        string
 	Allowed     bool

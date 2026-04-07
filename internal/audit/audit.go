@@ -16,9 +16,11 @@ func New(base *slog.Logger) *Logger {
 
 func (l *Logger) LogDecision(record model.AuditRecord) {
 	attrs := []any{
+		"event", "gateway_request",
 		"request_id", record.RequestID,
 		"client_ip", record.ClientIP,
 		"service_name", record.ServiceName,
+		"upstream_url", record.UpstreamURL,
 		"method", record.Method,
 		"path", record.Path,
 		"allowed", record.Allowed,
@@ -26,21 +28,17 @@ func (l *Logger) LogDecision(record model.AuditRecord) {
 		"reason_code", record.ReasonCode,
 		"cache_source", record.CacheSource,
 		"latency_ms", record.LatencyMS,
-	}
-	if record.CountryCode != "" || record.City != "" || record.CountryName != "" || record.Region != "" {
-		attrs = append(attrs,
-			"country_code", record.CountryCode,
-			"country_name", record.CountryName,
-			"city", record.City,
-			"region", record.Region,
-			"vpn", record.Privacy.VPN,
-			"proxy", record.Privacy.Proxy,
-			"tor", record.Privacy.Tor,
-			"relay", record.Privacy.Relay,
-			"hosting", record.Privacy.Hosting,
-			"resproxy", record.Privacy.ResidentialProxy,
-			"privacy_service", record.Privacy.Service,
-		)
+		"country_code", record.CountryCode,
+		"country_name", record.CountryName,
+		"city", record.City,
+		"region", record.Region,
+		"vpn", record.Privacy.VPN,
+		"proxy", record.Privacy.Proxy,
+		"tor", record.Privacy.Tor,
+		"relay", record.Privacy.Relay,
+		"hosting", record.Privacy.Hosting,
+		"resproxy", record.Privacy.ResidentialProxy,
+		"privacy_service", record.Privacy.Service,
 	}
 	l.base.Info("gateway_decision", attrs...)
 }

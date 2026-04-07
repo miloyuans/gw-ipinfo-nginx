@@ -53,7 +53,7 @@ func (w *Worker) Run(ctx context.Context) error {
 		case <-pollTicker.C:
 			messages, err := w.repo.Claim(ctx, w.workerID, w.cfg.BatchSize, w.cfg.MaxAttempts, w.cfg.ClaimLease)
 			if err != nil {
-				w.logger.Error("claim alerts", "error", err)
+				w.logger.Error("alerts_claim_failed", "event", "alerts_claim_failed", "worker_id", w.workerID, "error", err)
 				continue
 			}
 			for _, message := range messages {
@@ -70,7 +70,7 @@ func (w *Worker) Run(ctx context.Context) error {
 				cancel()
 				if err == nil {
 					if markErr := w.repo.MarkSent(ctx, message.ID); markErr != nil {
-						w.logger.Error("mark alert sent", "error", markErr, "message_id", message.ID.Hex())
+						w.logger.Error("alerts_mark_sent_failed", "event", "alerts_mark_sent_failed", "worker_id", w.workerID, "message_id", message.ID.Hex(), "error", markErr)
 					}
 					if w.metrics != nil {
 						w.metrics.AlertDelivery.Inc(metrics.Labels{"type": labelType(message), "status": "sent"})
@@ -81,7 +81,7 @@ func (w *Worker) Run(ctx context.Context) error {
 				attempts := message.Attempts + 1
 				dead := attempts >= w.cfg.MaxAttempts
 				if markErr := w.repo.MarkRetry(ctx, message.ID, attempts, time.Now().UTC().Add(backoff(w.cfg, attempts)), err.Error(), dead); markErr != nil {
-					w.logger.Error("mark alert retry", "error", markErr, "message_id", message.ID.Hex())
+					w.logger.Error("alerts_mark_retry_failed", "event", "alerts_mark_retry_failed", "worker_id", w.workerID, "message_id", message.ID.Hex(), "error", markErr)
 				}
 				if w.metrics != nil {
 					status := "retry"

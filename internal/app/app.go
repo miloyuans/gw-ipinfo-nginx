@@ -10,10 +10,10 @@ import (
 
 	"gw-ipinfo-nginx/internal/alerts"
 	"gw-ipinfo-nginx/internal/audit"
+	"gw-ipinfo-nginx/internal/blockpage"
 	"gw-ipinfo-nginx/internal/cache"
 	"gw-ipinfo-nginx/internal/config"
 	"gw-ipinfo-nginx/internal/health"
-	"gw-ipinfo-nginx/internal/httpx"
 	"gw-ipinfo-nginx/internal/ipctx"
 	"gw-ipinfo-nginx/internal/ipinfo"
 	"gw-ipinfo-nginx/internal/logging"
@@ -55,7 +55,7 @@ func New(configPath string) (*Application, error) {
 		return nil, err
 	}
 	resolver := routing.NewResolver(cfg.Routing)
-	proxyManager, err := proxy.NewManager(cfg.Routing.Services, metricSet)
+	proxyManager, err := proxy.NewManager(cfg.Routing.Services, metricSet, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -151,7 +151,7 @@ func (a *Application) Run(ctx context.Context) error {
 		}()
 	}
 	go func() {
-		a.logger.Info("gateway_listening", "addr", a.server.Addr)
+		a.logger.Info("gateway_listening", "event", "gateway_listening", "addr", a.server.Addr)
 		if err := a.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			errCh <- err
 		}
@@ -201,24 +201,12 @@ func (h *GatewayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	clientIP, err := h.realIPExtractor.Extract(r)
 	if err != nil {
 		decision := policy.Decision{Allowed: false, Result: "deny", Reason: "deny_real_ip_extract_failed"}
-		h.observe(service.Name, decision, start)
-		h.auditor.LogDecision(h.auditRecord(r, requestID, service.Name, "", cacheSource, decision, nil, time.Since(start)))
-		httpx.WriteJSON(w, h.cfg.Server.DenyStatusCode, httpx.ErrorResponse{
-			RequestID: requestID,
-			Action:    "deny",
-			Reason:    decision.Reason,
-		})
+		h.denyRequest(w, r, requestID, service, "", cacheSource, decision, nil, start)
 		return
 	}
 
 	if requestDecision := h.policyEngine.EvaluateRequest(r, service.Name); requestDecision != nil {
-		h.observe(service.Name, *requestDecision, start)
-		h.auditor.LogDecision(h.auditRecord(r, requestID, service.Name, clientIP, cacheSource, *requestDecision, nil, time.Since(start)))
-		httpx.WriteJSON(w, h.cfg.Server.DenyStatusCode, httpx.ErrorResponse{
-			RequestID: requestID,
-			Action:    "deny",
-			Reason:    requestDecision.Reason,
-		})
+		h.denyRequest(w, r, requestID, service, clientIP, cacheSource, *requestDecision, nil, start)
 		return
 	}
 
@@ -233,25 +221,25 @@ func (h *GatewayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		decision = h.policyEngine.EvaluateIP(ipContext, lookupErr)
 	}
 	if !decision.Allowed {
-		h.observe(service.Name, decision, start)
-		if decision.AlertType != "" {
-			h.enqueueAlert(r, requestID, service.Name, clientIP, cacheSource, decision, &ipContext)
-		}
-		h.auditor.LogDecision(h.auditRecord(r, requestID, service.Name, clientIP, cacheSource, decision, &ipContext, time.Since(start)))
-		httpx.WriteJSON(w, h.cfg.Server.DenyStatusCode, httpx.ErrorResponse{
-			RequestID: requestID,
-			Action:    "deny",
-			Reason:    decision.Reason,
-		})
+		h.denyRequest(w, r, requestID, service, clientIP, cacheSource, decision, &ipContext, start)
 		return
 	}
 
 	if decision.AlertType != "" {
 		h.enqueueAlert(r, requestID, service.Name, clientIP, cacheSource, decision, &ipContext)
 	}
-	h.auditor.LogDecision(h.auditRecord(r, requestID, service.Name, clientIP, cacheSource, decision, &ipContext, time.Since(start)))
+	h.auditor.LogDecision(h.auditRecord(r, requestID, service, clientIP, cacheSource, decision, &ipContext, time.Since(start)))
 	h.proxyManager.ServeHTTP(w, r, service, clientIP, &ipContext)
 	h.observe(service.Name, decision, start)
+}
+
+func (h *GatewayHandler) denyRequest(w http.ResponseWriter, req *http.Request, requestID string, service config.ServiceConfig, clientIP string, cacheSource ipctx.CacheSource, decision policy.Decision, ipContext *ipctx.Context, start time.Time) {
+	if decision.AlertType != "" {
+		h.enqueueAlert(req, requestID, service.Name, clientIP, cacheSource, decision, ipContext)
+	}
+	h.observe(service.Name, decision, start)
+	h.auditor.LogDecision(h.auditRecord(req, requestID, service, clientIP, cacheSource, decision, ipContext, time.Since(start)))
+	blockpage.Write(w, h.cfg.Server.DenyStatusCode, h.cfg.DenyPage, requestID)
 }
 
 func (h *GatewayHandler) enqueueAlert(req *http.Request, requestID, serviceName, clientIP string, cacheSource ipctx.CacheSource, decision policy.Decision, ipContext *ipctx.Context) {
@@ -273,7 +261,7 @@ func (h *GatewayHandler) enqueueAlert(req *http.Request, requestID, serviceName,
 	defer cancel()
 	enqueued, err := h.alertRepo.Enqueue(ctx, decision.AlertType, payload, h.cfg.Alerts.Dedupe.Window)
 	if err != nil {
-		h.logger.Error("enqueue alert", "error", err, "type", decision.AlertType)
+		h.logger.Error("alert_enqueue_failed", "event", "alert_enqueue_failed", "type", decision.AlertType, "service_name", serviceName, "request_id", requestID, "error", err)
 		if h.metrics != nil {
 			h.metrics.AlertOutbox.Inc(metrics.Labels{"type": decision.AlertType, "status": "error"})
 		}
@@ -326,11 +314,12 @@ func safeURL(req *http.Request, maskQuery bool) string {
 	return req.URL.Path
 }
 
-func (h *GatewayHandler) auditRecord(req *http.Request, requestID, serviceName, clientIP string, cacheSource ipctx.CacheSource, decision policy.Decision, ipContext *ipctx.Context, latency time.Duration) model.AuditRecord {
+func (h *GatewayHandler) auditRecord(req *http.Request, requestID string, service config.ServiceConfig, clientIP string, cacheSource ipctx.CacheSource, decision policy.Decision, ipContext *ipctx.Context, latency time.Duration) model.AuditRecord {
 	record := model.AuditRecord{
 		RequestID:   requestID,
 		ClientIP:    clientIP,
-		ServiceName: serviceName,
+		ServiceName: service.Name,
+		UpstreamURL: service.TargetURL,
 		Method:      req.Method,
 		Path:        req.URL.Path,
 		Allowed:     decision.Allowed,

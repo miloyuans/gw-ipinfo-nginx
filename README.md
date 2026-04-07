@@ -1,399 +1,134 @@
 # gw-ipinfo-nginx
 
-`gw-ipinfo-nginx` is a Go gateway designed for Kubernetes sidecar deployment with nginx.
-It extracts the real client IP from trusted proxy headers, applies request and IP risk policy,
-optionally looks up IP intelligence from IPinfo, persists shared cache and alert state in MongoDB,
-and forwards approved traffic to the nginx sidecar running in the same Pod.
+`gw-ipinfo-nginx` 是一个 Go 网关服务。它会从请求头里提取真实客户端公网 IP，执行 UA、`Accept-Language`、IPinfo、geo、privacy 等检查，放行后再反向代理到配置好的 nginx 入口；如果未通过检查，则直接返回固定静态拦截页。
 
-## Architecture
+## 主线文件
 
-- The gateway listens on `:8080`.
-- The nginx sidecar listens on `127.0.0.1:8081` inside the Pod.
-- Requests pass through:
-  1. request id middleware
-  2. real client IP extraction
-  3. UA and `Accept-Language` checks
-  4. optional IPinfo + cache lookup
-  5. geo / privacy policy evaluation
-  6. async alert enqueue when needed
-  7. reverse proxy to nginx
-- L1 cache is local to one process.
-- MongoDB is the shared source of truth for L2 cache and alert outbox state.
-- EFS/PVC is only for shared config, logs, and debug artifacts. Correctness does not depend on file locks.
+- 配置: [config.yaml](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/configs/config.yaml)
+- 中文配置参考: [config.reference.zh.yaml](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/configs/config.reference.zh.yaml)
+- 中文说明: [config-reference.zh-CN.md](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/docs/config-reference.zh-CN.md)
+- 本地编排: [docker-compose.yml](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/docker-compose.yml)
+- 环境变量模板: [.env.example](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/.env.example)
+- 启动脚本: [up.sh](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/scripts/up.sh)
+- 停止脚本: [down.sh](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/scripts/down.sh)
+- 日志脚本: [logs.sh](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/scripts/logs.sh)
 
-## Directory Layout
+## 当前行为
 
-```text
-cmd/gateway
-cmd/gw-ipinfo-nginx
-configs
-deployments/nginx
-examples
-internal/alerts
-internal/app
-internal/audit
-internal/cache
-internal/config
-internal/health
-internal/httpx
-internal/ipctx
-internal/ipinfo
-internal/logging
-internal/metrics
-internal/middleware
-internal/model
-internal/mongo
-internal/policy
-internal/proxy
-internal/realip
-internal/routing
-internal/server
-k8s
-```
+- 默认接受所有来源流量，不再先校验 CDN / 代理来源网段
+- 按 `CF-Connecting-IP`、`True-Client-IP`、`X-Real-IP`、`X-Forwarded-For` 顺序提取真实公网 IP
+- 找不到合法公网 IP 时直接返回固定拦截页
+- 放行后代理到 `routing.services[].target_url`
+- `target_url` 可以是同 Pod nginx，也可以是外部 nginx 地址
+- 日志统一输出 `event/request_id/client_ip/service_name/upstream_url/result/reason_code/cache_source/latency_ms`
 
-## Stage Mapping
-
-### Stage 1
-
-- Use [config.phase1.yaml](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/examples/config.phase1.yaml)
-- `ipinfo.enabled=false`
-- `alerts.telegram.enabled=false`
-- MongoDB is not required
-
-### Stage 2
-
-- Use [config.phase2.yaml](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/examples/config.phase2.yaml)
-- IPinfo + L1 + Mongo L2 cache are enabled
-- Geo and privacy policy are enforced with shared Mongo state
-
-### Stage 3
-
-- Use [config.example.yaml](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/configs/config.example.yaml)
-- Mongo outbox + Telegram worker + Kubernetes manifests are enabled
-
-## Local Development
-
-Chinese config reference:
-
-- [config.reference.zh.yaml](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/configs/config.reference.zh.yaml)
-- [config-reference.zh-CN.md](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/docs/config-reference.zh-CN.md)
-
-### Linux one-click debug stack
-
-This is the fastest local path when you only want to debug the gateway request path.
-It starts:
-
-- gateway
-- nginx sidecar backend
-
-It does not require IPinfo or MongoDB.
-
-Files:
-
-- [config.debug.yaml](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/configs/config.debug.yaml)
-- [docker-compose.debug.yml](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/docker-compose.debug.yml)
-- [.env.debug.example](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/.env.debug.example)
-- [dev-up.sh](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/scripts/dev-up.sh)
-- [dev-down.sh](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/scripts/dev-down.sh)
-- [dev-logs.sh](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/scripts/dev-logs.sh)
-- [Makefile](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/Makefile)
-
-Linux shell:
+## 一键启动
 
 ```bash
+cp .env.example .env
 chmod +x ./scripts/*.sh
-sh ./scripts/dev-up.sh
+sh ./scripts/up.sh
 ```
 
-Or with `make`:
+或：
 
 ```bash
-make debug-up
-make debug-logs
+make up
+make logs
 ```
 
-Stop the debug stack:
-
-```bash
-sh ./scripts/dev-down.sh
-```
-
-Debug endpoints:
+默认入口：
 
 - gateway: `http://127.0.0.1:8080`
 - health: `http://127.0.0.1:8080/healthz`
-- readiness: `http://127.0.0.1:8080/readyz`
+- ready: `http://127.0.0.1:8080/readyz`
 - metrics: `http://127.0.0.1:8080/metrics`
 
-### Run stage 1 without Mongo
+## 最常改的配置
 
-1. Start nginx with the example config:
+### 1. nginx 入口地址
 
-```bash
-docker run --rm -p 8081:8081 \
-  -v "$PWD/examples/nginx.conf:/etc/nginx/nginx.conf:ro" \
-  -v "$PWD/examples/index.html:/usr/share/nginx/html/index.html:ro" \
-  nginx:1.27-alpine
+在 `.env` 中改：
+
+```dotenv
+NGINX_TARGET_URL=http://nginx:8081
 ```
 
-2. Start the gateway:
+如果你要代理到外部 nginx：
 
-```bash
-go run ./cmd/gateway -config ./examples/config.phase1.yaml
+```dotenv
+NGINX_TARGET_URL=http://your-nginx.example.com:8080
 ```
 
-### Run stage 2 or stage 3 with Docker Compose
+### 2. 启用 IPinfo
 
-```bash
-docker compose up --build
+在 [config.yaml](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/configs/config.yaml) 里改：
+
+```yaml
+ipinfo:
+  enabled: true
 ```
 
-The bundled compose file starts:
+并在 `.env` 中补：
 
-- gateway on `http://localhost:8080`
-- nginx on `http://localhost:8081`
-- MongoDB on `mongodb://localhost:27017`
-
-### Linux production-like local stack
-
-Use the production-style compose when you want to debug IPinfo, Mongo cache, and later Telegram worker behavior:
-
-```bash
-chmod +x ./scripts/*.sh
-cp .env.prod.example .env.prod
-sh ./scripts/prod-up.sh
+```dotenv
+IPINFO_TOKEN=your-token
+MONGO_URI=mongodb://gw_ipinfo_app:password@mongo:27017/gw_ipinfo_nginx?authSource=gw_ipinfo_nginx
+MONGO_APP_DATABASE=gw_ipinfo_nginx
 ```
 
-Files:
+### 3. 启用 Telegram 告警
 
-- [config.prod.yaml](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/configs/config.prod.yaml)
-- [docker-compose.prod.yml](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/docker-compose.prod.yml)
-- [.env.prod.example](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/.env.prod.example)
-- [prod-up.sh](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/scripts/prod-up.sh)
-- [prod-down.sh](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/scripts/prod-down.sh)
-- [prod-logs.sh](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/scripts/prod-logs.sh)
+在 [config.yaml](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/configs/config.yaml) 里改：
 
-Or with `make`:
-
-```bash
-make prod-up
-make prod-logs
+```yaml
+alerts:
+  telegram:
+    enabled: true
+  delivery:
+    worker_enabled: true
 ```
 
-Recommended Linux flow:
+并在 `.env` 中补：
 
-```bash
-chmod +x ./scripts/*.sh
-make debug-up
-make debug-logs
+```dotenv
+TELEGRAM_BOT_TOKEN=your-bot-token
+TELEGRAM_CHAT_ID=your-chat-id
 ```
 
-When you need the full stack with Mongo and IPinfo:
+## 验证
+
+带真实公网 IP 头通过网关：
 
 ```bash
-cp .env.prod.example .env.prod
-make prod-up
-make prod-logs
-```
-
-## Validation
-
-### Non-trusted proxy
-
-Temporarily change `trusted_proxy_cidrs` in the stage 1 config so it does not include `127.0.0.0/8`,
-then restart the gateway and run:
-
-```bash
-curl -i http://localhost:8080/ \
+curl -i http://127.0.0.1:8080/ \
   -H 'CF-Connecting-IP: 1.1.1.1' \
-  -H 'Accept-Language: en-US' \
-  -H 'User-Agent: Mozilla/5.0'
+  -H 'User-Agent: Mozilla/5.0' \
+  -H 'Accept-Language: en-US,en;q=0.9'
 ```
 
-Expected:
-
-- `403`
-- JSON body contains `deny_real_ip_extract_failed`
-
-### Bot UA
+命中 bot UA，会返回固定拦截页：
 
 ```bash
-curl -i http://localhost:8080/ \
+curl -i http://127.0.0.1:8080/ \
   -H 'CF-Connecting-IP: 1.1.1.1' \
-  -H 'Accept-Language: en-US' \
-  -H 'User-Agent: Googlebot/2.1' \
-  --resolve localhost:8080:127.0.0.1
+  -H 'User-Agent: Googlebot/2.1'
 ```
 
-Expected:
-
-- `403`
-- JSON body contains `deny_ua_keyword`
-
-### Empty Accept-Language
+查看实时日志：
 
 ```bash
-curl -i http://localhost:8080/ \
-  -H 'CF-Connecting-IP: 1.1.1.1' \
-  -H 'User-Agent: Mozilla/5.0'
+sh ./scripts/logs.sh
 ```
 
-Expected:
-
-- `403`
-- JSON body contains `deny_missing_accept_language`
-
-### Successful proxying
-
-```bash
-curl -i http://localhost:8080/ \
-  -H 'CF-Connecting-IP: 1.1.1.1' \
-  -H 'Accept-Language: en-US,en;q=0.9' \
-  -H 'User-Agent: Mozilla/5.0'
-```
-
-Expected:
-
-- `200`
-- response body from nginx sidecar
-- upstream receives `X-Client-Real-IP` and `X-Gateway-Service`
-
-### Stage 2 cache behavior
-
-Use the same real IP twice with IPinfo enabled. The first lookup should be served from `ipinfo`,
-and later requests should show `cache_source` as `l1` or `mongo` in audit logs.
-
-### Stage 3 async alerts
-
-Enable Telegram config and allow one privacy risk via `allow_types`.
-Requests that are allowed with risk should enqueue Mongo outbox records immediately and be sent by workers asynchronously.
-
-## Mongo Cache Document
-
-Collection: `ip_risk_cache`
-
-Fields:
-
-- `_id`: client IP string
-- `ip_context`: normalized IP intelligence result
-- `failure`: cached lookup error text for negative cache entries
-- `geo_expires_at`
-- `privacy_expires_at`
-- `resproxy_expires_at`
-- `failure_expires_at`
-- `expires_at`
-- `created_at`
-- `updated_at`
-
-Indexes:
-
-- TTL index on `expires_at`
-
-Notes:
-
-- `expires_at` is computed as the max of geo/privacy/resproxy TTLs for successful lookups
-- negative cache entries use `error_ttl`
-- concurrent multi-Pod updates are handled via Mongo upsert
-
-## Alerts Outbox
-
-Collection: `alerts_outbox`
-
-Fields:
-
-- `status`
-- `notify_type`
-- `severity`
-- `payload`
-- `attempts`
-- `retry_count`
-- `next_attempt_at`
-- `next_retry_at`
-- `lease_expires_at`
-- `claimed_by`
-- `last_error`
-- `created_at`
-- `updated_at`
-- `sent_at`
-
-Supporting collection: `alerts_dedupe`
-
-Indexes:
-
-- claim scan index on `status`, `next_attempt_at`, `lease_expires_at`
-- TTL index on dedupe `expires_at`
-
-## Metrics
-
-Important metrics include:
-
-- `gw_gateway_requests_total`
-- `gw_gateway_deny_reasons_total`
-- `gw_gateway_request_duration_seconds`
-- `gw_gateway_lookup_results_total`
-- `gw_gateway_ipinfo_requests_total`
-- `gw_gateway_ipinfo_request_duration_seconds`
-- `gw_gateway_mongo_lookup_duration_seconds`
-- `gw_gateway_alerts_outbox_total`
-- `gw_gateway_alert_delivery_total`
-
-## Kubernetes
-
-Main manifests:
-
-- [deployment.yaml](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/k8s/deployment.yaml)
-- [service.yaml](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/k8s/service.yaml)
-- [configmap.yaml](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/k8s/configmap.yaml)
-- [secret.yaml](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/k8s/secret.yaml)
-- [pvc.yaml](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/k8s/pvc.yaml)
-- [pdb.yaml](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/k8s/pdb.yaml)
-- [hpa.yaml](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/k8s/hpa.yaml)
-- [nginx-configmap.yaml](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/k8s/nginx-configmap.yaml)
-
-The Deployment uses a two-container Pod:
-
-- `gw-ipinfo-nginx-gateway`
-- `nginx-sidecar`
-
-Shared storage is mounted at `/data/shared`.
-
-## Build
-
-```bash
-docker build -t gw-ipinfo-nginx:latest .
-```
-
-## Tests
+## 测试
 
 ```bash
 go test ./...
 ```
 
-To run Mongo integration tests as well:
+Mongo 集成测试：
 
 ```bash
 GW_MONGO_TEST_URI='mongodb://localhost:27017' go test ./...
 ```
-
-## Troubleshooting
-
-- If stage 1 fails at startup with Mongo errors, make sure you are using `examples/config.phase1.yaml`.
-- If stage 2 fails at startup, verify `MONGO_URI` and `IPINFO_TOKEN`.
-- If alerts are not sent, check Mongo outbox documents first, then Telegram token/chat id, then worker logs.
-- If real IP extraction fails behind a CDN, confirm the CDN egress CIDRs are present in `trusted_proxy_cidrs`.
-- If `/readyz` fails in full mode, verify Mongo connectivity and indexes.
-
-## Security Notes
-
-- Only trust proxy headers from configured CIDRs.
-- Do not treat private, loopback, or reserved addresses as client public IPs.
-- Keep Telegram secrets and IPinfo tokens in Kubernetes `Secret`, not in Git.
-- Mask query strings in alerts unless there is a strong reason not to.
-
-## Future Extensions
-
-- service-level overrides for geo/privacy policy
-- richer IPinfo schema versioning
-- OpenTelemetry export
-- Helm chart packaging
-- admin endpoints for cache introspection

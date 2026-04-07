@@ -162,7 +162,7 @@ func (e *Engine) evaluateGeo(countryCode, city string) (Decision, bool) {
 		return Decision{
 			Allowed: false,
 			Result:  "deny",
-			Reason:  "deny_geo_country",
+			Reason:  "deny_geo_country_not_allowed",
 		}, true
 	}
 	if rule.allowAllCities {
@@ -174,7 +174,7 @@ func (e *Engine) evaluateGeo(countryCode, city string) (Decision, bool) {
 		return Decision{
 			Allowed:   false,
 			Result:    "deny",
-			Reason:    fmt.Sprintf("deny_geo_city_missing:%s", normalizedCountry),
+			Reason:    "deny_geo_city_missing",
 			Ambiguous: true,
 			AlertType: "blocked_with_ambiguity",
 		}, true
@@ -183,7 +183,7 @@ func (e *Engine) evaluateGeo(countryCode, city string) (Decision, bool) {
 		return Decision{
 			Allowed: false,
 			Result:  "deny",
-			Reason:  fmt.Sprintf("deny_geo_city:%s:%s", normalizedCountry, normalizedCity),
+			Reason:  "deny_geo_city_not_allowed",
 		}, true
 	}
 	return Decision{}, false

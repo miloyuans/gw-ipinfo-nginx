@@ -15,7 +15,7 @@ RUN go mod tidy && \
 
 FROM alpine:3.20
 
-RUN apk add --no-cache ca-certificates tzdata && \
+RUN apk add --no-cache ca-certificates tzdata wget && \
     addgroup -S app -g 10001 && \
     adduser -S -D -H -u 10001 -G app app
 

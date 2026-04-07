@@ -66,7 +66,7 @@ func TestEvaluateIPGeoAndPrivacy(t *testing.T) {
 	}
 
 	deniedGeo := engine.EvaluateIP(ipctx.Context{CountryCode: "CA", City: "Montreal"}, nil)
-	if deniedGeo.Allowed || deniedGeo.Reason != "deny_geo_city:CA:montreal" {
+	if deniedGeo.Allowed || deniedGeo.Reason != "deny_geo_city_not_allowed" {
 		t.Fatalf("EvaluateIP() deniedGeo = %#v, want deny", deniedGeo)
 	}
 

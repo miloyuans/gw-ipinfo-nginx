@@ -80,6 +80,7 @@ func TestExtractorUsesFirstPublicXFF(t *testing.T) {
 func TestExtractorRejectsUntrustedProxy(t *testing.T) {
 	extractor, err := NewExtractor(config.RealIPConfig{
 		TrustedProxyCIDRs:    []string{"10.0.0.0/8"},
+		TrustAllSources:      false,
 		UntrustedProxyAction: "deny",
 	})
 	if err != nil {
@@ -92,5 +93,26 @@ func TestExtractorRejectsUntrustedProxy(t *testing.T) {
 
 	if _, err := extractor.Extract(req); err == nil {
 		t.Fatal("Extract() error = nil, want rejection for untrusted proxy")
+	}
+}
+
+func TestExtractorTrustsAllSourcesWhenNoCIDRsConfigured(t *testing.T) {
+	extractor, err := NewExtractor(config.RealIPConfig{
+		HeaderPriority: []string{"CF-Connecting-IP"},
+	})
+	if err != nil {
+		t.Fatalf("NewExtractor() error = %v", err)
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, "http://example.com", nil)
+	req.RemoteAddr = "172.18.0.5:1234"
+	req.Header.Set("CF-Connecting-IP", "1.1.1.1")
+
+	ip, err := extractor.Extract(req)
+	if err != nil {
+		t.Fatalf("Extract() error = %v", err)
+	}
+	if ip != "1.1.1.1" {
+		t.Fatalf("Extract() = %s, want 1.1.1.1", ip)
 	}
 }

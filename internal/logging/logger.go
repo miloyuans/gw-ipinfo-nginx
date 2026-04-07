@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"time"
 
 	"gw-ipinfo-nginx/internal/config"
 )
@@ -19,6 +20,21 @@ func New(cfg config.LoggingConfig) *slog.Logger {
 		level = slog.LevelError
 	}
 
-	handler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})
-	return slog.New(handler)
+	options := &slog.HandlerOptions{
+		Level: level,
+		ReplaceAttr: func(_ []string, attr slog.Attr) slog.Attr {
+			if attr.Key == slog.TimeKey {
+				attr.Value = slog.StringValue(attr.Value.Time().UTC().Format(time.RFC3339))
+			}
+			return attr
+		},
+	}
+
+	var handler slog.Handler
+	if strings.EqualFold(cfg.Format, "json") {
+		handler = slog.NewJSONHandler(os.Stdout, options)
+	} else {
+		handler = slog.NewTextHandler(os.Stdout, options)
+	}
+	return slog.New(handler).With("app", "gw-ipinfo-nginx")
 }

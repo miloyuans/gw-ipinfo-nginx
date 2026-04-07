@@ -13,9 +13,9 @@ import (
 
 func main() {
 	var configPath string
-	flag.StringVar(&configPath, "config", "configs/config.example.yaml", "path to YAML config")
+	flag.StringVar(&configPath, "config", "configs/config.yaml", "path to YAML config")
 	flag.Parse()
-	if configPath == "configs/config.example.yaml" {
+	if configPath == "configs/config.yaml" {
 		if value := os.Getenv("GW_GATEWAY_CONFIG"); value != "" {
 			configPath = value
 		} else if value := os.Getenv("GW_IPINFO_NGINX_CONFIG"); value != "" {
