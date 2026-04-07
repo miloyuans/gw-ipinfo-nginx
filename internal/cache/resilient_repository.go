@@ -64,16 +64,18 @@ func (r *ResilientRepository) Upsert(ctx context.Context, ip string, entry Entry
 	return r.local.UpsertDirty(ctx, ip, entry)
 }
 
-func (r *ResilientRepository) Replay(ctx context.Context, client *mongostore.Client, batchSize int) error {
+func (r *ResilientRepository) Replay(ctx context.Context, client *mongostore.Client, batchSize int) (int, error) {
 	keys, err := r.controller.Local().DirtyKeys(ctx, localdisk.BucketIPCacheDirty, batchSize)
 	if err != nil {
-		return err
+		return 0, err
 	}
+
+	replayed := 0
 
 	for _, key := range keys {
 		entry, _, found, err := r.local.Get(ctx, key)
 		if err != nil {
-			return err
+			return replayed, err
 		}
 		if !found {
 			_ = r.controller.Local().ClearDirty(ctx, localdisk.BucketIPCacheDirty, key)
@@ -81,14 +83,16 @@ func (r *ResilientRepository) Replay(ctx context.Context, client *mongostore.Cli
 		}
 
 		if err := r.upsertMongo(ctx, client, key, entry); err != nil {
-			return err
+			return replayed, err
 		}
 		if err := r.controller.Local().ClearDirty(ctx, localdisk.BucketIPCacheDirty, key); err != nil {
-			return err
+			return replayed, err
 		}
+
+		replayed++
 	}
 
-	return nil
+	return replayed, nil
 }
 
 func (r *ResilientRepository) getMongo(ctx context.Context, client *mongostore.Client, ip string) (Entry, bool, error) {
