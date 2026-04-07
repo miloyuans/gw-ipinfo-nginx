@@ -187,10 +187,12 @@ type PerformanceConfig struct {
 }
 
 type DenyPageConfig struct {
-	Title   string `yaml:"title"`
-	Heading string `yaml:"heading"`
-	Message string `yaml:"message"`
-	Hint    string `yaml:"hint"`
+	TargetURL    string `yaml:"target_url"`
+	PreserveHost bool   `yaml:"preserve_host"`
+	Title        string `yaml:"title"`
+	Heading      string `yaml:"heading"`
+	Message      string `yaml:"message"`
+	Hint         string `yaml:"hint"`
 }
 
 type TelegramConfig struct {
@@ -582,6 +584,12 @@ func (c *Config) Validate() error {
 	for _, allowType := range c.Security.Privacy.AllowTypes {
 		if _, ok := validRiskTypes[allowType]; !ok {
 			errs = append(errs, fmt.Errorf("unsupported privacy allow_type %q", allowType))
+		}
+	}
+
+	if strings.TrimSpace(c.DenyPage.TargetURL) != "" {
+		if _, err := url.ParseRequestURI(c.DenyPage.TargetURL); err != nil {
+			errs = append(errs, fmt.Errorf("invalid deny_page.target_url: %w", err))
 		}
 	}
 

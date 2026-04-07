@@ -104,6 +104,10 @@ func New(configPath string) (*Application, error) {
 	if err != nil {
 		return nil, err
 	}
+	denyResponder, err := blockpage.NewResponder(cfg.DenyPage, cfg.Perf, logger)
+	if err != nil {
+		return nil, fmt.Errorf("init deny responder: %w", err)
+	}
 
 	l1 := cache.NewL1(cfg.Cache.L1.Enabled, cfg.Cache.L1.MaxEntries, cfg.Cache.L1.Shards)
 	cacheRepo := cache.NewResilientRepository(cfg, storageControl)
@@ -169,6 +173,7 @@ func New(configPath string) (*Application, error) {
 		alertRepo:       alertRepo,
 		reporting:       reportingService,
 		proxyManager:    proxyManager,
+		denyResponder:   denyResponder,
 	}
 
 	mux := http.NewServeMux()
@@ -259,6 +264,7 @@ type GatewayHandler struct {
 	alertRepo       alerts.QueueRepository
 	reporting       *reporting.Service
 	proxyManager    *proxy.Manager
+	denyResponder   *blockpage.Responder
 }
 
 func (h *GatewayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -340,7 +346,15 @@ func (h *GatewayHandler) finish(w http.ResponseWriter, req *http.Request, reques
 	h.trackReport(req, record)
 
 	if !decision.Allowed {
-		blockpage.Write(w, h.cfg.Server.DenyStatusCode, h.cfg.DenyPage, requestID)
+		h.denyResponder.ServeHTTP(
+			w,
+			req,
+			h.cfg.Server.DenyStatusCode,
+			requestID,
+			decision.Reason,
+			service.Name,
+			clientIP,
+		)
 		return
 	}
 	h.proxyManager.ServeHTTP(w, req, service, clientIP, &ipContext)
