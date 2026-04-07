@@ -12,14 +12,14 @@ import (
 
 type Worker struct {
 	logger   *slog.Logger
-	repo     *Repository
+	repo     QueueRepository
 	sender   *Sender
 	cfg      config.DeliveryConfig
 	metrics  *metrics.GatewayMetrics
 	workerID string
 }
 
-func NewWorker(logger *slog.Logger, repo *Repository, sender *Sender, cfg config.DeliveryConfig, metricsSet *metrics.GatewayMetrics, workerID string) *Worker {
+func NewWorker(logger *slog.Logger, repo QueueRepository, sender *Sender, cfg config.DeliveryConfig, metricsSet *metrics.GatewayMetrics, workerID string) *Worker {
 	return &Worker{
 		logger:   logger,
 		repo:     repo,
@@ -66,11 +66,11 @@ func (w *Worker) Run(ctx context.Context) error {
 				}
 
 				sendCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-				err := w.sender.Send(sendCtx, message.Payload)
+					err := w.sender.Send(sendCtx, message.Payload)
 				cancel()
 				if err == nil {
 					if markErr := w.repo.MarkSent(ctx, message.ID); markErr != nil {
-						w.logger.Error("alerts_mark_sent_failed", "event", "alerts_mark_sent_failed", "worker_id", w.workerID, "message_id", message.ID.Hex(), "error", markErr)
+						w.logger.Error("alerts_mark_sent_failed", "event", "alerts_mark_sent_failed", "worker_id", w.workerID, "message_id", message.ID, "error", markErr)
 					}
 					if w.metrics != nil {
 						w.metrics.AlertDelivery.Inc(metrics.Labels{"type": labelType(message), "status": "sent"})
@@ -80,8 +80,16 @@ func (w *Worker) Run(ctx context.Context) error {
 
 				attempts := message.Attempts + 1
 				dead := attempts >= w.cfg.MaxAttempts
+				w.logger.Warn("alerts_send_failed",
+					"event", "alerts_send_failed",
+					"worker_id", w.workerID,
+					"message_id", message.ID,
+					"attempts", attempts,
+					"dead", dead,
+					"error", err,
+				)
 				if markErr := w.repo.MarkRetry(ctx, message.ID, attempts, time.Now().UTC().Add(backoff(w.cfg, attempts)), err.Error(), dead); markErr != nil {
-					w.logger.Error("alerts_mark_retry_failed", "event", "alerts_mark_retry_failed", "worker_id", w.workerID, "message_id", message.ID.Hex(), "error", markErr)
+					w.logger.Error("alerts_mark_retry_failed", "event", "alerts_mark_retry_failed", "worker_id", w.workerID, "message_id", message.ID, "error", markErr)
 				}
 				if w.metrics != nil {
 					status := "retry"

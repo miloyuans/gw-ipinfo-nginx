@@ -1,134 +1,278 @@
 # gw-ipinfo-nginx
 
-`gw-ipinfo-nginx` 是一个 Go 网关服务。它会从请求头里提取真实客户端公网 IP，执行 UA、`Accept-Language`、IPinfo、geo、privacy 等检查，放行后再反向代理到配置好的 nginx 入口；如果未通过检查，则直接返回固定静态拦截页。
+`gw-ipinfo-nginx` 是一个 Go 网关服务。它先从请求头中提取真实公网客户端 IP，再执行请求级规则、IPinfo、Geo、Privacy 和短路缓存判定；放行后反向代理到配置好的 nginx 入口，未通过时返回固定静态拦截页。
 
-## 主线文件
+当前主线版本重点补齐了：
 
-- 配置: [config.yaml](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/configs/config.yaml)
-- 中文配置参考: [config.reference.zh.yaml](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/configs/config.reference.zh.yaml)
-- 中文说明: [config-reference.zh-CN.md](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/docs/config-reference.zh-CN.md)
-- 本地编排: [docker-compose.yml](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/docker-compose.yml)
-- 环境变量模板: [.env.example](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/.env.example)
-- 启动脚本: [up.sh](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/scripts/up.sh)
-- 停止脚本: [down.sh](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/scripts/down.sh)
-- 日志脚本: [logs.sh](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/scripts/logs.sh)
+- 高可用：Mongo 优先，但 Mongo 故障时自动降级到本地磁盘。
+- 高并发：L1 分片缓存、短路缓存、异步写队列、可配置反向代理连接池。
+- 可短路：命中最近的 IP 决策后直接复用，减少重复 IPinfo / Mongo /策略判定。
+- 可降级：IP 缓存、短路缓存、告警 outbox、日报聚合都能落到本地磁盘。
+- 可报表：异步聚合每日去重 IP 报告，并可通过 Telegram 发送 HTML + CSV。
 
-## 当前行为
+## 核心目录
 
-- 默认接受所有来源流量，不再先校验 CDN / 代理来源网段
-- 按 `CF-Connecting-IP`、`True-Client-IP`、`X-Real-IP`、`X-Forwarded-For` 顺序提取真实公网 IP
-- 找不到合法公网 IP 时直接返回固定拦截页
-- 放行后代理到 `routing.services[].target_url`
-- `target_url` 可以是同 Pod nginx，也可以是外部 nginx 地址
-- 日志统一输出 `event/request_id/client_ip/service_name/upstream_url/result/reason_code/cache_source/latency_ms`
+- `cmd/gateway/main.go`
+- `configs/config.yaml`
+- `configs/config.reference.zh.yaml`
+- `internal/app`
+- `internal/cache`
+- `internal/shortcircuit`
+- `internal/storage`
+- `internal/localdisk`
+- `internal/reporting`
+- `internal/alerts`
+- `docker-compose.yml`
 
-## 一键启动
+## 高并发高可用架构
+
+主请求链路顺序：
+
+1. 提取真实公网客户端 IP。
+2. 执行请求级规则：UA、`Accept-Language`。
+3. 读取 IP 级短路缓存。
+4. 短路未命中时，读取 IPinfo L1 / Mongo / 本地磁盘缓存，必要时才访问 IPinfo。
+5. 执行 Geo / Privacy 策略。
+6. 记录审计日志，异步写短路缓存、告警队列、日报聚合。
+7. 代理到 `routing.services[].target_url`。
+
+为什么短路缓存放在请求级规则之后：
+
+- 这样不会绕过 UA / `Accept-Language` 这些本来就应该每次执行的安全边界。
+- 只有 IP 级判断结果才会被短路复用，避免把一次 bot UA 误伤成同 IP 的长期 deny。
+
+## Mongo 降级机制
+
+Mongo 是共享缓存和共享 outbox 的首选存储，但不是主链路可用性的单点。
+
+当 Mongo 不可用时：
+
+- 网关继续服务，不因为 Mongo 连接失败退出。
+- 自动切换为 `data_source_mode=localdisk`。
+- 本地 `bbolt` 文件继续承载：
+  - IPinfo 缓存
+  - 决策短路缓存
+  - 告警 outbox
+  - 日报聚合数据
+
+当 Mongo 恢复时：
+
+- 后台探测线程自动重连。
+- 本地 dirty 数据异步回放到 Mongo。
+- 回放成功后清理本地 dirty 标记。
+
+关键日志：
+
+- `mongo_degraded_to_local`
+- `mongo_recovered_replaying_local`
+- `mongo_replay_done`
+- `mongo_replay_error`
+
+## 短路缓存机制
+
+短路缓存按真实客户端 IP 维度保存最近决策，默认 TTL 为 `10h`。
+
+缓存字段包括：
+
+- `client_ip`
+- `last_decision`
+- `last_reason_code`
+- `country_code/country_name/region/city`
+- `privacy flags`
+- `first_seen_at/last_seen_at`
+- `allow_count/deny_count`
+- `short_circuit_allow_count/short_circuit_deny_count`
+- `host/path`
+- `user_agent_hash`
+
+审计日志会明确记录：
+
+- `short_circuit_hit`
+- `short_circuit_source`
+- `short_circuit_decision`
+- `ipinfo_lookup_action`
+- `data_source_mode`
+
+## 日报说明
+
+日报模块异步聚合去重 IP 统计，不阻塞请求路径。
+
+每天定时发送两个附件：
+
+- HTML 报告
+- CSV 报表
+
+报告按去重真实客户端 IP 汇总，包含：
+
+- 放行次数 / 拦截次数
+- 放行原因 / 拦截原因
+- 国家 / 地区 / 城市
+- Host / Path / URL 摘要
+- UA 摘要
+- 短路放行次数 / 短路拦截次数
+
+聚合部分还会包含：
+
+- 总请求数
+- 去重 IP 数
+- 放行总数 / 拦截总数
+- TopN 拦截原因
+- TopN 放行原因
+- TopN 国家
+- TopN Host
+- TopN UA
+
+## 本地运行
+
+1. 准备环境变量：
 
 ```bash
 cp .env.example .env
+```
+
+2. 启动：
+
+```bash
 chmod +x ./scripts/*.sh
 sh ./scripts/up.sh
 ```
 
-或：
-
-```bash
-make up
-make logs
-```
-
-默认入口：
-
-- gateway: `http://127.0.0.1:8080`
-- health: `http://127.0.0.1:8080/healthz`
-- ready: `http://127.0.0.1:8080/readyz`
-- metrics: `http://127.0.0.1:8080/metrics`
-
-## 最常改的配置
-
-### 1. nginx 入口地址
-
-在 `.env` 中改：
-
-```dotenv
-NGINX_TARGET_URL=http://nginx:8081
-```
-
-如果你要代理到外部 nginx：
-
-```dotenv
-NGINX_TARGET_URL=http://your-nginx.example.com:8080
-```
-
-### 2. 启用 IPinfo
-
-在 [config.yaml](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/configs/config.yaml) 里改：
-
-```yaml
-ipinfo:
-  enabled: true
-```
-
-并在 `.env` 中补：
-
-```dotenv
-IPINFO_TOKEN=your-token
-MONGO_URI=mongodb://gw_ipinfo_app:password@mongo:27017/gw_ipinfo_nginx?authSource=gw_ipinfo_nginx
-MONGO_APP_DATABASE=gw_ipinfo_nginx
-```
-
-### 3. 启用 Telegram 告警
-
-在 [config.yaml](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/configs/config.yaml) 里改：
-
-```yaml
-alerts:
-  telegram:
-    enabled: true
-  delivery:
-    worker_enabled: true
-```
-
-并在 `.env` 中补：
-
-```dotenv
-TELEGRAM_BOT_TOKEN=your-bot-token
-TELEGRAM_CHAT_ID=your-chat-id
-```
-
-## 验证
-
-带真实公网 IP 头通过网关：
-
-```bash
-curl -i http://127.0.0.1:8080/ \
-  -H 'CF-Connecting-IP: 1.1.1.1' \
-  -H 'User-Agent: Mozilla/5.0' \
-  -H 'Accept-Language: en-US,en;q=0.9'
-```
-
-命中 bot UA，会返回固定拦截页：
-
-```bash
-curl -i http://127.0.0.1:8080/ \
-  -H 'CF-Connecting-IP: 1.1.1.1' \
-  -H 'User-Agent: Googlebot/2.1'
-```
-
-查看实时日志：
+3. 查看日志：
 
 ```bash
 sh ./scripts/logs.sh
 ```
 
+4. 停止：
+
+```bash
+sh ./scripts/down.sh
+```
+
+默认入口：
+
+- `http://127.0.0.1:8080`
+- `http://127.0.0.1:8080/healthz`
+- `http://127.0.0.1:8080/readyz`
+- `http://127.0.0.1:8080/metrics`
+
+本地持久化目录：
+
+- Docker Compose 会把 `/data/shared` 挂到独立 volume
+- 本地降级数据库默认路径：`/data/shared/gw-ipinfo-nginx.db`
+
+## Docker 构建
+
+```bash
+docker compose up --build -d
+```
+
+## 配置说明
+
+主配置文件：
+
+- `configs/config.yaml`
+
+中文注释版：
+
+- `configs/config.reference.zh.yaml`
+
+重点配置：
+
+- `cache.short_circuit_ttl`
+- `cache.local_fallback_ttl`
+- `storage.local_path`
+- `storage.mongo_probe_interval`
+- `alerts.delivery.*`
+- `reports.*`
+- `performance.*`
+
+## Kubernetes 与 Mongo 副本集
+
+生产推荐：
+
+- MongoDB Community Operator 管理的 3 节点副本集
+- 网关多副本部署
+- 每个 Pod 挂载共享目录到 `/data/shared`
+
+代码层面已经按“Mongo 优先 + 本地降级”设计：
+
+- Mongo 正常时，多个 Pod 共享 Mongo 中的 IP 缓存、短路缓存、告警 outbox
+- Mongo 异常时，每个 Pod 仍可使用本地磁盘继续工作
+- Mongo 恢复后，各 Pod 再异步回放自己的本地 dirty 数据
+
+## QPS 资源建议
+
+下面是工程经验建议值，不是压测承诺值。上线前请按你的规则集、日志量、IPinfo 开启比例和 nginx 后端特征做压测。
+
+### 1k QPS
+
+- CPU：2 vCPU
+- 内存：2 GiB
+- 网络：100 Mbps
+- 磁盘：普通 SSD 即可
+- Mongo：3 节点副本集，低配即可
+- 本地目录：单独挂载一个持久目录给 `/data/shared`
+
+### 5k QPS
+
+- CPU：4 vCPU
+- 内存：4 GiB
+- 网络：300 Mbps
+- 磁盘：SSD，保证低延迟 fsync
+- Mongo：3 节点副本集，建议独立磁盘
+- 建议：`cache.l1.shards=64`，保留默认代理连接池
+
+### 10k QPS
+
+- CPU：8 vCPU
+- 内存：8 GiB
+- 网络：1 Gbps
+- 磁盘：NVMe 或高 IOPS SSD
+- Mongo：3 节点副本集，建议专用节点和独立存储
+- 建议：开启短路缓存、控制日志采样、提高 `async_write_queue_size`
+
+### 20k QPS
+
+- CPU：16 vCPU
+- 内存：16 GiB 以上
+- 网络：1-2 Gbps
+- 磁盘：NVMe
+- Mongo：3 节点副本集 + 更高连接池预算
+- 建议：多 Pod 横向扩容，并减少不必要的高频日志字段输出
+
 ## 测试
+
+如果本机已安装 Go：
 
 ```bash
 go test ./...
 ```
 
-Mongo 集成测试：
+这轮新增测试覆盖了：
 
-```bash
-GW_MONGO_TEST_URI='mongodb://localhost:27017' go test ./...
-```
+- 短路命中 allow / deny
+- 短路 TTL 过期
+- 短路并发读取
+- Mongo 降级与恢复回放控制器
+- 日报 HTML + CSV 生成
+- 告警入队失败不影响主流程
+- 审计日志字段完整性
+
+## 常见问题
+
+### 1. Mongo 启动失败会不会导致网关退出
+
+不会。当前主线会记录降级日志并继续使用本地磁盘模式运行。
+
+### 2. 为什么日志里有 `short_circuit_hit=false`
+
+这表示该请求没有命中最近的 IP 级决策，需要继续走 IPinfo / Geo / Privacy 链路。
+
+### 3. 为什么 `cache_source=none` 但请求仍然放行
+
+这通常表示请求没有走 IPinfo 缓存，而是命中了短路缓存或者当前 `ipinfo.enabled=false`。
+
+### 4. 为什么报告里是去重 IP 视角
+
+因为日报要求按真实客户端 IP 聚合，重点看“同一个 IP 的累计放行/拦截/短路情况”。

@@ -85,7 +85,7 @@ alerts:
 	}
 }
 
-func TestLoadRequiresMongoWhenIPInfoEnabled(t *testing.T) {
+func TestLoadAllowsLocalFallbackWhenIPInfoEnabledWithoutMongo(t *testing.T) {
 	content := `
 server:
   listen_address: ":8080"
@@ -118,8 +118,8 @@ alerts:
 `
 	path := writeConfig(t, content)
 
-	if _, err := Load(path); err == nil {
-		t.Fatal("Load() error = nil, want missing mongo validation failure")
+	if _, err := Load(path); err != nil {
+		t.Fatalf("Load() error = %v, want local fallback mode to be allowed", err)
 	}
 }
 

@@ -13,7 +13,7 @@ import (
 )
 
 type CacheRepository interface {
-	Get(ctx context.Context, ip string) (cache.Entry, bool, error)
+	Get(ctx context.Context, ip string) (cache.Entry, ipctx.CacheSource, bool, error)
 	Upsert(ctx context.Context, ip string, entry cache.Entry) error
 }
 
@@ -42,39 +42,39 @@ func NewLookupService(cfg *config.Config, l1 *cache.L1, repo CacheRepository, cl
 	}
 }
 
-func (s *LookupService) Lookup(ctx context.Context, ip string) (ipctx.Context, ipctx.CacheSource, error) {
+func (s *LookupService) Lookup(ctx context.Context, ip string) (ipctx.Context, ipctx.CacheSource, string, error) {
 	if !s.enabled || s.client == nil {
-		return ipctx.Context{}, ipctx.CacheSourceNone, nil
+		return ipctx.Context{}, ipctx.CacheSourceNone, "disabled", nil
 	}
 
 	now := time.Now().UTC()
 	if entry, ok := s.l1.Get(ip, now, s.enableResidentialProxy); ok {
 		s.recordLookup(ipctx.CacheSourceL1, entry.Failure == "")
 		if entry.Failure != "" {
-			return ipctx.Context{}, ipctx.CacheSourceL1, errors.New(entry.Failure)
+			return ipctx.Context{}, ipctx.CacheSourceL1, "cache_hit_l1", errors.New(entry.Failure)
 		}
-		return entry.IPContext, ipctx.CacheSourceL1, nil
+		return entry.IPContext, ipctx.CacheSourceL1, "cache_hit_l1", nil
 	}
 
 	if s.repo != nil {
 		repoStart := time.Now()
-		entry, found, err := s.repo.Get(ctx, ip)
+		entry, source, found, err := s.repo.Get(ctx, ip)
 		s.recordMongoLatency(time.Since(repoStart))
 		if err == nil && found && entry.Fresh(now, s.enableResidentialProxy) {
 			s.l1.Set(ip, entry)
-			s.recordLookup(ipctx.CacheSourceMongo, entry.Failure == "")
+			s.recordLookup(source, entry.Failure == "")
 			if entry.Failure != "" {
-				return ipctx.Context{}, ipctx.CacheSourceMongo, errors.New(entry.Failure)
+				return ipctx.Context{}, source, actionForCacheSource(source), errors.New(entry.Failure)
 			}
-			return entry.IPContext, ipctx.CacheSourceMongo, nil
+			return entry.IPContext, source, actionForCacheSource(source), nil
 		}
 		if err != nil {
-			s.recordLookup(ipctx.CacheSourceMongo, false)
+			s.recordLookup(source, false)
 		}
 	}
 
 	value, _, _ := s.group.Do(ip, func() (any, error) {
-		now := time.Now().UTC()
+			now := time.Now().UTC()
 		if entry, ok := s.l1.Get(ip, now, s.enableResidentialProxy); ok {
 			if entry.Failure != "" {
 				return lookupResult{source: ipctx.CacheSourceL1, err: errors.New(entry.Failure)}, nil
@@ -83,14 +83,14 @@ func (s *LookupService) Lookup(ctx context.Context, ip string) (ipctx.Context, i
 		}
 		if s.repo != nil {
 			repoStart := time.Now()
-			entry, found, err := s.repo.Get(ctx, ip)
+			entry, source, found, err := s.repo.Get(ctx, ip)
 			s.recordMongoLatency(time.Since(repoStart))
 			if err == nil && found && entry.Fresh(now, s.enableResidentialProxy) {
 				s.l1.Set(ip, entry)
 				if entry.Failure != "" {
-					return lookupResult{source: ipctx.CacheSourceMongo, err: errors.New(entry.Failure)}, nil
+					return lookupResult{source: source, err: errors.New(entry.Failure)}, nil
 				}
-				return lookupResult{source: ipctx.CacheSourceMongo, value: entry.IPContext}, nil
+				return lookupResult{source: source, value: entry.IPContext}, nil
 			}
 		}
 
@@ -128,7 +128,13 @@ func (s *LookupService) Lookup(ctx context.Context, ip string) (ipctx.Context, i
 
 	result := value.(lookupResult)
 	s.recordLookup(result.source, result.err == nil)
-	return result.value, result.source, result.err
+	if result.source == ipctx.CacheSourceIPInfo {
+		if result.err != nil {
+			return result.value, result.source, "remote_error", result.err
+		}
+		return result.value, result.source, "remote_success", result.err
+	}
+	return result.value, result.source, actionForCacheSource(result.source), result.err
 }
 
 type lookupResult struct {
@@ -181,4 +187,17 @@ func maxTime(values ...time.Time) time.Time {
 		}
 	}
 	return best
+}
+
+func actionForCacheSource(source ipctx.CacheSource) string {
+	switch source {
+	case ipctx.CacheSourceL1:
+		return "cache_hit_l1"
+	case ipctx.CacheSourceMongo:
+		return "cache_hit_mongo"
+	case ipctx.CacheSourceLocal:
+		return "cache_hit_localdisk"
+	default:
+		return "start"
+	}
 }

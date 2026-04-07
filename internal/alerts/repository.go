@@ -2,6 +2,8 @@ package alerts
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
@@ -9,7 +11,6 @@ import (
 	mongostore "gw-ipinfo-nginx/internal/mongo"
 
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
@@ -21,24 +22,31 @@ const (
 	StatusDead       = "dead"
 )
 
+type QueueRepository interface {
+	Enqueue(ctx context.Context, messageType string, payload Payload, dedupeWindow time.Duration) (bool, error)
+	Claim(ctx context.Context, workerID string, batchSize, maxAttempts int, lease time.Duration) ([]OutboxMessage, error)
+	MarkSent(ctx context.Context, id string) error
+	MarkRetry(ctx context.Context, id string, attempts int, nextAttempt time.Time, lastError string, dead bool) error
+}
+
 type OutboxMessage struct {
-	ID             primitive.ObjectID `bson:"_id,omitempty"`
-	Type           string             `bson:"type"`
-	NotifyType     string             `bson:"notify_type"`
-	Severity       string             `bson:"severity"`
-	Status         string             `bson:"status"`
-	DedupeKey      string             `bson:"dedupe_key"`
-	Payload        Payload            `bson:"payload"`
-	Attempts       int                `bson:"attempts"`
-	RetryCount     int                `bson:"retry_count"`
-	NextAttemptAt  time.Time          `bson:"next_attempt_at"`
-	NextRetryAt    time.Time          `bson:"next_retry_at"`
-	LeaseExpiresAt *time.Time         `bson:"lease_expires_at,omitempty"`
-	ClaimedBy      string             `bson:"claimed_by,omitempty"`
-	LastError      string             `bson:"last_error,omitempty"`
-	CreatedAt      time.Time          `bson:"created_at"`
-	UpdatedAt      time.Time          `bson:"updated_at"`
-	SentAt         *time.Time         `bson:"sent_at,omitempty"`
+	ID             string     `bson:"_id" json:"id"`
+	Type           string     `bson:"type" json:"type"`
+	NotifyType     string     `bson:"notify_type" json:"notify_type"`
+	Severity       string     `bson:"severity" json:"severity"`
+	Status         string     `bson:"status" json:"status"`
+	DedupeKey      string     `bson:"dedupe_key" json:"dedupe_key"`
+	Payload        Payload    `bson:"payload" json:"payload"`
+	Attempts       int        `bson:"attempts" json:"attempts"`
+	RetryCount     int        `bson:"retry_count" json:"retry_count"`
+	NextAttemptAt  time.Time  `bson:"next_attempt_at" json:"next_attempt_at"`
+	NextRetryAt    time.Time  `bson:"next_retry_at" json:"next_retry_at"`
+	LeaseExpiresAt *time.Time `bson:"lease_expires_at,omitempty" json:"lease_expires_at,omitempty"`
+	ClaimedBy      string     `bson:"claimed_by,omitempty" json:"claimed_by,omitempty"`
+	LastError      string     `bson:"last_error,omitempty" json:"last_error,omitempty"`
+	CreatedAt      time.Time  `bson:"created_at" json:"created_at"`
+	UpdatedAt      time.Time  `bson:"updated_at" json:"updated_at"`
+	SentAt         *time.Time `bson:"sent_at,omitempty" json:"sent_at,omitempty"`
 }
 
 type Repository struct {
@@ -106,6 +114,7 @@ func (r *Repository) Enqueue(ctx context.Context, messageType string, payload Pa
 	}
 
 	message := OutboxMessage{
+		ID:            newMessageID(),
 		Type:          messageType,
 		NotifyType:    payload.NotifyType,
 		Severity:      payload.Severity,
@@ -130,7 +139,7 @@ func (r *Repository) Claim(ctx context.Context, workerID string, batchSize, maxA
 	now := time.Now().UTC()
 	messages := make([]OutboxMessage, 0, batchSize)
 
-	for i := 0; i < batchSize; i++ {
+	for idx := 0; idx < batchSize; idx++ {
 		child, cancel := r.client.WithTimeout(ctx)
 		var message OutboxMessage
 		err := r.outbox.FindOneAndUpdate(
@@ -168,7 +177,7 @@ func (r *Repository) Claim(ctx context.Context, workerID string, batchSize, maxA
 	return messages, nil
 }
 
-func (r *Repository) MarkSent(ctx context.Context, id primitive.ObjectID) error {
+func (r *Repository) MarkSent(ctx context.Context, id string) error {
 	now := time.Now().UTC()
 	child, cancel := r.client.WithTimeout(ctx)
 	defer cancel()
@@ -189,7 +198,7 @@ func (r *Repository) MarkSent(ctx context.Context, id primitive.ObjectID) error 
 	return nil
 }
 
-func (r *Repository) MarkRetry(ctx context.Context, id primitive.ObjectID, attempts int, nextAttempt time.Time, lastError string, dead bool) error {
+func (r *Repository) MarkRetry(ctx context.Context, id string, attempts int, nextAttempt time.Time, lastError string, dead bool) error {
 	now := time.Now().UTC()
 	status := StatusPending
 	if dead {
@@ -215,4 +224,54 @@ func (r *Repository) MarkRetry(ctx context.Context, id primitive.ObjectID, attem
 		return fmt.Errorf("mark outbox retry: %w", err)
 	}
 	return nil
+}
+
+func (r *Repository) Import(ctx context.Context, message OutboxMessage, dedupeWindow time.Duration) error {
+	now := time.Now().UTC()
+	child, cancel := r.client.WithTimeout(ctx)
+	defer cancel()
+
+	_, err := r.dedupe.UpdateByID(child, message.DedupeKey, bson.M{
+		"$set": bson.M{
+			"type":       message.Type,
+			"expires_at": now.Add(dedupeWindow),
+			"created_at": message.CreatedAt,
+		},
+	}, options.Update().SetUpsert(true))
+	if err != nil {
+		return fmt.Errorf("upsert alert dedupe: %w", err)
+	}
+
+	_, err = r.outbox.UpdateByID(child, message.ID, bson.M{
+		"$set": bson.M{
+			"type":             message.Type,
+			"notify_type":      message.NotifyType,
+			"severity":         message.Severity,
+			"status":           message.Status,
+			"dedupe_key":       message.DedupeKey,
+			"payload":          message.Payload,
+			"attempts":         message.Attempts,
+			"retry_count":      message.RetryCount,
+			"next_attempt_at":  message.NextAttemptAt,
+			"next_retry_at":    message.NextRetryAt,
+			"lease_expires_at": message.LeaseExpiresAt,
+			"claimed_by":       message.ClaimedBy,
+			"last_error":       message.LastError,
+			"created_at":       message.CreatedAt,
+			"updated_at":       message.UpdatedAt,
+			"sent_at":          message.SentAt,
+		},
+	}, options.Update().SetUpsert(true))
+	if err != nil {
+		return fmt.Errorf("import outbox message: %w", err)
+	}
+	return nil
+}
+
+func newMessageID() string {
+	var raw [12]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return fmt.Sprintf("msg-%d", time.Now().UTC().UnixNano())
+	}
+	return hex.EncodeToString(raw[:])
 }

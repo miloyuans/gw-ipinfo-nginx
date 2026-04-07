@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"time"
 
 	"gw-ipinfo-nginx/internal/config"
 	"gw-ipinfo-nginx/internal/ipctx"
@@ -27,10 +29,24 @@ type Manager struct {
 	proxies map[string]*httputil.ReverseProxy
 	metrics *metrics.GatewayMetrics
 	logger  *slog.Logger
+	transport *http.Transport
 }
 
-func NewManager(services []config.ServiceConfig, metricsSet *metrics.GatewayMetrics, logger *slog.Logger) (*Manager, error) {
+func NewManager(services []config.ServiceConfig, perf config.PerformanceConfig, metricsSet *metrics.GatewayMetrics, logger *slog.Logger) (*Manager, error) {
 	proxies := make(map[string]*httputil.ReverseProxy, len(services))
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   3 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		MaxIdleConns:          perf.ProxyMaxIdleConns,
+		MaxIdleConnsPerHost:   perf.ProxyMaxIdleConnsPerHost,
+		IdleConnTimeout:       perf.ProxyIdleConnTimeout,
+		ResponseHeaderTimeout: perf.ProxyResponseHeaderTimeout,
+		ExpectContinueTimeout: perf.ProxyExpectContinueTimeout,
+		ForceAttemptHTTP2:     true,
+	}
 	for _, service := range services {
 		target, err := url.Parse(service.TargetURL)
 		if err != nil {
@@ -73,9 +89,10 @@ func NewManager(services []config.ServiceConfig, metricsSet *metrics.GatewayMetr
 				}
 				http.Error(w, "bad gateway", http.StatusBadGateway)
 			},
+			Transport: transport,
 		}
 	}
-	return &Manager{proxies: proxies, metrics: metricsSet, logger: logger}, nil
+	return &Manager{proxies: proxies, metrics: metricsSet, logger: logger, transport: transport}, nil
 }
 
 func (m *Manager) ServeHTTP(w http.ResponseWriter, r *http.Request, service config.ServiceConfig, clientIP string, context *ipctx.Context) {

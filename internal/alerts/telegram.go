@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
+	"net/textproto"
 	"strings"
 	"time"
 
@@ -65,6 +67,60 @@ func (s *Sender) Send(ctx context.Context, payload Payload) error {
 	if resp.StatusCode >= 300 {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 		return fmt.Errorf("telegram http %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+	}
+	return nil
+}
+
+func (s *Sender) SendDocument(ctx context.Context, fileName, contentType string, data []byte, caption string) error {
+	requestURL := s.apiBaseURL.ResolveReference(&url.URL{Path: fmt.Sprintf("/bot%s/sendDocument", s.botToken)})
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+
+	if err := writer.WriteField("chat_id", s.chatID); err != nil {
+		return fmt.Errorf("write telegram chat_id: %w", err)
+	}
+	if caption != "" {
+		if err := writer.WriteField("caption", caption); err != nil {
+			return fmt.Errorf("write telegram caption: %w", err)
+		}
+	}
+	if s.parseMode != "" {
+		if err := writer.WriteField("parse_mode", s.parseMode); err != nil {
+			return fmt.Errorf("write telegram parse_mode: %w", err)
+		}
+	}
+	headers := textproto.MIMEHeader{}
+	headers.Set("Content-Disposition", fmt.Sprintf(`form-data; name="document"; filename="%s"`, fileName))
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	headers.Set("Content-Type", contentType)
+	part, err := writer.CreatePart(headers)
+	if err != nil {
+		return fmt.Errorf("create telegram document part: %w", err)
+	}
+	if _, err := part.Write(data); err != nil {
+		return fmt.Errorf("write telegram document: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return fmt.Errorf("close telegram multipart: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL.String(), body)
+	if err != nil {
+		return fmt.Errorf("build telegram document request: %w", err)
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("send telegram document request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		return fmt.Errorf("telegram document http %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
 	}
 	return nil
 }

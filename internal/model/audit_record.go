@@ -7,12 +7,19 @@ type AuditRecord struct {
 	ClientIP    string
 	ServiceName string
 	UpstreamURL string
+	Host        string
 	Method      string
 	Path        string
+	RequestURL  string
 	Allowed     bool
 	Result      string
 	ReasonCode  string
 	CacheSource ipctx.CacheSource
+	DataSourceMode string
+	ShortCircuitHit bool
+	ShortCircuitSource string
+	ShortCircuitDecision string
+	IPInfoLookupAction string
 	CountryCode string
 	CountryName string
 	Region      string

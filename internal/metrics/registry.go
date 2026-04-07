@@ -173,6 +173,9 @@ type GatewayMetrics struct {
 	IPInfoRequests  *Counter
 	IPInfoLatency   *Histogram
 	MongoLatency    *Histogram
+	ShortCircuit    *Counter
+	ReplayEvents    *Counter
+	ReportRuns      *Counter
 	ProxyErrors     *Counter
 	AlertOutbox     *Counter
 	AlertDelivery   *Counter
@@ -210,6 +213,18 @@ func NewGatewayMetrics(registry *Registry) *GatewayMetrics {
 			"gw_gateway_mongo_lookup_duration_seconds",
 			"Latency of Mongo cache lookups.",
 			[]float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1},
+		),
+		ShortCircuit: registry.NewCounter(
+			"gw_gateway_short_circuit_total",
+			"Short circuit cache hits by source and decision.",
+		),
+		ReplayEvents: registry.NewCounter(
+			"gw_gateway_replay_events_total",
+			"Local replay status events by component and status.",
+		),
+		ReportRuns: registry.NewCounter(
+			"gw_gateway_daily_reports_total",
+			"Daily report generation and send results.",
 		),
 		ProxyErrors: registry.NewCounter(
 			"gw_gateway_proxy_errors_total",

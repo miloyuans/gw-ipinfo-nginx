@@ -23,6 +23,9 @@ type Config struct {
 	Security SecurityConfig `yaml:"security"`
 	Routing  RoutingConfig  `yaml:"routing"`
 	Alerts   AlertsConfig   `yaml:"alerts"`
+	Reports  ReportsConfig  `yaml:"reports"`
+	Storage  StorageConfig  `yaml:"storage"`
+	Perf     PerformanceConfig `yaml:"performance"`
 	DenyPage DenyPageConfig `yaml:"deny_page"`
 	Logging  LoggingConfig  `yaml:"logging"`
 	Metrics  MetricsConfig  `yaml:"metrics"`
@@ -66,12 +69,16 @@ type CacheConfig struct {
 	L1               L1CacheConfig   `yaml:"l1"`
 	TTL              CacheTTLConfig  `yaml:"ttl"`
 	FailureTTL       time.Duration   `yaml:"failure_ttl"`
+	ShortCircuitTTL  time.Duration   `yaml:"short_circuit_ttl"`
+	LocalFallbackTTL time.Duration   `yaml:"local_fallback_ttl"`
 	MongoCollections MongoCollections `yaml:"mongo_collections"`
 }
 
 type L1CacheConfig struct {
-	Enabled           bool `yaml:"enabled"`
-	MaxEntries        int  `yaml:"max_entries"`
+	Enabled            bool `yaml:"enabled"`
+	MaxEntries         int  `yaml:"max_entries"`
+	ShortCircuitEntries int `yaml:"short_circuit_entries"`
+	Shards             int  `yaml:"shards"`
 	CleanupIntervalSec int  `yaml:"cleanup_interval_sec"`
 }
 
@@ -82,9 +89,11 @@ type CacheTTLConfig struct {
 }
 
 type MongoCollections struct {
-	IPCache     string `yaml:"ip_cache"`
-	AlertOutbox string `yaml:"alert_outbox"`
-	AlertDedupe string `yaml:"alert_dedupe"`
+	IPCache      string `yaml:"ip_cache"`
+	DecisionCache string `yaml:"decision_cache"`
+	AlertOutbox  string `yaml:"alert_outbox"`
+	AlertDedupe  string `yaml:"alert_dedupe"`
+	ReportEvents string `yaml:"report_events"`
 }
 
 type SecurityConfig struct {
@@ -140,6 +149,41 @@ type AlertsConfig struct {
 	Telegram TelegramConfig `yaml:"telegram"`
 	Delivery DeliveryConfig `yaml:"delivery"`
 	Dedupe   DedupeConfig   `yaml:"dedupe"`
+}
+
+type ReportsConfig struct {
+	Enabled           bool          `yaml:"enabled"`
+	TimeZone          string        `yaml:"timezone"`
+	DailySendTime     string        `yaml:"daily_send_time"`
+	Lookback          time.Duration `yaml:"lookback"`
+	TopN              int           `yaml:"top_n"`
+	IncludeCSV        bool          `yaml:"include_csv"`
+	IncludeHTML       bool          `yaml:"include_html"`
+	WorkerEnabled     bool          `yaml:"worker_enabled"`
+	PollInterval      time.Duration `yaml:"poll_interval"`
+	ReplayBatchSize   int           `yaml:"replay_batch_size"`
+}
+
+type StorageConfig struct {
+	LocalPath          string        `yaml:"local_path"`
+	ReplayInterval     time.Duration `yaml:"replay_interval"`
+	MongoProbeInterval time.Duration `yaml:"mongo_probe_interval"`
+	ReplayBatchSize    int           `yaml:"replay_batch_size"`
+	ReplayWorkers      int           `yaml:"replay_workers"`
+}
+
+type PerformanceConfig struct {
+	RequestQueueSize       int           `yaml:"request_queue_size"`
+	AsyncWriteQueueSize    int           `yaml:"async_write_queue_size"`
+	StatsQueueSize         int           `yaml:"stats_queue_size"`
+	DecisionWorkers        int           `yaml:"decision_workers"`
+	AlertWorkers           int           `yaml:"alert_workers"`
+	LogSampleRate          int           `yaml:"log_sample_rate"`
+	ProxyMaxIdleConns      int           `yaml:"proxy_max_idle_conns"`
+	ProxyMaxIdleConnsPerHost int         `yaml:"proxy_max_idle_conns_per_host"`
+	ProxyIdleConnTimeout   time.Duration `yaml:"proxy_idle_conn_timeout"`
+	ProxyResponseHeaderTimeout time.Duration `yaml:"proxy_response_header_timeout"`
+	ProxyExpectContinueTimeout time.Duration `yaml:"proxy_expect_continue_timeout"`
 }
 
 type DenyPageConfig struct {
@@ -269,6 +313,12 @@ func (c *Config) applyDefaults() {
 	if c.Cache.L1.MaxEntries == 0 {
 		c.Cache.L1.MaxEntries = 10000
 	}
+	if c.Cache.L1.ShortCircuitEntries == 0 {
+		c.Cache.L1.ShortCircuitEntries = 200000
+	}
+	if c.Cache.L1.Shards == 0 {
+		c.Cache.L1.Shards = 64
+	}
 	if c.Cache.L1.CleanupIntervalSec == 0 {
 		c.Cache.L1.CleanupIntervalSec = 300
 	}
@@ -284,14 +334,26 @@ func (c *Config) applyDefaults() {
 	if c.Cache.FailureTTL == 0 {
 		c.Cache.FailureTTL = 5 * time.Minute
 	}
+	if c.Cache.ShortCircuitTTL == 0 {
+		c.Cache.ShortCircuitTTL = 10 * time.Hour
+	}
+	if c.Cache.LocalFallbackTTL == 0 {
+		c.Cache.LocalFallbackTTL = 24 * time.Hour
+	}
 	if c.Cache.MongoCollections.IPCache == "" {
 		c.Cache.MongoCollections.IPCache = "ip_risk_cache"
+	}
+	if c.Cache.MongoCollections.DecisionCache == "" {
+		c.Cache.MongoCollections.DecisionCache = "decision_short_circuit_cache"
 	}
 	if c.Cache.MongoCollections.AlertOutbox == "" {
 		c.Cache.MongoCollections.AlertOutbox = "alerts_outbox"
 	}
 	if c.Cache.MongoCollections.AlertDedupe == "" {
 		c.Cache.MongoCollections.AlertDedupe = "alerts_dedupe"
+	}
+	if c.Cache.MongoCollections.ReportEvents == "" {
+		c.Cache.MongoCollections.ReportEvents = "request_reports_daily"
 	}
 
 	if len(c.Security.UA.DenyKeywords) == 0 {
@@ -334,6 +396,78 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Alerts.Dedupe.Window == 0 {
 		c.Alerts.Dedupe.Window = 10 * time.Minute
+	}
+	if c.Reports.TimeZone == "" {
+		c.Reports.TimeZone = "UTC"
+	}
+	if c.Reports.DailySendTime == "" {
+		c.Reports.DailySendTime = "09:00"
+	}
+	if c.Reports.Lookback == 0 {
+		c.Reports.Lookback = 24 * time.Hour
+	}
+	if c.Reports.TopN == 0 {
+		c.Reports.TopN = 10
+	}
+	if !c.Reports.IncludeCSV && !c.Reports.IncludeHTML {
+		c.Reports.IncludeCSV = true
+		c.Reports.IncludeHTML = true
+	}
+	if c.Reports.PollInterval == 0 {
+		c.Reports.PollInterval = time.Minute
+	}
+	if c.Reports.ReplayBatchSize == 0 {
+		c.Reports.ReplayBatchSize = 1000
+	}
+
+	if c.Storage.LocalPath == "" {
+		c.Storage.LocalPath = "/data/shared/gw-ipinfo-nginx.db"
+	}
+	if c.Storage.ReplayInterval == 0 {
+		c.Storage.ReplayInterval = 30 * time.Second
+	}
+	if c.Storage.MongoProbeInterval == 0 {
+		c.Storage.MongoProbeInterval = 10 * time.Second
+	}
+	if c.Storage.ReplayBatchSize == 0 {
+		c.Storage.ReplayBatchSize = 500
+	}
+	if c.Storage.ReplayWorkers == 0 {
+		c.Storage.ReplayWorkers = 2
+	}
+
+	if c.Perf.RequestQueueSize == 0 {
+		c.Perf.RequestQueueSize = 4096
+	}
+	if c.Perf.AsyncWriteQueueSize == 0 {
+		c.Perf.AsyncWriteQueueSize = 16384
+	}
+	if c.Perf.StatsQueueSize == 0 {
+		c.Perf.StatsQueueSize = 32768
+	}
+	if c.Perf.DecisionWorkers == 0 {
+		c.Perf.DecisionWorkers = 4
+	}
+	if c.Perf.AlertWorkers == 0 {
+		c.Perf.AlertWorkers = 2
+	}
+	if c.Perf.LogSampleRate == 0 {
+		c.Perf.LogSampleRate = 1
+	}
+	if c.Perf.ProxyMaxIdleConns == 0 {
+		c.Perf.ProxyMaxIdleConns = 2048
+	}
+	if c.Perf.ProxyMaxIdleConnsPerHost == 0 {
+		c.Perf.ProxyMaxIdleConnsPerHost = 1024
+	}
+	if c.Perf.ProxyIdleConnTimeout == 0 {
+		c.Perf.ProxyIdleConnTimeout = 90 * time.Second
+	}
+	if c.Perf.ProxyResponseHeaderTimeout == 0 {
+		c.Perf.ProxyResponseHeaderTimeout = 5 * time.Second
+	}
+	if c.Perf.ProxyExpectContinueTimeout == 0 {
+		c.Perf.ProxyExpectContinueTimeout = time.Second
 	}
 
 	if c.DenyPage.Title == "" {
@@ -397,6 +531,18 @@ func (c *Config) Validate() error {
 	if c.IPInfo.Enabled && strings.TrimSpace(c.IPInfo.Token) == "" {
 		errs = append(errs, errors.New("ipinfo.token is required when ipinfo.enabled is true"))
 	}
+	if c.Cache.ShortCircuitTTL <= 0 {
+		errs = append(errs, errors.New("cache.short_circuit_ttl must be > 0"))
+	}
+	if c.Cache.LocalFallbackTTL <= 0 {
+		errs = append(errs, errors.New("cache.local_fallback_ttl must be > 0"))
+	}
+	if c.Cache.L1.Shards <= 0 {
+		errs = append(errs, errors.New("cache.l1.shards must be > 0"))
+	}
+	if c.Cache.L1.ShortCircuitEntries <= 0 {
+		errs = append(errs, errors.New("cache.l1.short_circuit_entries must be > 0"))
+	}
 
 	if len(c.Routing.Services) == 0 {
 		errs = append(errs, errors.New("routing.services must contain at least one service"))
@@ -439,13 +585,11 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	if c.NeedsMongo() {
-		if c.Mongo.URI == "" {
-			errs = append(errs, errors.New("mongo.uri is required when ipinfo or alerts are enabled"))
-		}
-		if c.Mongo.Database == "" {
-			errs = append(errs, errors.New("mongo.database is required when ipinfo or alerts are enabled"))
-		}
+	if strings.TrimSpace(c.Mongo.URI) != "" && strings.TrimSpace(c.Mongo.Database) == "" {
+		errs = append(errs, errors.New("mongo.database is required when mongo.uri is set"))
+	}
+	if strings.TrimSpace(c.Mongo.Database) != "" && strings.TrimSpace(c.Mongo.URI) == "" {
+		errs = append(errs, errors.New("mongo.uri is required when mongo.database is set"))
 	}
 	if c.Alerts.Telegram.Enabled {
 		if strings.TrimSpace(c.Alerts.Telegram.BotToken) == "" {
@@ -457,6 +601,44 @@ func (c *Config) Validate() error {
 	}
 	if c.Alerts.Delivery.WorkerEnabled && !c.Alerts.Telegram.Enabled {
 		errs = append(errs, errors.New("alerts.delivery.worker_enabled requires alerts.telegram.enabled to be true"))
+	}
+	if c.Reports.Enabled && !c.Alerts.Telegram.Enabled {
+		errs = append(errs, errors.New("reports.enabled requires alerts.telegram.enabled to be true"))
+	}
+	if c.Reports.TimeZone != "" {
+		if _, err := time.LoadLocation(c.Reports.TimeZone); err != nil {
+			errs = append(errs, fmt.Errorf("invalid reports.timezone %q: %w", c.Reports.TimeZone, err))
+		}
+	}
+	if !strings.Contains(c.Reports.DailySendTime, ":") {
+		errs = append(errs, errors.New("reports.daily_send_time must use HH:MM format"))
+	}
+	if c.Storage.LocalPath == "" {
+		errs = append(errs, errors.New("storage.local_path is required"))
+	}
+	if c.Storage.ReplayInterval <= 0 {
+		errs = append(errs, errors.New("storage.replay_interval must be > 0"))
+	}
+	if c.Storage.MongoProbeInterval <= 0 {
+		errs = append(errs, errors.New("storage.mongo_probe_interval must be > 0"))
+	}
+	if c.Storage.ReplayBatchSize <= 0 {
+		errs = append(errs, errors.New("storage.replay_batch_size must be > 0"))
+	}
+	if c.Storage.ReplayWorkers <= 0 {
+		errs = append(errs, errors.New("storage.replay_workers must be > 0"))
+	}
+	if c.Perf.RequestQueueSize <= 0 {
+		errs = append(errs, errors.New("performance.request_queue_size must be > 0"))
+	}
+	if c.Perf.AsyncWriteQueueSize <= 0 {
+		errs = append(errs, errors.New("performance.async_write_queue_size must be > 0"))
+	}
+	if c.Perf.StatsQueueSize <= 0 {
+		errs = append(errs, errors.New("performance.stats_queue_size must be > 0"))
+	}
+	if c.Perf.ProxyMaxIdleConns <= 0 || c.Perf.ProxyMaxIdleConnsPerHost <= 0 {
+		errs = append(errs, errors.New("performance proxy pool sizes must be > 0"))
 	}
 	if !slices.Contains([]string{"json", "text"}, strings.ToLower(c.Logging.Format)) {
 		errs = append(errs, errors.New("logging.format must be json or text"))

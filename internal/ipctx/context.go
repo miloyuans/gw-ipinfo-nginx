@@ -8,6 +8,7 @@ const (
 	CacheSourceNone   CacheSource = "none"
 	CacheSourceL1     CacheSource = "l1"
 	CacheSourceMongo  CacheSource = "mongo"
+	CacheSourceLocal  CacheSource = "localdisk"
 	CacheSourceIPInfo CacheSource = "ipinfo"
 )
 

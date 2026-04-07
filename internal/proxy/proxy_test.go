@@ -26,7 +26,7 @@ func TestManagerSetsHeaders(t *testing.T) {
 		Name:         "default",
 		TargetURL:    backend.URL,
 		PreserveHost: true,
-	}}, nil)
+	}}, config.PerformanceConfig{}, nil, nil)
 	if err != nil {
 		t.Fatalf("NewManager() error = %v", err)
 	}
