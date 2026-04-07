@@ -289,39 +289,50 @@ func (s *Service) upsertMongo(ctx context.Context, client *mongostore.Client, re
 	defer cancel()
 
 	collection := client.Database().Collection(s.collectionName)
+
 	s.indexOnce.Do(func() {
 		index := mongo.IndexModel{
-			Keys:    bson.D{{Key: "expires_at", Value: 1}},
-			Options: options.Index().SetExpireAfterSeconds(0).SetName("ttl_expires_at"),
+			Keys: bson.D{{Key: "expires_at", Value: 1}},
+			Options: options.Index().
+				SetExpireAfterSeconds(0).
+				SetName("ttl_expires_at"),
 		}
 		_, _ = collection.Indexes().CreateOne(child, index)
 	})
 
-	_, err = collection.UpdateByID(child, record.ClientIP, bson.M{
-		"$set": bson.M{
-			"client_ip":                  record.ClientIP,
-			"last_decision":              record.LastDecision,
-			"last_reason_code":           record.LastReasonCode,
-			"country_code":               record.CountryCode,
-			"country_name":               record.CountryName,
-			"region":                     record.Region,
-			"city":                       record.City,
-			"privacy":                    record.Privacy,
-			"last_seen_at":               record.LastSeenAt,
-			"allow_count":                record.AllowCount,
-			"deny_count":                 record.DenyCount,
-			"short_circuit_allow_count":  record.ShortCircuitAllowCount,
-			"short_circuit_deny_count":   record.ShortCircuitDenyCount,
-			"host":                       record.Host,
-			"path":                       record.Path,
-			"user_agent_hash":            record.UserAgentHash,
-			"expires_at":                 record.ExpiresAt,
-			"updated_at":                 record.UpdatedAt,
+	_, err := collection.UpdateByID(
+		child,
+		record.ClientIP,
+		bson.M{
+			"$set": bson.M{
+				"client_ip":                 record.ClientIP,
+				"last_decision":             record.LastDecision,
+				"last_reason_code":          record.LastReasonCode,
+				"country_code":              record.CountryCode,
+				"country_name":              record.CountryName,
+				"region":                    record.Region,
+				"city":                      record.City,
+				"privacy":                   record.Privacy,
+				"last_seen_at":              record.LastSeenAt,
+				"allow_count":               record.AllowCount,
+				"deny_count":                record.DenyCount,
+				"short_circuit_allow_count": record.ShortCircuitAllowCount,
+				"short_circuit_deny_count":  record.ShortCircuitDenyCount,
+				"host":                      record.Host,
+				"path":                      record.Path,
+				"user_agent_hash":           record.UserAgentHash,
+				"expires_at":                record.ExpiresAt,
+				"updated_at":                record.UpdatedAt,
+			},
+			"$setOnInsert": bson.M{
+				"first_seen_at": record.FirstSeenAt,
+			},
 		},
-		"$setOnInsert": bson.M{"first_seen_at": record.FirstSeenAt},
-	}, options.Update().SetUpsert(true))
+		options.Update().SetUpsert(true),
+	)
 	if err != nil {
 		return fmt.Errorf("upsert short circuit %s: %w", record.ClientIP, err)
 	}
+
 	return nil
 }

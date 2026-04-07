@@ -69,8 +69,9 @@ func (r *ResilientRepository) Replay(ctx context.Context, client *mongostore.Cli
 	if err != nil {
 		return err
 	}
+
 	for _, key := range keys {
-		entry, found, err := r.local.Get(ctx, key)
+		entry, _, found, err := r.local.Get(ctx, key)
 		if err != nil {
 			return err
 		}
@@ -78,6 +79,7 @@ func (r *ResilientRepository) Replay(ctx context.Context, client *mongostore.Cli
 			_ = r.controller.Local().ClearDirty(ctx, localdisk.BucketIPCacheDirty, key)
 			continue
 		}
+
 		if err := r.upsertMongo(ctx, client, key, entry); err != nil {
 			return err
 		}
@@ -85,6 +87,7 @@ func (r *ResilientRepository) Replay(ctx context.Context, client *mongostore.Cli
 			return err
 		}
 	}
+
 	return nil
 }
 
