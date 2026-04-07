@@ -81,35 +81,50 @@ func (r *ResilientRepository) MarkRetry(ctx context.Context, id string, attempts
 	return r.local.MarkRetry(ctx, id, attempts, nextAttempt, lastError, dead)
 }
 
-func (r *ResilientRepository) Replay(ctx context.Context, client *mongostore.Client, batchSize int) error {
+func (r *ResilientRepository) Replay(ctx context.Context, client *mongostore.Client, batchSize int) (int, error) {
 	keys, err := r.local.DirtyKeys(ctx, batchSize)
 	if err != nil {
-		return err
+		return 0, err
 	}
+
 	if len(keys) == 0 {
-		return nil
+		return 0, nil
 	}
+
 	mongoRepo := NewRepository(client, r.cfg.Cache.MongoCollections.AlertOutbox, r.cfg.Cache.MongoCollections.AlertDedupe)
 	if err := mongoRepo.InitIndexes(ctx); err != nil {
-		return err
+		return 0, err
 	}
+
+	replayed := 0
+
 	for _, key := range keys {
 		message, found, err := r.local.Get(ctx, key)
 		if err != nil {
-			return err
+			return replayed, err
 		}
+
 		if !found {
 			_ = r.controller.Local().ClearDirty(ctx, localdisk.BucketAlertsDirty, key)
 			continue
 		}
+
 		if err := mongoRepo.Import(ctx, message, r.cfg.Alerts.Dedupe.Window); err != nil {
-			return err
+			return replayed, err
 		}
+
 		if err := r.local.Clear(ctx, key); err != nil && !errors.Is(err, localdisk.ErrNotFound) {
-			return err
+			return replayed, err
 		}
+
+		if err := r.controller.Local().ClearDirty(ctx, localdisk.BucketAlertsDirty, key); err != nil {
+			return replayed, err
+		}
+
+		replayed++
 	}
-	return nil
+
+	return replayed, nil
 }
 
 func (r *ResilientRepository) mongoRepo() *Repository {

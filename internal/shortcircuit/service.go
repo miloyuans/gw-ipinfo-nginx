@@ -183,11 +183,14 @@ func (s *Service) IPContext(record Record) ipctx.Context {
 	}
 }
 
-func (s *Service) Replay(ctx context.Context, client *mongostore.Client, batchSize int) error {
+func (s *Service) Replay(ctx context.Context, client *mongostore.Client, batchSize int) (int, error) {
 	keys, err := s.controller.Local().DirtyKeys(ctx, localdisk.BucketDecisionDirty, batchSize)
 	if err != nil {
-		return err
+		return 0, err
 	}
+
+	replayed := 0
+
 	for _, key := range keys {
 		var record Record
 		if err := s.controller.Local().GetJSON(ctx, localdisk.BucketDecisionCache, key, &record); err != nil {
@@ -195,16 +198,21 @@ func (s *Service) Replay(ctx context.Context, client *mongostore.Client, batchSi
 				_ = s.controller.Local().ClearDirty(ctx, localdisk.BucketDecisionDirty, key)
 				continue
 			}
-			return err
+			return replayed, err
 		}
+
 		if err := s.upsertMongo(ctx, client, record); err != nil {
-			return err
+			return replayed, err
 		}
+
 		if err := s.controller.Local().ClearDirty(ctx, localdisk.BucketDecisionDirty, key); err != nil {
-			return err
+			return replayed, err
 		}
+
+		replayed++
 	}
-	return nil
+
+	return replayed, nil
 }
 
 func (r Record) PrivacyRiskTypes() []string {
