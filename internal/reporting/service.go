@@ -147,11 +147,14 @@ func (s *Service) Run(ctx context.Context, workers int) {
 	}
 }
 
-func (s *Service) Replay(ctx context.Context, client *mongostore.Client, batchSize int) error {
+func (s *Service) Replay(ctx context.Context, client *mongostore.Client, batchSize int) (int, error) {
 	keys, err := s.controller.Local().DirtyKeys(ctx, localdisk.BucketReportDirty, batchSize)
 	if err != nil {
-		return err
+		return 0, err
 	}
+
+	replayed := 0
+
 	for _, key := range keys {
 		var summary Summary
 		if err := s.controller.Local().GetJSON(ctx, localdisk.BucketReportRecords, key, &summary); err != nil {
@@ -159,16 +162,21 @@ func (s *Service) Replay(ctx context.Context, client *mongostore.Client, batchSi
 				_ = s.controller.Local().ClearDirty(ctx, localdisk.BucketReportDirty, key)
 				continue
 			}
-			return err
+			return replayed, err
 		}
+
 		if err := s.upsertMongo(ctx, client, summary); err != nil {
-			return err
+			return replayed, err
 		}
+
 		if err := s.controller.Local().ClearDirty(ctx, localdisk.BucketReportDirty, key); err != nil {
-			return err
+			return replayed, err
 		}
+
+		replayed++
 	}
-	return nil
+
+	return replayed, nil
 }
 
 func (s *Service) GenerateDaily(ctx context.Context, day time.Time) ([]byte, []byte, error) {
