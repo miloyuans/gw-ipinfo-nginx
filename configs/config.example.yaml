@@ -5,6 +5,9 @@ server:
   idle_timeout: 60s
   shutdown_timeout: 15s
   deny_status_code: 403
+  prefork:
+    enabled: false
+    processes: 1
 
 real_ip:
   trusted_proxy_cidrs:

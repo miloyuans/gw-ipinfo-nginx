@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -57,4 +58,24 @@ func TestEnqueueAlertFailureDoesNotPanic(t *testing.T) {
 		Reason:    "allow_privacy_vpn",
 		AlertType: "allowed_with_risk",
 	}, &ipctx.Context{CountryCode: "US"})
+}
+
+func TestResolveLocalStoragePathUsesPodScopedFile(t *testing.T) {
+	t.Setenv("POD_NAME", "gw-ipinfo-abc")
+
+	got := resolveLocalStoragePath(filepath.Join(string(filepath.Separator), "data", "shared", "gw-ipinfo-nginx.db"))
+	want := filepath.Join(string(filepath.Separator), "data", "shared", "gw-ipinfo-abc", "gw-ipinfo-nginx.db")
+	if got != want {
+		t.Fatalf("resolveLocalStoragePath() = %q, want %q", got, want)
+	}
+}
+
+func TestResolveLocalStoragePathKeepsPathWhenPodNameMissing(t *testing.T) {
+	t.Setenv("POD_NAME", "")
+
+	got := resolveLocalStoragePath(filepath.Join(string(filepath.Separator), "data", "shared", "gw-ipinfo-nginx.db"))
+	want := filepath.Join(string(filepath.Separator), "data", "shared", "gw-ipinfo-nginx.db")
+	if got != want {
+		t.Fatalf("resolveLocalStoragePath() = %q, want %q", got, want)
+	}
 }

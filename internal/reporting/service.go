@@ -19,6 +19,7 @@ import (
 	"gw-ipinfo-nginx/internal/localdisk"
 	"gw-ipinfo-nginx/internal/metrics"
 	mongostore "gw-ipinfo-nginx/internal/mongo"
+	"gw-ipinfo-nginx/internal/runtimex"
 	"gw-ipinfo-nginx/internal/storage"
 
 	bolt "go.etcd.io/bbolt"
@@ -142,7 +143,7 @@ func (s *Service) Run(ctx context.Context, workers int) {
 	for idx := 0; idx < workers; idx++ {
 		go s.runWorker(ctx)
 	}
-	if s.cfg.Reports.Enabled && s.cfg.Reports.WorkerEnabled && s.sender != nil {
+	if s.cfg.Reports.Enabled && s.cfg.Reports.WorkerEnabled && s.sender != nil && runtimex.IsPrimaryProcess() {
 		go s.runScheduler(ctx)
 	}
 }
@@ -210,19 +211,17 @@ func (s *Service) runWorker(ctx context.Context) {
 }
 
 func (s *Service) persist(ctx context.Context, event Event) error {
-	summary, err := s.upsertLocal(ctx, event)
-	if err != nil {
-		return err
-	}
 	client := s.controller.Client()
 	if client != nil && s.controller.Mode() != storage.ModeLocal {
+		summary := s.summaryFromEvent(event)
 		if err := s.upsertMongo(ctx, client, summary); err == nil {
-			return s.controller.Local().ClearDirty(ctx, localdisk.BucketReportDirty, summary.ID)
+			return nil
 		} else {
 			s.controller.HandleMongoError(err)
 		}
 	}
-	return nil
+	_, err := s.upsertLocal(ctx, event)
+	return err
 }
 
 func (s *Service) upsertLocal(ctx context.Context, event Event) (Summary, error) {
@@ -460,7 +459,7 @@ func (s *Service) loadDay(ctx context.Context, dayKey string) ([]Summary, error)
 	}
 
 	prefix := dayKey + "|"
-	summaries := make([]Summary, 0, 128)
+	summaryMap := make(map[string]Summary, 128)
 	err := s.controller.Local().ForEachJSON(ctx, localdisk.BucketReportRecords, func(key string, raw []byte) error {
 		if !strings.HasPrefix(key, prefix) {
 			return nil
@@ -469,11 +468,19 @@ func (s *Service) loadDay(ctx context.Context, dayKey string) ([]Summary, error)
 		if err := json.Unmarshal(raw, &summary); err != nil {
 			return err
 		}
-		summaries = append(summaries, summary)
+		if existing, ok := summaryMap[summary.ID]; ok {
+			summaryMap[summary.ID] = mergeSummaries(existing, summary)
+			return nil
+		}
+		summaryMap[summary.ID] = summary
 		return nil
 	})
 	if err != nil {
 		return nil, err
+	}
+	summaries := make([]Summary, 0, len(summaryMap))
+	for _, summary := range summaryMap {
+		summaries = append(summaries, summary)
 	}
 	sort.Slice(summaries, func(i, j int) bool {
 		if summaries[i].AllowCount+summaries[i].DenyCount == summaries[j].AllowCount+summaries[j].DenyCount {
@@ -666,4 +673,80 @@ func listBlock(title string, rows []aggregateRow) string {
 
 func td(value string) string {
 	return "<td>" + html.EscapeString(value) + "</td>"
+}
+
+func mergeSummaries(left, right Summary) Summary {
+	merged := left
+
+	if merged.ID == "" {
+		merged.ID = right.ID
+	}
+	if merged.Kind == "" {
+		merged.Kind = right.Kind
+	}
+	if merged.Day == "" {
+		merged.Day = right.Day
+	}
+	if merged.ClientIP == "" {
+		merged.ClientIP = right.ClientIP
+	}
+
+	merged.AllowCount += right.AllowCount
+	merged.DenyCount += right.DenyCount
+	merged.ShortCircuitAllowCount += right.ShortCircuitAllowCount
+	merged.ShortCircuitDenyCount += right.ShortCircuitDenyCount
+
+	if merged.AllowReasons == nil {
+		merged.AllowReasons = map[string]uint64{}
+	}
+	if merged.DenyReasons == nil {
+		merged.DenyReasons = map[string]uint64{}
+	}
+	for key, value := range right.AllowReasons {
+		merged.AllowReasons[key] += value
+	}
+	for key, value := range right.DenyReasons {
+		merged.DenyReasons[key] += value
+	}
+
+	if merged.FirstSeenAt.IsZero() || (!right.FirstSeenAt.IsZero() && right.FirstSeenAt.Before(merged.FirstSeenAt)) {
+		merged.FirstSeenAt = right.FirstSeenAt
+	}
+	if right.LastSeenAt.After(merged.LastSeenAt) {
+		merged.LastSeenAt = right.LastSeenAt
+		merged.ServiceName = right.ServiceName
+		merged.Host = right.Host
+		merged.Path = right.Path
+		merged.RequestURL = right.RequestURL
+		merged.UserAgentSummary = right.UserAgentSummary
+		merged.CountryCode = right.CountryCode
+		merged.CountryName = right.CountryName
+		merged.Region = right.Region
+		merged.City = right.City
+		merged.Privacy = right.Privacy
+	}
+	if right.UpdatedAt.After(merged.UpdatedAt) {
+		merged.UpdatedAt = right.UpdatedAt
+	}
+
+	return merged
+}
+
+func (s *Service) summaryFromEvent(event Event) Summary {
+	now := event.Timestamp.UTC()
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	dayKey := now.In(s.location).Format("2006-01-02")
+	summary := Summary{
+		ID:           dayKey + "|" + event.ClientIP,
+		Kind:         "summary",
+		Day:          dayKey,
+		ClientIP:     event.ClientIP,
+		AllowReasons: map[string]uint64{},
+		DenyReasons:  map[string]uint64{},
+		FirstSeenAt:  now,
+	}
+	applyEvent(&summary, event, now)
+	return summary
 }

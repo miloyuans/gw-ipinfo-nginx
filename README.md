@@ -308,3 +308,23 @@ go test ./...
 ### 4. 为什么报告里是去重 IP 视角
 
 因为日报要求按真实客户端 IP 聚合，重点看“同一个 IP 的累计放行/拦截/短路情况”。
+## Localdisk Notes
+
+When the gateway runs in Kubernetes with multiple Pods sharing the same PVC, do not let different Pods open the same `bbolt` file.
+
+This project now auto-scopes the local fallback database path at runtime when `POD_NAME` or prefork worker metadata is present:
+
+- `/data/shared/<pod-name>/gw-ipinfo-nginx.db`
+
+Each Pod only writes its own shard file, but the degraded-mode read path will scan peer shard files under the shared directory.
+That means local fallback is no longer "all Pods write one file", but it is also not "each Pod is fully isolated and cannot see peer data".
+
+This avoids `open localdisk db: timeout` during rolling updates or multi-replica deployments where old and new Pods briefly overlap.
+
+## Prefork
+
+Linux deployments can optionally enable `server.prefork.enabled=true` and set `server.prefork.processes`.
+
+- Mongo healthy: normal concurrent Mongo read/write path stays unchanged.
+- Mongo degraded: each worker writes only its own local shard and reads peer shards from the shared directory.
+- Daily reports run only in the primary prefork worker to avoid duplicate report sends.

@@ -2,6 +2,7 @@ package shortcircuit
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -282,14 +283,27 @@ func (s *Service) getMongo(ctx context.Context, client *mongostore.Client, clien
 }
 
 func (s *Service) getLocal(ctx context.Context, clientIP string) (Record, bool, error) {
-	var record Record
-	if err := s.controller.Local().GetJSON(ctx, localdisk.BucketDecisionCache, clientIP, &record); err != nil {
+	var (
+		record Record
+		found  bool
+	)
+	if err := s.controller.Local().ForKeyJSON(ctx, localdisk.BucketDecisionCache, clientIP, func(raw []byte) error {
+		var candidate Record
+		if err := json.Unmarshal(raw, &candidate); err != nil {
+			return err
+		}
+		if !found || candidate.UpdatedAt.After(record.UpdatedAt) {
+			record = candidate
+			found = true
+		}
+		return nil
+	}); err != nil {
 		if errors.Is(err, localdisk.ErrNotFound) {
 			return Record{}, false, nil
 		}
 		return Record{}, false, err
 	}
-	return record, true, nil
+	return record, found, nil
 }
 
 func (s *Service) upsertMongo(ctx context.Context, client *mongostore.Client, record Record) error {

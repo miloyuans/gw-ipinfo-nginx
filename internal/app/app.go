@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -28,6 +30,7 @@ import (
 	"gw-ipinfo-nginx/internal/realip"
 	"gw-ipinfo-nginx/internal/reporting"
 	"gw-ipinfo-nginx/internal/routing"
+	"gw-ipinfo-nginx/internal/runtimex"
 	"gw-ipinfo-nginx/internal/server"
 	"gw-ipinfo-nginx/internal/shortcircuit"
 	"gw-ipinfo-nginx/internal/storage"
@@ -55,6 +58,12 @@ func New(configPath string) (*Application, error) {
 	logger := logging.New(cfg.Logging)
 	metricsRegistry := metrics.NewRegistry()
 	metricSet := metrics.NewGatewayMetrics(metricsRegistry)
+
+	cfg.Storage.LocalPath = resolveLocalStoragePath(cfg.Storage.LocalPath)
+	logger.Info("local_storage_path_resolved",
+		"event", "local_storage_path_resolved",
+		"path", cfg.Storage.LocalPath,
+	)
 
 	localStore, err := localdisk.Open(cfg.Storage.LocalPath)
 	if err != nil {
@@ -201,6 +210,14 @@ func New(configPath string) (*Application, error) {
 }
 
 func (a *Application) Run(ctx context.Context) error {
+	return a.run(ctx, nil)
+}
+
+func (a *Application) RunWithListener(ctx context.Context, listener net.Listener) error {
+	return a.run(ctx, listener)
+}
+
+func (a *Application) run(ctx context.Context, listener net.Listener) error {
 	errCh := make(chan error, len(a.alertWorkers)+2)
 
 	if a.startReplayLoop && a.storageControl != nil {
@@ -220,7 +237,13 @@ func (a *Application) Run(ctx context.Context) error {
 	}
 	go func() {
 		a.logger.Info("gateway_listening", "event", "gateway_listening", "addr", a.server.Addr)
-		if err := a.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		var err error
+		if listener != nil {
+			err = a.server.Serve(listener)
+		} else {
+			err = a.server.ListenAndServe()
+		}
+		if err != nil && err != http.ErrServerClosed {
 			errCh <- err
 		}
 	}()
@@ -519,6 +542,9 @@ func (h *GatewayHandler) auditRecord(req *http.Request, requestID string, servic
 }
 
 func workerID() string {
+	if value := runtimex.WorkerScope(); value != "" {
+		return value
+	}
 	if value := os.Getenv("POD_NAME"); value != "" {
 		return value
 	}
@@ -526,4 +552,23 @@ func workerID() string {
 		return value
 	}
 	return "gw-ipinfo-nginx-worker"
+}
+
+func resolveLocalStoragePath(path string) string {
+	scope := runtimex.WorkerScope()
+	if scope == "" {
+		return path
+	}
+
+	clean := filepath.Clean(path)
+	if strings.Contains(clean, scope) {
+		return clean
+	}
+
+	dir := filepath.Dir(clean)
+	base := filepath.Base(clean)
+	if dir == "." || dir == "" {
+		return filepath.Join(scope, base)
+	}
+	return filepath.Join(dir, scope, base)
 }

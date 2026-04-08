@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"time"
@@ -38,6 +39,12 @@ type ServerConfig struct {
 	IdleTimeout     time.Duration `yaml:"idle_timeout"`
 	ShutdownTimeout time.Duration `yaml:"shutdown_timeout"`
 	DenyStatusCode  int           `yaml:"deny_status_code"`
+	Prefork         PreforkConfig `yaml:"prefork"`
+}
+
+type PreforkConfig struct {
+	Enabled   bool `yaml:"enabled"`
+	Processes int  `yaml:"processes"`
 }
 
 type RealIPConfig struct {
@@ -279,6 +286,12 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Server.DenyStatusCode == 0 {
 		c.Server.DenyStatusCode = 403
+	}
+	if c.Server.Prefork.Enabled && c.Server.Prefork.Processes == 0 {
+		c.Server.Prefork.Processes = runtime.NumCPU()
+		if c.Server.Prefork.Processes <= 0 {
+			c.Server.Prefork.Processes = 1
+		}
 	}
 
 	if c.RealIP.UntrustedProxyAction == "" {
@@ -525,6 +538,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Server.DenyStatusCode < 400 || c.Server.DenyStatusCode > 599 {
 		errs = append(errs, errors.New("server.deny_status_code must be a 4xx/5xx code"))
+	}
+	if c.Server.Prefork.Processes < 0 {
+		errs = append(errs, errors.New("server.prefork.processes must be >= 0"))
+	}
+	if c.Server.Prefork.Enabled && c.Server.Prefork.Processes <= 0 {
+		errs = append(errs, errors.New("server.prefork.processes must be > 0 when server.prefork.enabled is true"))
 	}
 
 	if !slices.Contains([]string{"deny", "use_remote_addr"}, c.RealIP.UntrustedProxyAction) {

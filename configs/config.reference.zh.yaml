@@ -10,6 +10,11 @@ server:
   idle_timeout: 60s
   shutdown_timeout: 15s
   deny_status_code: 403
+  prefork:
+    # Linux 可选 prefork 多进程监听模式。
+    # 关闭时使用单进程 + goroutine 并发；开启后会按下面的 processes 派生多个工作进程。
+    enabled: false
+    processes: 1
 
 real_ip:
   # 当前主线默认接收所有入口流量，不先校验 CDN 来源。
@@ -169,7 +174,10 @@ reports:
   replay_batch_size: 1000
 
 storage:
-  # 本地降级数据库路径；Docker / K8s 都建议挂载到持久目录
+  # 本地降级数据库路径；Docker / K8s 都建议挂载到持久目录。
+  # 当前主线会在运行时自动按 Pod / prefork worker 维度做本地分片，
+  # 配置里保持统一路径即可，不需要手工按 Pod 区分。
+  # 每个 worker 只写自己的分片文件，但会跨 worker 只读扫描共享目录中的其它分片。
   local_path: "/data/shared/gw-ipinfo-nginx.db"
   replay_interval: 30s
   mongo_probe_interval: 10s
