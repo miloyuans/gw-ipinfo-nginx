@@ -11,13 +11,15 @@ import (
 	"gw-ipinfo-nginx/internal/config"
 )
 
+const soReusePort = 0x0f
+
 func NewListener(ctx context.Context, cfg config.ServerConfig) (net.Listener, error) {
 	lc := net.ListenConfig{
 		Control: func(network, address string, c syscall.RawConn) error {
 			var controlErr error
 			if err := c.Control(func(fd uintptr) {
 				if cfg.Prefork.Enabled {
-					if err := syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEPORT, 1); err != nil {
+					if err := syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, soReusePort, 1); err != nil {
 						controlErr = err
 						return
 					}
