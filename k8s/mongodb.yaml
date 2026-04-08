@@ -8,7 +8,7 @@ spec:
   type: ReplicaSet
   version: "8.0.0"
 
-  # ==================== 存储配置（必须使用这个方式） ====================
+  # ==================== 存储配置（正确写法） ====================
   statefulSet:
     spec:
       volumeClaimTemplates:
@@ -16,12 +16,21 @@ spec:
             name: data
           spec:
             accessModes: ["ReadWriteOnce"]
-            storageClassName: mongodb-efs-us
+            storageClassName: mongodb-efs-us        # ← 必须在这里明确指定
             resources:
               requests:
                 storage: 30Gi
 
-  # ==================== 认证（生产推荐） ====================
+        - metadata:
+            name: logs                              # Operator 默认会创建 logs volume
+          spec:
+            accessModes: ["ReadWriteOnce"]
+            storageClassName: mongodb-efs-us        # ← 同样必须指定
+            resources:
+              requests:
+                storage: 5Gi                        # logs 通常不需要太大
+
+  # ==================== 认证 ====================
   security:
     authentication:
       modes: ["SCRAM"]
@@ -38,7 +47,7 @@ spec:
           db: admin
       scramCredentialsSecretName: gw-mongodb-gwadmin-scram
 
-  # ==================== 资源限制（推荐根据节点调整） ====================
+  # ==================== 资源配置 ====================
   statefulSet:
     spec:
       template:
