@@ -36,13 +36,32 @@ ipinfo:
   include_residential_proxy: true
 
 mongo:
-  # 生产建议使用 Kubernetes Operator 社区版 3 节点副本集 URI。
-  # 即使 Mongo 暂时不可用，网关也会自动降级到本地磁盘继续服务。
-  # 如果本地联调阶段不想接 Mongo，也可以留空，系统会以 localdisk 模式运行。
+  # 如果是单机普通 mongod，建议：
+  # mongodb://user:pass@host:27017/gw_ipinfo_nginx?authSource=gw_ipinfo_nginx&directConnection=true&retryWrites=false
+  #
+  # 如果是单节点副本集，并且 rs.status() 明确是 PRIMARY，且副本集成员地址对网关 Pod 可达，
+  # 可以继续使用：
+  # mongodb://user:pass@host:27017/gw_ipinfo_nginx?authSource=gw_ipinfo_nginx&replicaSet=mongodb-rs&retryWrites=true&w=majority
+  #
+  # 生产推荐还是 3 节点副本集。即使 Mongo 暂时不可用，网关也会自动降级到本地磁盘继续服务。
   uri: "${MONGO_URI}"
   database: "${MONGO_APP_DATABASE}"
   connect_timeout: 5s
-  operation_timeout: 3s
+  # connect_timeout 只管建连；operation_timeout 是仓库层单次操作上下文超时；
+  # timeout 是 Mongo Driver 级整体操作超时。
+  operation_timeout: 5s
+  timeout: 10s
+  # maxOpenConns 会映射为 Mongo Driver 的 maxPoolSize，适合习惯 database/sql 命名的人。
+  maxOpenConns: 200
+  # maxIdleConns 不是 Mongo Driver 原生参数，这里兼容映射到“保温连接池”思路，
+  # 会近似折算为 minPoolSize。
+  maxIdleConns: 50
+  # 以下是 Mongo Driver 原生池参数，更适合高并发网关。
+  minPoolSize: 20
+  maxConnecting: 16
+  # connMaxLifetime 也不是 Mongo Driver 原生参数，这里兼容映射为 maxConnIdleTime。
+  connMaxLifetime: 5m
+  maxConnIdleTime: 5m
 
 cache:
   l1:

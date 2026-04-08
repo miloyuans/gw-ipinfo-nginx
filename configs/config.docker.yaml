@@ -30,7 +30,14 @@ mongo:
   uri: "mongodb://mongo:27017"
   database: "gw_ipinfo_nginx"
   connect_timeout: 5s
-  operation_timeout: 3s
+  operation_timeout: 5s
+  timeout: 10s
+  maxOpenConns: 100
+  maxIdleConns: 20
+  minPoolSize: 10
+  maxConnecting: 8
+  connMaxLifetime: 5m
+  maxConnIdleTime: 5m
 
 cache:
   l1:

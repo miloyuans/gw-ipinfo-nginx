@@ -45,6 +45,38 @@
 
 Mongo 是共享缓存和共享 outbox 的首选存储，但不是主链路可用性的单点。
 
+### 单机 Mongo、单节点副本集和 `retryWrites`
+
+`retryWrites=false` 不是“不能高并发”，而是“对单机普通 mongod 更稳”的默认建议。
+
+- 如果你是单机普通 Mongo：
+  - 推荐 URI 使用 `directConnection=true&retryWrites=false`
+  - 因为它不是副本集，`replicaSet=...` 和 `w=majority` 没有实际收益，反而更容易在拓扑发现异常时触发 `ReplicaSetNoPrimary`
+- 如果你是单节点副本集：
+  - 只有在 `rs.status()` 明确显示 `PRIMARY`
+  - 且 `rs.conf()` 中成员地址不是 `127.0.0.1/localhost`
+  - 且网关 Pod 能访问该成员地址
+  - 才建议使用 `replicaSet=mongodb-rs&retryWrites=true&w=majority`
+
+当前代码已经支持这些 Mongo 连接池参数：
+
+- `mongo.connect_timeout`
+- `mongo.operation_timeout`
+- `mongo.timeout`
+- `mongo.maxOpenConns`，会映射为 Mongo Driver 的 `maxPoolSize`
+- `mongo.maxIdleConns`，作为兼容别名，近似映射为 `minPoolSize`
+- `mongo.minPoolSize`
+- `mongo.maxConnecting`
+- `mongo.connMaxLifetime`，作为兼容别名，近似映射为 `maxConnIdleTime`
+- `mongo.maxConnIdleTime`
+
+注意：`maxIdleConns` 和 `connMaxLifetime` 仍然只是兼容别名，不是 Mongo Go Driver 的原生参数。生产里更建议直接用：
+
+- `maxPoolSize`
+- `minPoolSize`
+- `maxConnecting`
+- `maxConnIdleTime`
+
 当 Mongo 不可用时：
 
 - 网关继续服务，不因为 Mongo 连接失败退出。

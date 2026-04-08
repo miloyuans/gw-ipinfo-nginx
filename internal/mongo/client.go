@@ -21,6 +21,21 @@ func Connect(ctx context.Context, cfg config.MongoConfig) (*Client, error) {
 	clientOptions := options.Client().
 		ApplyURI(cfg.URI).
 		SetConnectTimeout(cfg.ConnectTimeout)
+	if cfg.Timeout > 0 {
+		clientOptions.SetTimeout(cfg.Timeout)
+	}
+	if cfg.MaxPoolSize > 0 {
+		clientOptions.SetMaxPoolSize(cfg.MaxPoolSize)
+	}
+	if cfg.MinPoolSize > 0 {
+		clientOptions.SetMinPoolSize(cfg.MinPoolSize)
+	}
+	if cfg.MaxConnecting > 0 {
+		clientOptions.SetMaxConnecting(cfg.MaxConnecting)
+	}
+	if cfg.MaxConnIdleTime > 0 {
+		clientOptions.SetMaxConnIdleTime(cfg.MaxConnIdleTime)
+	}
 
 	client, err := mongo.Connect(ctx, clientOptions)
 	if err != nil {

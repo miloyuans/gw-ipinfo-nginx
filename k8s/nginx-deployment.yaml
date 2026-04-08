@@ -1,17 +1,17 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: global-googleplay-luodiye
+  name: global-googleplay-luodiye-01
   namespace: area
   labels:
-    app: global-googleplay-luodiye
+    app: global-googleplay-luodiye-01
 spec:
   progressDeadlineSeconds: 600
-  replicas: 5
+  replicas: 1
   revisionHistoryLimit: 10
   selector:
     matchLabels:
-      app: global-googleplay-luodiye
+      app: global-googleplay-luodiye-01
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -20,7 +20,7 @@ spec:
   template:
     metadata:
       labels:
-        app: global-googleplay-luodiye
+        app: global-googleplay-luodiye-01
     spec:
       topologySpreadConstraints:
         - maxSkew: 1
@@ -28,10 +28,10 @@ spec:
           whenUnsatisfiable: ScheduleAnyway
           labelSelector:
             matchLabels:
-              app: global-googleplay-luodiye
+              app: global-googleplay-luodiye-01
       containers:
         - name: gw-ipinfo-nginx-gateway
-          image: your-registry/gw-ipinfo-nginx:latest
+          image: 582998837184.dkr.ecr.us-west-1.amazonaws.com/international/gw-ipinfo-nginx:v1.0.0
           imagePullPolicy: IfNotPresent
           args:
             - "-config"
@@ -111,4 +111,4 @@ spec:
             name: global-luodiye-nginx-conf
         - name: webroot
           persistentVolumeClaim:
-            claimName: global-googleplay-luodiye-pvc
+            claimName: global-googleplay-luodiye-01-pvc

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLoadAllowsStageOneModeWithoutMongo(t *testing.T) {
@@ -159,6 +160,97 @@ alerts:
 	}
 	if !cfg.RealIP.TrustAllSources {
 		t.Fatal("RealIP.TrustAllSources = false, want true by default when trusted_proxy_cidrs is empty")
+	}
+}
+
+func TestLoadMapsMongoMaxOpenConnsToMaxPoolSize(t *testing.T) {
+	content := `
+server:
+  listen_address: ":8080"
+routing:
+  default_service: default
+  services:
+    - name: default
+      target_url: "http://127.0.0.1:8081"
+security:
+  ua:
+    enabled: true
+  accept_language:
+    require_header: false
+  geo:
+    default_action: deny
+    whitelist:
+      US: {}
+  privacy:
+    deny_by_default: true
+mongo:
+  uri: "mongodb://127.0.0.1:27017"
+  database: "gw_ipinfo_nginx"
+  maxOpenConns: 200
+ipinfo:
+  enabled: false
+alerts:
+  telegram:
+    enabled: false
+  delivery:
+    worker_enabled: false
+`
+	path := writeConfig(t, content)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Mongo.MaxPoolSize != 200 {
+		t.Fatalf("Mongo.MaxPoolSize = %d, want 200", cfg.Mongo.MaxPoolSize)
+	}
+}
+
+func TestLoadMapsMongoCompatibilityPoolAliases(t *testing.T) {
+	content := `
+server:
+  listen_address: ":8080"
+routing:
+  default_service: default
+  services:
+    - name: default
+      target_url: "http://127.0.0.1:8081"
+security:
+  ua:
+    enabled: true
+  accept_language:
+    require_header: false
+  geo:
+    default_action: deny
+    whitelist:
+      US: {}
+  privacy:
+    deny_by_default: true
+mongo:
+  uri: "mongodb://127.0.0.1:27017"
+  database: "gw_ipinfo_nginx"
+  maxOpenConns: 200
+  maxIdleConns: 50
+  connMaxLifetime: 5m
+ipinfo:
+  enabled: false
+alerts:
+  telegram:
+    enabled: false
+  delivery:
+    worker_enabled: false
+`
+	path := writeConfig(t, content)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Mongo.MinPoolSize != 50 {
+		t.Fatalf("Mongo.MinPoolSize = %d, want 50", cfg.Mongo.MinPoolSize)
+	}
+	if cfg.Mongo.MaxConnIdleTime != 5*time.Minute {
+		t.Fatalf("Mongo.MaxConnIdleTime = %v, want 5m", cfg.Mongo.MaxConnIdleTime)
 	}
 }
 

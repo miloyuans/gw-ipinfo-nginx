@@ -31,7 +31,19 @@ mongo:
   uri: "${MONGO_URI}"
   database: "${MONGO_APP_DATABASE}"
   connect_timeout: 5s
-  operation_timeout: 3s
+  operation_timeout: 5s
+  timeout: 10s
+  # maxOpenConns 会自动映射到 Mongo Driver 的 maxPoolSize。
+  # 如果你更习惯 Mongo 原生命名，也可以直接写 maxPoolSize。
+  maxOpenConns: 200
+  # 兼容 database/sql 风格配置；会近似映射到 minPoolSize，表示保留一定热连接。
+  maxIdleConns: 50
+  minPoolSize: 20
+  maxConnecting: 16
+  # Mongo Driver 没有 database/sql 风格的 maxIdleConns / connMaxLifetime。
+  # connMaxLifetime 会兼容映射到更接近的 maxConnIdleTime。
+  connMaxLifetime: 5m
+  maxConnIdleTime: 5m
 
 cache:
   l1:

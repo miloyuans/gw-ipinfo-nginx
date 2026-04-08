@@ -63,6 +63,14 @@ type MongoConfig struct {
 	Database         string        `yaml:"database"`
 	ConnectTimeout   time.Duration `yaml:"connect_timeout"`
 	OperationTimeout time.Duration `yaml:"operation_timeout"`
+	Timeout          time.Duration `yaml:"timeout"`
+	MaxPoolSize      uint64        `yaml:"maxPoolSize"`
+	MaxOpenConns     uint64        `yaml:"maxOpenConns"`
+	MaxIdleConns     uint64        `yaml:"maxIdleConns"`
+	MinPoolSize      uint64        `yaml:"minPoolSize"`
+	MaxConnecting    uint64        `yaml:"maxConnecting"`
+	MaxConnIdleTime  time.Duration `yaml:"maxConnIdleTime"`
+	ConnMaxLifetime  time.Duration `yaml:"connMaxLifetime"`
 }
 
 type CacheConfig struct {
@@ -310,6 +318,18 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Mongo.OperationTimeout == 0 {
 		c.Mongo.OperationTimeout = 3 * time.Second
+	}
+	if c.Mongo.MaxPoolSize == 0 && c.Mongo.MaxOpenConns > 0 {
+		c.Mongo.MaxPoolSize = c.Mongo.MaxOpenConns
+	}
+	if c.Mongo.MinPoolSize == 0 && c.Mongo.MaxIdleConns > 0 {
+		c.Mongo.MinPoolSize = c.Mongo.MaxIdleConns
+		if c.Mongo.MaxPoolSize > 0 && c.Mongo.MinPoolSize > c.Mongo.MaxPoolSize {
+			c.Mongo.MinPoolSize = c.Mongo.MaxPoolSize
+		}
+	}
+	if c.Mongo.MaxConnIdleTime == 0 && c.Mongo.ConnMaxLifetime > 0 {
+		c.Mongo.MaxConnIdleTime = c.Mongo.ConnMaxLifetime
 	}
 
 	if c.Cache.L1.MaxEntries == 0 {
@@ -598,6 +618,18 @@ func (c *Config) Validate() error {
 	}
 	if strings.TrimSpace(c.Mongo.Database) != "" && strings.TrimSpace(c.Mongo.URI) == "" {
 		errs = append(errs, errors.New("mongo.uri is required when mongo.database is set"))
+	}
+	if c.Mongo.Timeout < 0 {
+		errs = append(errs, errors.New("mongo.timeout must be >= 0"))
+	}
+	if c.Mongo.MaxPoolSize > 0 && c.Mongo.MinPoolSize > c.Mongo.MaxPoolSize {
+		errs = append(errs, errors.New("mongo.minPoolSize must be <= mongo.maxPoolSize"))
+	}
+	if c.Mongo.MaxConnecting > 0 && c.Mongo.MaxPoolSize > 0 && c.Mongo.MaxConnecting > c.Mongo.MaxPoolSize {
+		errs = append(errs, errors.New("mongo.maxConnecting must be <= mongo.maxPoolSize"))
+	}
+	if c.Mongo.MaxConnIdleTime < 0 {
+		errs = append(errs, errors.New("mongo.maxConnIdleTime must be >= 0"))
 	}
 	if c.Alerts.Telegram.Enabled {
 		if strings.TrimSpace(c.Alerts.Telegram.BotToken) == "" {

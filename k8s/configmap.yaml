@@ -26,19 +26,26 @@ data:
 
     ipinfo:
       enabled: true
-      base_url: "https://api.ipinfo.io"
-      lookup_path_template: "/lookup/%s"
-      token: "${IPINFO_TOKEN}"
+      base_url: 'https://api.ipinfo.io'
+      lookup_path_template: '/lookup/%s'
+      token: '${IPINFO_TOKEN}'
       timeout: 2s
       max_retries: 2
       retry_backoff: 250ms
       include_residential_proxy: true
 
     mongo:
-      uri: "${MONGO_URI}"
-      database: "gw_ipinfo_nginx"
+      uri: '${MONGO_URI}'
+      database: 'gw_ipinfo_nginx'
       connect_timeout: 5s
-      operation_timeout: 3s
+      operation_timeout: 5s
+      timeout: 10s
+      maxOpenConns: 200
+      maxIdleConns: 50
+      minPoolSize: 20
+      maxConnecting: 16
+      connMaxLifetime: 5m
+      maxConnIdleTime: 5m
 
     cache:
       l1:
@@ -55,16 +62,21 @@ data:
       short_circuit_ttl: 10h
       local_fallback_ttl: 24h
       mongo_collections:
-        ip_cache: "ip_risk_cache"
-        decision_cache: "decision_short_circuit_cache"
-        alert_outbox: "alerts_outbox"
-        alert_dedupe: "alerts_dedupe"
-        report_events: "request_reports_daily"
+        ip_cache: 'ip_risk_cache'
+        decision_cache: 'decision_short_circuit_cache'
+        alert_outbox: 'alerts_outbox'
+        alert_dedupe: 'alerts_dedupe'
+        report_events: 'request_reports_daily'
 
     security:
       ua:
         enabled: true
-        deny_keywords: ["bot", "crawler", "spider", "facebookexternalhit", "facebot"]
+        deny_keywords:
+          - 'bot'
+          - 'crawler'
+          - 'spider'
+          - 'facebookexternalhit'
+          - 'facebot'
         deny_patterns: []
       accept_language:
         require_header: true
@@ -72,30 +84,32 @@ data:
           default:
             allow_missing: false
       geo:
-        default_action: "deny"
+        default_action: 'deny'
         whitelist:
-          US: {}
+          US:
+            cities: []
       privacy:
         deny_by_default: true
         allow_types: []
         enable_residential_proxy: true
 
     routing:
-      default_service: "default"
+      default_service: 'default'
       services:
-        - name: "default"
-          match_path_prefixes: ["/"]
-          target_url: "http://127.0.0.1:80"
+        - name: 'default'
+          match_path_prefixes:
+            - '/'
+          target_url: 'http://127.0.0.1:80'
           preserve_host: true
 
     alerts:
       telegram:
         enabled: true
-        bot_token: "${TELEGRAM_BOT_TOKEN}"
-        chat_id: "${TELEGRAM_CHAT_ID}"
-        api_base_url: "https://api.telegram.org"
+        bot_token: '${TELEGRAM_BOT_TOKEN}'
+        chat_id: '${TELEGRAM_CHAT_ID}'
+        api_base_url: 'https://api.telegram.org'
         timeout: 5s
-        parse_mode: ""
+        parse_mode: ''
         mask_query: true
         include_user_agent: true
       delivery:
@@ -112,8 +126,8 @@ data:
 
     reports:
       enabled: false
-      timezone: "Asia/Shanghai"
-      daily_send_time: "09:00"
+      timezone: 'Asia/Shanghai'
+      daily_send_time: '09:00'
       lookback: 24h
       top_n: 10
       include_csv: true
@@ -123,7 +137,7 @@ data:
       replay_batch_size: 1000
 
     storage:
-      local_path: "/data/shared/gw-ipinfo-nginx.db"
+      local_path: '/data/shared/gw-ipinfo-nginx.db'
       replay_interval: 30s
       mongo_probe_interval: 10s
       replay_batch_size: 500
@@ -143,17 +157,17 @@ data:
       proxy_expect_continue_timeout: 1s
 
     deny_page:
-      title: "Access Unavailable"
-      heading: "Request Blocked"
-      message: "Your request did not pass the gateway security checks."
-      hint: "If you believe this is a mistake, contact support and provide the request ID."
+      title: 'Access Unavailable'
+      heading: 'Request Blocked'
+      message: 'Your request did not pass the gateway security checks.'
+      hint: 'If you believe this is a mistake, contact support and provide the request ID.'
 
     logging:
-      level: "info"
-      format: "json"
+      level: 'info'
+      format: 'json'
       redact_query: true
       access_log: true
 
     metrics:
       enabled: true
-      path: "/metrics"
+      path: '/metrics'
