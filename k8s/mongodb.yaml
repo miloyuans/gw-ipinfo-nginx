@@ -4,12 +4,11 @@ metadata:
   name: gw-mongodb
   namespace: mongodb
 spec:
-  members: 3                                      # 3副本高可用
+  members: 3
   type: ReplicaSet
   version: "8.0.0"
 
-  # 存储 - 使用你指定的 StorageClass
-  persistent: true
+  # ==================== 存储配置（必须使用这个方式） ====================
   statefulSet:
     spec:
       volumeClaimTemplates:
@@ -20,9 +19,9 @@ spec:
             storageClassName: mongodb-efs-us
             resources:
               requests:
-                storage: 30Gi                     # 建议 30Gi 起步，缓存数据会增长
+                storage: 30Gi
 
-  # 认证（生产必须开启）
+  # ==================== 认证（生产推荐） ====================
   security:
     authentication:
       modes: ["SCRAM"]
@@ -38,19 +37,14 @@ spec:
         - name: clusterMonitor
           db: admin
 
-  # 资源配置（根据项目推荐调整）
-  podSpec:
-    podTemplate:
-      spec:
-        containers:
-          - name: mongodb
-            resources:
-              requests:
-                cpu: "1"
-                memory: "3Gi"
-              limits:
-                cpu: "3"
-                memory: "6Gi"
-
-  # 推荐生产配置：跨节点分散
-  # topologySpreadConstraints 或 podAntiAffinity 可在此处通过 patch 添加
+  # ==================== 资源限制（推荐根据节点调整） ====================
+  statefulSet:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: mongod
+              resources:
+                requests:
+                  cpu: "2"
+                  memory: "2Gi"
