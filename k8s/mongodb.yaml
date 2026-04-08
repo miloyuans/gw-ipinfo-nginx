@@ -1,60 +1,86 @@
 apiVersion: mongodbcommunity.mongodb.com/v1
 kind: MongoDBCommunity
 metadata:
-  name: gw-mongodb
+  name: mongodb-rs
   namespace: mongodb
 spec:
   members: 3
   type: ReplicaSet
-  version: "8.0.0"
+  version: "8.0.20"
 
-  # ==================== 存储配置（正确写法） ====================
-  statefulSet:
-    spec:
-      volumeClaimTemplates:
-        - metadata:
-            name: data
-          spec:
-            accessModes: ["ReadWriteOnce"]
-            storageClassName: mongodb-efs-us        # ← 必须在这里明确指定
-            resources:
-              requests:
-                storage: 30Gi
-
-        - metadata:
-            name: logs                              # Operator 默认会创建 logs volume
-          spec:
-            accessModes: ["ReadWriteOnce"]
-            storageClassName: mongodb-efs-us        # ← 同样必须指定
-            resources:
-              requests:
-                storage: 5Gi                        # logs 通常不需要太大
-
-  # ==================== 认证 ====================
   security:
     authentication:
-      modes: ["SCRAM"]
+      modes:
+        - SCRAM
 
   users:
-    - name: gwadmin
+    - name: admin
       db: admin
       passwordSecretRef:
-        name: gw-mongodb-admin-password
+        name: mongodb-root-password
       roles:
-        - name: readWriteAnyDatabase
+        - name: root
           db: admin
-        - name: clusterMonitor
-          db: admin
-      scramCredentialsSecretName: gw-mongodb-gwadmin-scram
+      scramCredentialsSecretName: mongodb-rs-admin-scram
 
-  # ==================== 资源配置 ====================
+    - name: gw-ipinfo-app
+      db: gw_ipinfo_nginx
+      passwordSecretRef:
+        name: gw-ipinfo-app-password
+      roles:
+        - name: readWrite
+          db: gw_ipinfo_nginx
+      scramCredentialsSecretName: mongodb-rs-gw-ipinfo-app-scram
+
   statefulSet:
     spec:
+      serviceName: mongodb-rs-svc
+      selector:
+        matchLabels:
+          app.kubernetes.io/name: mongodb-rs
+          app.kubernetes.io/component: mongod
       template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: mongodb-rs
+            app.kubernetes.io/component: mongod
+            app.kubernetes.io/part-of: gw-ipinfo-stack
         spec:
-          containers:
-            - name: mongod
-              resources:
-                requests:
-                  cpu: "2"
-                  memory: "2Gi"
+          topologySpreadConstraints:
+            - maxSkew: 1
+              topologyKey: kubernetes.io/hostname
+              whenUnsatisfiable: DoNotSchedule
+              labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: mongodb-rs
+                  app.kubernetes.io/component: mongod
+
+          affinity:
+            podAntiAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchLabels:
+                      app.kubernetes.io/name: mongodb-rs
+                      app.kubernetes.io/component: mongod
+                  topologyKey: kubernetes.io/hostname
+
+      volumeClaimTemplates:
+        - metadata:
+            name: data-volume
+          spec:
+            storageClassName: mongodb-efs-us
+            accessModes:
+              - ReadWriteMany
+            resources:
+              requests:
+                storage: 100Gi
+
+        - metadata:
+            name: logs-volume
+          spec:
+            storageClassName: mongodb-efs-us
+            accessModes:
+              - ReadWriteMany
+            resources:
+              requests:
+                storage: 20Gi
