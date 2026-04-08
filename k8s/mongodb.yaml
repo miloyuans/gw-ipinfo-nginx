@@ -36,6 +36,7 @@ spec:
           db: admin
         - name: clusterMonitor
           db: admin
+      scramCredentialsSecretName: gw-mongodb-gwadmin-scram
 
   # ==================== 资源限制（推荐根据节点调整） ====================
   statefulSet:
