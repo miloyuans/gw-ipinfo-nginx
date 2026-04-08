@@ -1,9 +1,10 @@
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: gw-ipinfo-nginx
+  name: global-googleplay-luodiye
+  namespace: area
 spec:
   minAvailable: 1
   selector:
     matchLabels:
-      app: gw-ipinfo-nginx
+      app: global-googleplay-luodiye

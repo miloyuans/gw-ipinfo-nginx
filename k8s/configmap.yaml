@@ -2,6 +2,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: gw-ipinfo-nginx-config
+  namespace: area
 data:
   config.yaml: |
     server:
@@ -11,16 +12,18 @@ data:
       idle_timeout: 60s
       shutdown_timeout: 15s
       deny_status_code: 403
+
     real_ip:
-      trusted_proxy_cidrs:
-        - "173.245.48.0/20"
-        - "103.21.244.0/22"
+      trust_all_sources: true
       header_priority:
         - "CF-Connecting-IP"
+        - "CF-Connecting-IPv6"
         - "True-Client-IP"
         - "X-Real-IP"
         - "X-Forwarded-For"
       untrusted_proxy_action: "deny"
+      trusted_proxy_cidrs: []
+
     ipinfo:
       enabled: true
       base_url: "https://api.ipinfo.io"
@@ -30,25 +33,34 @@ data:
       max_retries: 2
       retry_backoff: 250ms
       include_residential_proxy: true
+
     mongo:
       uri: "${MONGO_URI}"
       database: "gw_ipinfo_nginx"
       connect_timeout: 5s
       operation_timeout: 3s
+
     cache:
       l1:
         enabled: true
-        max_entries: 10000
+        max_entries: 100000
+        short_circuit_entries: 200000
+        shards: 64
         cleanup_interval_sec: 300
       ttl:
         geo: 24h
         privacy: 6h
         residential_proxy: 6h
       failure_ttl: 5m
+      short_circuit_ttl: 10h
+      local_fallback_ttl: 24h
       mongo_collections:
         ip_cache: "ip_risk_cache"
+        decision_cache: "decision_short_circuit_cache"
         alert_outbox: "alerts_outbox"
         alert_dedupe: "alerts_dedupe"
+        report_events: "request_reports_daily"
+
     security:
       ua:
         enabled: true
@@ -67,13 +79,15 @@ data:
         deny_by_default: true
         allow_types: []
         enable_residential_proxy: true
+
     routing:
       default_service: "default"
       services:
         - name: "default"
           match_path_prefixes: ["/"]
-          target_url: "http://127.0.0.1:8081"
+          target_url: "http://127.0.0.1:80"
           preserve_host: true
+
     alerts:
       telegram:
         enabled: true
@@ -87,19 +101,59 @@ data:
       delivery:
         worker_enabled: true
         poll_interval: 2s
-        batch_size: 10
+        batch_size: 50
         claim_lease: 30s
         max_attempts: 8
         base_backoff: 5s
         max_backoff: 5m
-        rate_limit_per_second: 2
+        rate_limit_per_second: 5
       dedupe:
         window: 10m
+
+    reports:
+      enabled: false
+      timezone: "Asia/Shanghai"
+      daily_send_time: "09:00"
+      lookback: 24h
+      top_n: 10
+      include_csv: true
+      include_html: true
+      worker_enabled: true
+      poll_interval: 1m
+      replay_batch_size: 1000
+
+    storage:
+      local_path: "/data/shared/gw-ipinfo-nginx.db"
+      replay_interval: 30s
+      mongo_probe_interval: 10s
+      replay_batch_size: 500
+      replay_workers: 2
+
+    performance:
+      request_queue_size: 4096
+      async_write_queue_size: 16384
+      stats_queue_size: 32768
+      decision_workers: 4
+      alert_workers: 2
+      log_sample_rate: 1
+      proxy_max_idle_conns: 2048
+      proxy_max_idle_conns_per_host: 1024
+      proxy_idle_conn_timeout: 90s
+      proxy_response_header_timeout: 5s
+      proxy_expect_continue_timeout: 1s
+
+    deny_page:
+      title: "Access Unavailable"
+      heading: "Request Blocked"
+      message: "Your request did not pass the gateway security checks."
+      hint: "If you believe this is a mistake, contact support and provide the request ID."
+
     logging:
       level: "info"
       format: "json"
       redact_query: true
       access_log: true
+
     metrics:
       enabled: true
       path: "/metrics"

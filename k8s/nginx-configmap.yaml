@@ -1,19 +1,35 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: gw-ipinfo-nginx-nginx
+  name: global-luodiye-nginx-conf
+  namespace: area
 data:
   nginx.conf: |
     worker_processes auto;
-    events { worker_connections 1024; }
+    events {
+      worker_connections 2048;
+    }
     http {
+      include       /etc/nginx/mime.types;
+      default_type  application/octet-stream;
+      access_log    /dev/stdout;
+      error_log     /dev/stderr warn;
+      sendfile      on;
+      keepalive_timeout 65;
+
       server {
-        listen 8081;
-        location /healthz { return 200 "ok"; }
+        listen 80;
+        server_name _;
+
+        location = /healthz {
+          access_log off;
+          return 200 "ok";
+        }
+
         location / {
           root /usr/share/nginx/html;
           index index.html;
-          try_files $uri $uri/ /index.html;
+          try_files $uri $uri/ /googleplay/index.html;
         }
       }
     }

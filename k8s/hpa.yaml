@@ -1,12 +1,13 @@
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: gw-ipinfo-nginx
+  name: global-googleplay-luodiye
+  namespace: area
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: gw-ipinfo-nginx
+    name: global-googleplay-luodiye
   minReplicas: 2
   maxReplicas: 8
   metrics:
