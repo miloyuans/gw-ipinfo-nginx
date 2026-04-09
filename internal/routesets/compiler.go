@@ -26,9 +26,10 @@ type compileState struct {
 func LoadAndCompile(baseConfigPath string, cfg config.RouteSetsConfig, routing config.RoutingConfig, logger *slog.Logger) (*Compiled, error) {
 	state := &compileState{
 		compiled: &Compiled{
-			Enabled:            cfg.Default.Enabled || cfg.V1.Enabled || cfg.V2.Enabled,
+			Enabled:            cfg.Bypass.Enabled || cfg.Default.Enabled || cfg.V1.Enabled || cfg.V2.Enabled,
 			StrictHostControl:  cfg.StrictHostControl,
 			RedirectStatusCode: cfg.RedirectStatusCode,
+			BypassRulesByHost:  make(map[string][]CompiledRule),
 			SourceRulesByHost:  make(map[string][]CompiledRule),
 			TargetHostIndex:    make(map[string]TargetBinding),
 			AllowedHosts:       make(map[string]struct{}),
@@ -52,6 +53,11 @@ func LoadAndCompile(baseConfigPath string, cfg config.RouteSetsConfig, routing c
 		return state.compiled, nil
 	}
 
+	if cfg.Bypass.Enabled {
+		if err := state.compileBypass(resolveFilePath(baseConfigPath, cfg.Bypass.ConfigPath)); err != nil {
+			return nil, err
+		}
+	}
 	if cfg.Default.Enabled {
 		if err := state.compileDefault(resolveFilePath(baseConfigPath, cfg.Default.ConfigPath)); err != nil {
 			return nil, err
@@ -72,6 +78,10 @@ func LoadAndCompile(baseConfigPath string, cfg config.RouteSetsConfig, routing c
 		return nil, errors.Join(state.issues...)
 	}
 
+	for host, rules := range state.compiled.BypassRulesByHost {
+		sortRulesByPathLen(rules)
+		state.compiled.BypassRulesByHost[host] = rules
+	}
 	for host, rules := range state.compiled.SourceRulesByHost {
 		sortRulesByPathLen(rules)
 		state.compiled.SourceRulesByHost[host] = rules
@@ -84,6 +94,7 @@ func LoadAndCompile(baseConfigPath string, cfg config.RouteSetsConfig, routing c
 	if logger != nil {
 		logger.Info("route_sets_compiled",
 			"event", "route_sets_compiled",
+			"bypass_rules_count", state.compiled.Summary.BypassRulesCount,
 			"default_rules_count", state.compiled.Summary.DefaultRulesCount,
 			"v1_rules_count", state.compiled.Summary.V1RulesCount,
 			"v2_rules_count", state.compiled.Summary.V2RulesCount,
@@ -130,6 +141,26 @@ func (s *compileState) compileDefault(path string) error {
 	return nil
 }
 
+func (s *compileState) compileBypass(path string) error {
+	routes, err := loadBypassFile(path)
+	if err != nil {
+		return fmt.Errorf("load bypass routes %s: %w", path, err)
+	}
+	for _, raw := range routes {
+		rule, ok := s.normalizeBypassRoute(path, raw)
+		if !ok {
+			if s.failFast {
+				return errors.Join(s.issues...)
+			}
+			continue
+		}
+		if !s.addSourceRule(rule) && s.failFast {
+			return errors.Join(s.issues...)
+		}
+	}
+	return nil
+}
+
 func (s *compileState) compilePassKind(path string, kind Kind) error {
 	var (
 		routes []passRoute
@@ -160,6 +191,97 @@ func (s *compileState) compilePassKind(path string, kind Kind) error {
 		}
 	}
 	return nil
+}
+
+func (s *compileState) normalizeBypassRoute(path string, raw bypassRoute) (CompiledRule, bool) {
+	ruleID := strings.TrimSpace(raw.ID)
+	if ruleID == "" {
+		ruleID = string(KindBypass) + ":" + strings.TrimSpace(raw.Source.Host) + strings.TrimSpace(raw.Source.PathPrefix)
+	}
+	if existing, ok := s.ruleIDIndex[ruleID]; ok {
+		s.recordIssue(
+			"duplicate_route_id",
+			fmt.Errorf("duplicate route id %q", ruleID),
+			"file", path,
+			"rule_id", ruleID,
+			"left_file", existing.SourceFile,
+			"left_rule_id", existing.ID,
+		)
+		return CompiledRule{}, false
+	}
+
+	if strings.TrimSpace(raw.Source.Host) == "" ||
+		strings.TrimSpace(raw.Source.PathPrefix) == "" ||
+		strings.TrimSpace(raw.Backend.Service) == "" ||
+		strings.TrimSpace(raw.Backend.Host) == "" {
+		s.recordIssue(
+			"invalid_bypass_route_entry",
+			fmt.Errorf("invalid bypass route entry %q", ruleID),
+			"file", path,
+			"rule_id", ruleID,
+			"raw_entry", raw,
+		)
+		return CompiledRule{}, false
+	}
+
+	sourceHost, err := normalizeHost(raw.Source.Host)
+	if err != nil {
+		s.recordIssue(
+			"invalid_bypass_route_entry",
+			fmt.Errorf("invalid bypass source host for rule %q: %w", ruleID, err),
+			"file", path,
+			"rule_id", ruleID,
+			"raw_entry", raw,
+		)
+		return CompiledRule{}, false
+	}
+	sourcePrefix, err := normalizePathPrefix(raw.Source.PathPrefix)
+	if err != nil {
+		s.recordIssue(
+			"invalid_bypass_route_entry",
+			fmt.Errorf("invalid bypass path prefix for rule %q: %w", ruleID, err),
+			"file", path,
+			"rule_id", ruleID,
+			"raw_entry", raw,
+		)
+		return CompiledRule{}, false
+	}
+
+	backendService := strings.TrimSpace(raw.Backend.Service)
+	if _, ok := s.serviceNames[backendService]; !ok {
+		s.recordIssue(
+			"bypass_backend_service_not_found",
+			fmt.Errorf("bypass backend service %q not found for rule %q", backendService, ruleID),
+			"file", path,
+			"rule_id", ruleID,
+			"backend_service", backendService,
+		)
+		return CompiledRule{}, false
+	}
+	backendHost, err := normalizeHost(raw.Backend.Host)
+	if err != nil {
+		s.recordIssue(
+			"invalid_bypass_route_entry",
+			fmt.Errorf("invalid bypass backend host for rule %q: %w", ruleID, err),
+			"file", path,
+			"rule_id", ruleID,
+			"raw_entry", raw,
+		)
+		return CompiledRule{}, false
+	}
+
+	rule := CompiledRule{
+		Kind:             KindBypass,
+		ID:               ruleID,
+		SourceHost:       sourceHost,
+		SourcePathPrefix: sourcePrefix,
+		BackendService:   backendService,
+		BackendHost:      backendHost,
+		SourceFile:       path,
+		RawRule:          ruleID,
+	}
+	s.ruleIDIndex[rule.ID] = rule
+	return rule, true
 }
 
 func (s *compileState) normalizePassRoute(path string, kind Kind, raw passRoute) (CompiledRule, bool) {
@@ -249,10 +371,16 @@ func (s *compileState) addSourceRule(rule CompiledRule) bool {
 	}
 
 	s.sourceIndex[key] = rule
-	s.compiled.SourceRulesByHost[rule.SourceHost] = append(s.compiled.SourceRulesByHost[rule.SourceHost], rule)
+	if rule.Kind == KindBypass {
+		s.compiled.BypassRulesByHost[rule.SourceHost] = append(s.compiled.BypassRulesByHost[rule.SourceHost], rule)
+	} else {
+		s.compiled.SourceRulesByHost[rule.SourceHost] = append(s.compiled.SourceRulesByHost[rule.SourceHost], rule)
+	}
 	s.compiled.AllowedHosts[rule.SourceHost] = struct{}{}
 	s.sourceHostSet[rule.SourceHost] = struct{}{}
 	switch rule.Kind {
+	case KindBypass:
+		s.compiled.Summary.BypassRulesCount++
 	case KindDefault:
 		s.compiled.Summary.DefaultRulesCount++
 	case KindV1:

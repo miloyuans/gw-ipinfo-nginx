@@ -155,6 +155,7 @@ type RoutingConfig struct {
 }
 
 type RouteSetsConfig struct {
+	Bypass             RouteSetFileConfig `yaml:"bypass"`
 	Default            RouteSetFileConfig `yaml:"default"`
 	V1                 RouteSetFileConfig `yaml:"v1"`
 	V2                 RouteSetFileConfig `yaml:"v2"`
@@ -430,6 +431,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.RouteSets.Default.ConfigPath == "" {
 		c.RouteSets.Default.ConfigPath = "defaultroute.yaml"
+	}
+	if c.RouteSets.Bypass.ConfigPath == "" {
+		c.RouteSets.Bypass.ConfigPath = "bypassroute.yaml"
 	}
 	if c.RouteSets.V1.ConfigPath == "" {
 		c.RouteSets.V1.ConfigPath = "passroute_v1.yaml"

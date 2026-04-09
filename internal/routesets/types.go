@@ -16,6 +16,7 @@ import (
 type Kind string
 
 const (
+	KindBypass  Kind = "bypass"
 	KindDefault Kind = "default"
 	KindV1      Kind = "v1"
 	KindV2      Kind = "v2"
@@ -60,6 +61,7 @@ type TargetBinding struct {
 }
 
 type CompileSummary struct {
+	BypassRulesCount     int
 	DefaultRulesCount    int
 	V1RulesCount         int
 	V2RulesCount         int
@@ -69,14 +71,15 @@ type CompileSummary struct {
 }
 
 type Compiled struct {
-	Enabled          bool
-	StrictHostControl bool
+	Enabled            bool
+	StrictHostControl  bool
 	RedirectStatusCode int
-	SourceRulesByHost map[string][]CompiledRule
-	TargetHostIndex   map[string]TargetBinding
-	AllowedHosts      map[string]struct{}
-	RulesByID         map[string]CompiledRule
-	Summary           CompileSummary
+	BypassRulesByHost  map[string][]CompiledRule
+	SourceRulesByHost  map[string][]CompiledRule
+	TargetHostIndex    map[string]TargetBinding
+	AllowedHosts       map[string]struct{}
+	RulesByID          map[string]CompiledRule
+	Summary            CompileSummary
 }
 
 type Resolution struct {

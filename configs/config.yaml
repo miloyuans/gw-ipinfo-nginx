@@ -107,6 +107,9 @@ routing:
       preserve_host: true
 
 route_sets:
+  bypass:
+    enabled: false
+    config_path: "bypassroute.yaml"
   default:
     enabled: false
     config_path: "defaultroute.yaml"

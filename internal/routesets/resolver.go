@@ -22,6 +22,16 @@ func (c *Compiled) Resolve(req *http.Request) Resolution {
 		}
 	}
 
+	if rules := c.BypassRulesByHost[host]; len(rules) > 0 {
+		for _, rule := range rules {
+			if pathMatches(path, rule.SourcePathPrefix) {
+				result.MatchType = MatchSource
+				result.Rule = rule
+				return result
+			}
+		}
+	}
+
 	if rules := c.SourceRulesByHost[host]; len(rules) > 0 {
 		for _, rule := range rules {
 			if pathMatches(path, rule.SourcePathPrefix) {

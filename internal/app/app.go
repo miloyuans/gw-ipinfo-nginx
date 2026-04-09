@@ -392,16 +392,54 @@ func (h *GatewayHandler) serveWithRouteSets(w http.ResponseWriter, r *http.Reque
 
 func (h *GatewayHandler) serveSourceRoute(w http.ResponseWriter, r *http.Request, requestID string, start time.Time, fallbackService config.ServiceConfig, resolution routesets.Resolution) {
 	routeMeta := h.routeContextFromRule(resolution.Rule)
-	outcome := h.evaluateFullChain(r, fallbackService)
-	if !outcome.decision.Allowed {
-		h.finish(w, r, requestID, outcome.service, outcome.clientIP, outcome.ipContext, outcome.decision, start, outcome.state, routeMeta, responseAction{})
-		return
-	}
 
 	switch resolution.Rule.Kind {
+	case routesets.KindBypass:
+		service, ok := h.resolver.Service(resolution.Rule.BackendService)
+		if !ok {
+			h.finish(
+				w,
+				r,
+				requestID,
+				fallbackService,
+				"",
+				ipctx.Context{},
+				policy.Decision{Allowed: false, Result: "deny", Reason: "deny_route_not_found"},
+				start,
+				h.newFlowState(),
+				routeMeta,
+				responseAction{},
+			)
+			return
+		}
+		outcome := h.evaluateBypassChain(r, service)
+		h.finish(
+			w,
+			r,
+			requestID,
+			service,
+			outcome.clientIP,
+			outcome.ipContext,
+			outcome.decision,
+			start,
+			outcome.state,
+			routeMeta,
+			responseAction{upstreamHost: resolution.Rule.BackendHost},
+		)
+		return
 	case routesets.KindDefault:
+		outcome := h.evaluateFullChain(r, fallbackService)
+		if !outcome.decision.Allowed {
+			h.finish(w, r, requestID, outcome.service, outcome.clientIP, outcome.ipContext, outcome.decision, start, outcome.state, routeMeta, responseAction{})
+			return
+		}
 		h.finish(w, r, requestID, outcome.service, outcome.clientIP, outcome.ipContext, outcome.decision, start, outcome.state, routeMeta, responseAction{})
 	case routesets.KindV1:
+		outcome := h.evaluateFullChain(r, fallbackService)
+		if !outcome.decision.Allowed {
+			h.finish(w, r, requestID, outcome.service, outcome.clientIP, outcome.ipContext, outcome.decision, start, outcome.state, routeMeta, responseAction{})
+			return
+		}
 		token, expiresAt, err := h.routeRuntime.IssueV1Grant(resolution.Rule, outcome.clientIP, r.UserAgent())
 		if err != nil {
 			h.logger.Error("v1_grant_issue_failed",
@@ -470,6 +508,11 @@ func (h *GatewayHandler) serveSourceRoute(w http.ResponseWriter, r *http.Request
 			},
 		)
 	case routesets.KindV2:
+		outcome := h.evaluateFullChain(r, fallbackService)
+		if !outcome.decision.Allowed {
+			h.finish(w, r, requestID, outcome.service, outcome.clientIP, outcome.ipContext, outcome.decision, start, outcome.state, routeMeta, responseAction{})
+			return
+		}
 		redirectDecision := outcome.decision
 		redirectDecision.Reason = "allow_v2_redirect"
 		h.finish(
@@ -649,6 +692,70 @@ func (h *GatewayHandler) extractClientIP(r *http.Request) (string, *policy.Decis
 		return "", &decision, state
 	}
 	return clientIP, nil, state
+}
+
+func (h *GatewayHandler) evaluateBypassChain(r *http.Request, service config.ServiceConfig) evaluationResult {
+	state := h.newFlowState()
+	clientIP := ""
+	if extracted, err := h.realIPExtractor.Extract(r); err == nil {
+		clientIP = extracted
+	} else if h.logger != nil {
+		h.logger.Warn("bypass_real_ip_extract_failed",
+			"event", "bypass_real_ip_extract_failed",
+			"route_set_kind", "bypass",
+			"host", r.Host,
+			"path", r.URL.Path,
+			"error", err,
+		)
+	}
+
+	if requestDecision := h.policyEngine.EvaluateRequest(r, service.Name); requestDecision != nil {
+		return evaluationResult{
+			service:  service,
+			clientIP: clientIP,
+			decision: *requestDecision,
+			state:    state,
+		}
+	}
+
+	if clientIP == "" {
+		return evaluationResult{
+			service:  service,
+			clientIP: "",
+			decision: policy.Decision{Allowed: true, Result: "allow", Reason: "allow_bypass_no_real_ip"},
+			state:    state,
+		}
+	}
+
+	if h.lookupService != nil && h.cfg.IPInfo.Enabled {
+		state.ipinfoLookupAction = "start"
+		ipContext, cacheSource, lookupAction, lookupErr := h.lookupService.Lookup(r.Context(), clientIP)
+		state.cacheSource = cacheSource
+		state.ipinfoLookupAction = lookupAction
+		if lookupErr != nil {
+			return evaluationResult{
+				service:   service,
+				clientIP:  clientIP,
+				ipContext: ipContext,
+				decision:  policy.Decision{Allowed: true, Result: "allow", Reason: "allow_bypass_ipinfo_error"},
+				state:     state,
+			}
+		}
+		return evaluationResult{
+			service:   service,
+			clientIP:  clientIP,
+			ipContext: ipContext,
+			decision:  policy.Decision{Allowed: true, Result: "allow", Reason: "allow_bypass_route"},
+			state:     state,
+		}
+	}
+
+	return evaluationResult{
+		service:  service,
+		clientIP: clientIP,
+		decision: policy.Decision{Allowed: true, Result: "allow", Reason: "allow_bypass_route"},
+		state:    state,
+	}
 }
 
 func (h *GatewayHandler) evaluateFullChain(r *http.Request, service config.ServiceConfig) evaluationResult {
