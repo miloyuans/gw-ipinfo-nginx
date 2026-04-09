@@ -30,6 +30,7 @@ import (
 	"gw-ipinfo-nginx/internal/realip"
 	"gw-ipinfo-nginx/internal/reporting"
 	"gw-ipinfo-nginx/internal/routing"
+	"gw-ipinfo-nginx/internal/routesets"
 	"gw-ipinfo-nginx/internal/runtimex"
 	"gw-ipinfo-nginx/internal/server"
 	"gw-ipinfo-nginx/internal/shortcircuit"
@@ -109,6 +110,11 @@ func New(configPath string) (*Application, error) {
 		return nil, err
 	}
 	resolver := routing.NewResolver(cfg.Routing)
+	compiledRouteSets, err := routesets.LoadAndCompile(configPath, cfg.RouteSets, cfg.Routing, logger)
+	if err != nil {
+		return nil, fmt.Errorf("compile route sets: %w", err)
+	}
+	routeRuntime := routesets.NewRuntime(compiledRouteSets, cfg.RouteSets)
 	proxyManager, err := proxy.NewManager(cfg.Routing.Services, cfg.Perf, metricSet, logger)
 	if err != nil {
 		return nil, err
@@ -176,6 +182,7 @@ func New(configPath string) (*Application, error) {
 		controller:      storageControl,
 		realIPExtractor: realIPExtractor,
 		resolver:        resolver,
+		routeRuntime:    routeRuntime,
 		policyEngine:    policyEngine,
 		lookupService:   lookupService,
 		shortCircuit:    shortCircuitService,
@@ -281,6 +288,7 @@ type GatewayHandler struct {
 	controller      *storage.Controller
 	realIPExtractor *realip.Extractor
 	resolver        *routing.Resolver
+	routeRuntime    *routesets.Runtime
 	policyEngine    *policy.Engine
 	lookupService   *ipinfo.LookupService
 	shortCircuit    *shortcircuit.Service
@@ -290,56 +298,412 @@ type GatewayHandler struct {
 	denyResponder   *blockpage.Responder
 }
 
+type flowState struct {
+	cacheSource          ipctx.CacheSource
+	ipinfoLookupAction   string
+	dataSourceMode       string
+	shortCircuitHit      bool
+	shortCircuitSource   string
+	shortCircuitDecision string
+}
+
+type evaluationResult struct {
+	service  config.ServiceConfig
+	clientIP string
+	ipContext ipctx.Context
+	decision policy.Decision
+	state    flowState
+}
+
+type routeContext struct {
+	RouteSetKind     string
+	RouteID          string
+	SourceHost       string
+	SourcePathPrefix string
+	TargetHost       string
+	TargetPublicURL  string
+	BackendService   string
+	BackendHost      string
+	GrantStatus      string
+	GrantExpireAt    string
+}
+
+type responseAction struct {
+	redirectURL   string
+	redirectCode  int
+	cookie        *http.Cookie
+	upstreamHost  string
+}
+
 func (h *GatewayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	requestID := middleware.RequestID(r.Context())
-	service := h.resolver.Resolve(r)
-	cacheSource := ipctx.CacheSourceNone
-	ipinfoLookupAction := "disabled"
-	if h.lookupService != nil && h.cfg.IPInfo.Enabled {
-		ipinfoLookupAction = "start"
-	}
-	shortCircuitHit := false
-	shortCircuitSource := "none"
-	shortCircuitDecision := ""
-	dataSourceMode := string(h.controller.Mode())
+	fallbackService := h.resolver.Resolve(r)
 
+	if h.routeRuntime != nil && h.routeRuntime.Enabled() {
+		h.serveWithRouteSets(w, r, requestID, start, fallbackService)
+		return
+	}
+
+	outcome := h.evaluateFullChain(r, fallbackService)
+	h.finish(w, r, requestID, outcome.service, outcome.clientIP, outcome.ipContext, outcome.decision, start, outcome.state, routeContext{}, responseAction{})
+}
+
+func (h *GatewayHandler) serveWithRouteSets(w http.ResponseWriter, r *http.Request, requestID string, start time.Time, fallbackService config.ServiceConfig) {
+	resolution := h.routeRuntime.Resolve(r)
+	if resolution.DenyReason != "" {
+		h.finish(
+			w,
+			r,
+			requestID,
+			fallbackService,
+			"",
+			ipctx.Context{},
+			policy.Decision{Allowed: false, Result: "deny", Reason: resolution.DenyReason},
+			start,
+			h.newFlowState(),
+			h.routeContextFromResolution(resolution),
+			responseAction{},
+		)
+		return
+	}
+
+	switch resolution.MatchType {
+	case routesets.MatchSource:
+		h.serveSourceRoute(w, r, requestID, start, fallbackService, resolution)
+	case routesets.MatchTarget:
+		h.serveTargetRoute(w, r, requestID, start, fallbackService, resolution)
+	default:
+		h.finish(
+			w,
+			r,
+			requestID,
+			fallbackService,
+			"",
+			ipctx.Context{},
+			policy.Decision{Allowed: false, Result: "deny", Reason: "deny_route_not_found"},
+			start,
+			h.newFlowState(),
+			h.routeContextFromResolution(resolution),
+			responseAction{},
+		)
+	}
+}
+
+func (h *GatewayHandler) serveSourceRoute(w http.ResponseWriter, r *http.Request, requestID string, start time.Time, fallbackService config.ServiceConfig, resolution routesets.Resolution) {
+	routeMeta := h.routeContextFromRule(resolution.Rule)
+	outcome := h.evaluateFullChain(r, fallbackService)
+	if !outcome.decision.Allowed {
+		h.finish(w, r, requestID, outcome.service, outcome.clientIP, outcome.ipContext, outcome.decision, start, outcome.state, routeMeta, responseAction{})
+		return
+	}
+
+	switch resolution.Rule.Kind {
+	case routesets.KindDefault:
+		h.finish(w, r, requestID, outcome.service, outcome.clientIP, outcome.ipContext, outcome.decision, start, outcome.state, routeMeta, responseAction{})
+	case routesets.KindV1:
+		token, expiresAt, err := h.routeRuntime.IssueV1Grant(resolution.Rule, outcome.clientIP, r.UserAgent())
+		if err != nil {
+			h.logger.Error("v1_grant_issue_failed",
+				"event", "v1_grant_issue_failed",
+				"route_id", resolution.Rule.ID,
+				"target_host", resolution.Rule.TargetHost,
+				"request_id", requestID,
+				"error", err,
+			)
+			h.finish(
+				w,
+				r,
+				requestID,
+				outcome.service,
+				outcome.clientIP,
+				outcome.ipContext,
+				policy.Decision{Allowed: false, Result: "deny", Reason: "deny_v1_target_unauthorized"},
+				start,
+				outcome.state,
+				routeMeta,
+				responseAction{},
+			)
+			return
+		}
+		redirectURL, err := h.routeRuntime.BuildRedirectURL(resolution.Rule.TargetPublicURL, token)
+		if err != nil {
+			h.logger.Error("v1_redirect_build_failed",
+				"event", "v1_redirect_build_failed",
+				"route_id", resolution.Rule.ID,
+				"target_public_url", resolution.Rule.TargetPublicURL,
+				"request_id", requestID,
+				"error", err,
+			)
+			h.finish(
+				w,
+				r,
+				requestID,
+				outcome.service,
+				outcome.clientIP,
+				outcome.ipContext,
+				policy.Decision{Allowed: false, Result: "deny", Reason: "deny_v1_target_unauthorized"},
+				start,
+				outcome.state,
+				routeMeta,
+				responseAction{},
+			)
+			return
+		}
+		redirectDecision := outcome.decision
+		redirectDecision.Reason = "allow_v1_redirect"
+		routeMeta.GrantExpireAt = expiresAt.UTC().Format(time.RFC3339)
+		h.finish(
+			w,
+			r,
+			requestID,
+			outcome.service,
+			outcome.clientIP,
+			outcome.ipContext,
+			redirectDecision,
+			start,
+			outcome.state,
+			routeMeta,
+			responseAction{
+				redirectURL:  redirectURL,
+				redirectCode: h.routeRuntime.RedirectStatusCode(),
+			},
+		)
+	case routesets.KindV2:
+		redirectDecision := outcome.decision
+		redirectDecision.Reason = "allow_v2_redirect"
+		h.finish(
+			w,
+			r,
+			requestID,
+			outcome.service,
+			outcome.clientIP,
+			outcome.ipContext,
+			redirectDecision,
+			start,
+			outcome.state,
+			routeMeta,
+			responseAction{
+				redirectURL:  resolution.Rule.TargetPublicURL,
+				redirectCode: h.routeRuntime.RedirectStatusCode(),
+			},
+		)
+	default:
+		h.finish(w, r, requestID, outcome.service, outcome.clientIP, outcome.ipContext, outcome.decision, start, outcome.state, routeMeta, responseAction{})
+	}
+}
+
+func (h *GatewayHandler) serveTargetRoute(w http.ResponseWriter, r *http.Request, requestID string, start time.Time, fallbackService config.ServiceConfig, resolution routesets.Resolution) {
+	routeMeta := h.routeContextFromResolution(resolution)
+	service, ok := h.resolver.Service(resolution.Binding.BackendService)
+	if !ok {
+		h.finish(
+			w,
+			r,
+			requestID,
+			fallbackService,
+			"",
+			ipctx.Context{},
+			policy.Decision{Allowed: false, Result: "deny", Reason: "deny_route_not_found"},
+			start,
+			h.newFlowState(),
+			routeMeta,
+			responseAction{},
+		)
+		return
+	}
+
+	switch resolution.Binding.RuleKind {
+	case routesets.KindV1:
+		clientIP, extractDecision, state := h.extractClientIP(r)
+		if extractDecision != nil {
+			h.finish(w, r, requestID, service, "", ipctx.Context{}, *extractDecision, start, state, routeMeta, responseAction{})
+			return
+		}
+		grantResult := h.routeRuntime.ExchangeV1Target(r, resolution.Host, clientIP)
+		routeMeta.GrantStatus = string(grantResult.Status)
+		if !grantResult.ExpiresAt.IsZero() {
+			routeMeta.GrantExpireAt = grantResult.ExpiresAt.UTC().Format(time.RFC3339)
+		}
+		if grantResult.Rule.ID != "" {
+			routeMeta = h.routeContextFromRule(grantResult.Rule)
+			routeMeta.GrantStatus = string(grantResult.Status)
+			routeMeta.GrantExpireAt = grantResult.ExpiresAt.UTC().Format(time.RFC3339)
+			if resolvedService, exists := h.resolver.Service(grantResult.Rule.BackendService); exists {
+				service = resolvedService
+			}
+		}
+
+		switch grantResult.Status {
+		case routesets.GrantStatusQueryOK:
+			h.finish(
+				w,
+				r,
+				requestID,
+				service,
+				clientIP,
+				ipctx.Context{},
+				policy.Decision{Allowed: true, Result: "allow", Reason: "allow_v1_exchange"},
+				start,
+				state,
+				routeMeta,
+				responseAction{
+					redirectURL:  grantResult.Rule.TargetPublicURL,
+					redirectCode: h.routeRuntime.RedirectStatusCode(),
+					cookie:       h.routeRuntime.ExchangeCookie(grantResult.Token, grantResult.ExpiresAt),
+				},
+			)
+		case routesets.GrantStatusCookieOK:
+			h.finish(
+				w,
+				r,
+				requestID,
+				service,
+				clientIP,
+				ipctx.Context{},
+				policy.Decision{Allowed: true, Result: "allow", Reason: "allow_v1_shortcircuit"},
+				start,
+				state,
+				routeMeta,
+				responseAction{upstreamHost: grantResult.Rule.BackendHost},
+			)
+		case routesets.GrantStatusExpired:
+			h.finish(
+				w,
+				r,
+				requestID,
+				service,
+				clientIP,
+				ipctx.Context{},
+				policy.Decision{Allowed: false, Result: "deny", Reason: "deny_v1_target_expired"},
+				start,
+				state,
+				routeMeta,
+				responseAction{},
+			)
+		default:
+			h.finish(
+				w,
+				r,
+				requestID,
+				service,
+				clientIP,
+				ipctx.Context{},
+				policy.Decision{Allowed: false, Result: "deny", Reason: "deny_v1_target_unauthorized"},
+				start,
+				state,
+				routeMeta,
+				responseAction{},
+			)
+		}
+	case routesets.KindV2:
+		outcome := h.evaluateFullChain(r, service)
+		if outcome.decision.Allowed {
+			h.finish(
+				w,
+				r,
+				requestID,
+				service,
+				outcome.clientIP,
+				outcome.ipContext,
+				outcome.decision,
+				start,
+				outcome.state,
+				routeMeta,
+				responseAction{upstreamHost: resolution.Binding.BackendHost},
+			)
+			return
+		}
+		h.finish(w, r, requestID, service, outcome.clientIP, outcome.ipContext, outcome.decision, start, outcome.state, routeMeta, responseAction{})
+	default:
+		h.finish(
+			w,
+			r,
+			requestID,
+			service,
+			"",
+			ipctx.Context{},
+			policy.Decision{Allowed: false, Result: "deny", Reason: "deny_route_not_found"},
+			start,
+			h.newFlowState(),
+			routeMeta,
+			responseAction{},
+		)
+	}
+}
+
+func (h *GatewayHandler) newFlowState() flowState {
+	return flowState{
+		cacheSource:        ipctx.CacheSourceNone,
+		ipinfoLookupAction: "disabled",
+		shortCircuitSource: "none",
+		dataSourceMode:     string(h.controller.Mode()),
+	}
+}
+
+func (h *GatewayHandler) extractClientIP(r *http.Request) (string, *policy.Decision, flowState) {
+	state := h.newFlowState()
 	clientIP, err := h.realIPExtractor.Extract(r)
 	if err != nil {
 		decision := policy.Decision{Allowed: false, Result: "deny", Reason: "deny_real_ip_extract_failed"}
-		h.finish(w, r, requestID, service, "", cacheSource, ipctx.Context{}, decision, start, dataSourceMode, shortCircuitHit, shortCircuitSource, shortCircuitDecision, ipinfoLookupAction)
-		return
+		return "", &decision, state
+	}
+	return clientIP, nil, state
+}
+
+func (h *GatewayHandler) evaluateFullChain(r *http.Request, service config.ServiceConfig) evaluationResult {
+	clientIP, extractDecision, state := h.extractClientIP(r)
+	if extractDecision != nil {
+		return evaluationResult{
+			service:  service,
+			clientIP: "",
+			decision: *extractDecision,
+			state:    state,
+		}
 	}
 
 	if requestDecision := h.policyEngine.EvaluateRequest(r, service.Name); requestDecision != nil {
-		h.finish(w, r, requestID, service, clientIP, cacheSource, ipctx.Context{}, *requestDecision, start, dataSourceMode, shortCircuitHit, shortCircuitSource, shortCircuitDecision, ipinfoLookupAction)
-		return
+		return evaluationResult{
+			service:  service,
+			clientIP: clientIP,
+			decision: *requestDecision,
+			state:    state,
+		}
+	}
+
+	if h.lookupService != nil && h.cfg.IPInfo.Enabled {
+		state.ipinfoLookupAction = "start"
 	}
 
 	if h.shortCircuit != nil {
 		if record, source, ok := h.shortCircuit.Lookup(r.Context(), clientIP); ok {
-			shortCircuitHit = true
-			shortCircuitSource = string(source)
-			shortCircuitDecision = record.LastDecision
+			state.shortCircuitHit = true
+			state.shortCircuitSource = string(source)
+			state.shortCircuitDecision = record.LastDecision
 			record = h.shortCircuit.RememberShortCircuitHit(record)
-			ipContext := h.shortCircuit.IPContext(record)
-			decision := h.shortCircuit.Decision(record)
-			ipinfoLookupAction = "short_circuit_hit"
+			state.ipinfoLookupAction = "short_circuit_hit"
 			if h.metrics != nil {
 				h.metrics.ShortCircuit.Inc(metrics.Labels{
-					"source":   shortCircuitSource,
-					"decision": shortCircuitDecision,
+					"source":   state.shortCircuitSource,
+					"decision": state.shortCircuitDecision,
 				})
 			}
-			h.finish(w, r, requestID, service, clientIP, cacheSource, ipContext, decision, start, dataSourceMode, shortCircuitHit, shortCircuitSource, shortCircuitDecision, ipinfoLookupAction)
-			return
+			return evaluationResult{
+				service:   service,
+				clientIP:  clientIP,
+				ipContext: h.shortCircuit.IPContext(record),
+				decision:  h.shortCircuit.Decision(record),
+				state:     state,
+			}
 		}
 	}
 
-	var ipContext ipctx.Context
-	var lookupErr error
+	var (
+		ipContext ipctx.Context
+		lookupErr error
+	)
 	if h.lookupService != nil {
-		ipContext, cacheSource, ipinfoLookupAction, lookupErr = h.lookupService.Lookup(r.Context(), clientIP)
+		ipContext, state.cacheSource, state.ipinfoLookupAction, lookupErr = h.lookupService.Lookup(r.Context(), clientIP)
 	}
 
 	decision := policy.Decision{Allowed: true, Result: "allow", Reason: "allow_prechecks_passed"}
@@ -349,22 +713,29 @@ func (h *GatewayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if h.shortCircuit != nil {
 		record := h.shortCircuit.RememberDecision(clientIP, r.Host, safeURL(r, h.cfg.Logging.RedactQuery), r.UserAgent(), decision, &ipContext)
-		shortCircuitDecision = record.LastDecision
+		state.shortCircuitDecision = record.LastDecision
 	}
-	h.finish(w, r, requestID, service, clientIP, cacheSource, ipContext, decision, start, dataSourceMode, shortCircuitHit, shortCircuitSource, shortCircuitDecision, ipinfoLookupAction)
+
+	return evaluationResult{
+		service:   service,
+		clientIP:  clientIP,
+		ipContext: ipContext,
+		decision:  decision,
+		state:     state,
+	}
 }
 
-func (h *GatewayHandler) finish(w http.ResponseWriter, req *http.Request, requestID string, service config.ServiceConfig, clientIP string, cacheSource ipctx.CacheSource, ipContext ipctx.Context, decision policy.Decision, start time.Time, dataSourceMode string, shortCircuitHit bool, shortCircuitSource, shortCircuitDecision, ipinfoLookupAction string) {
+func (h *GatewayHandler) finish(w http.ResponseWriter, req *http.Request, requestID string, service config.ServiceConfig, clientIP string, ipContext ipctx.Context, decision policy.Decision, start time.Time, state flowState, routeMeta routeContext, action responseAction) {
 	if h.controller != nil {
-		dataSourceMode = string(h.controller.Mode())
+		state.dataSourceMode = string(h.controller.Mode())
 	}
 	if decision.AlertType != "" {
-		h.enqueueAlert(req, requestID, service.Name, clientIP, cacheSource, decision, &ipContext)
+		h.enqueueAlert(req, requestID, service.Name, clientIP, state.cacheSource, decision, &ipContext)
 	}
 	latency := time.Since(start)
 	h.observe(service.Name, decision, start)
 
-	record := h.auditRecord(req, requestID, service, clientIP, cacheSource, decision, &ipContext, latency, dataSourceMode, shortCircuitHit, shortCircuitSource, shortCircuitDecision, ipinfoLookupAction)
+	record := h.auditRecord(req, requestID, service, clientIP, state.cacheSource, decision, &ipContext, latency, state, routeMeta)
 	h.auditor.LogDecision(record)
 	h.trackReport(req, record)
 
@@ -380,7 +751,18 @@ func (h *GatewayHandler) finish(w http.ResponseWriter, req *http.Request, reques
 		)
 		return
 	}
-	h.proxyManager.ServeHTTP(w, req, service, clientIP, &ipContext)
+	if action.cookie != nil {
+		http.SetCookie(w, action.cookie)
+	}
+	if action.redirectURL != "" {
+		status := action.redirectCode
+		if status == 0 {
+			status = http.StatusFound
+		}
+		http.Redirect(w, req, action.redirectURL, status)
+		return
+	}
+	h.proxyManager.ServeHTTP(w, req, service, clientIP, &ipContext, action.upstreamHost)
 }
 
 func (h *GatewayHandler) enqueueAlert(req *http.Request, requestID, serviceName, clientIP string, cacheSource ipctx.CacheSource, decision policy.Decision, ipContext *ipctx.Context) {
@@ -425,6 +807,10 @@ func (h *GatewayHandler) trackReport(req *http.Request, record model.AuditRecord
 		Timestamp:            time.Now().UTC(),
 		ClientIP:             record.ClientIP,
 		ServiceName:          record.ServiceName,
+		RouteSetKind:         record.RouteSetKind,
+		RouteID:              record.RouteID,
+		SourceHost:           record.SourceHost,
+		TargetHost:           record.TargetHost,
 		Host:                 record.Host,
 		Path:                 record.Path,
 		RequestURL:           record.RequestURL,
@@ -510,26 +896,36 @@ func safeURL(req *http.Request, maskQuery bool) string {
 	return req.URL.Path
 }
 
-func (h *GatewayHandler) auditRecord(req *http.Request, requestID string, service config.ServiceConfig, clientIP string, cacheSource ipctx.CacheSource, decision policy.Decision, ipContext *ipctx.Context, latency time.Duration, dataSourceMode string, shortCircuitHit bool, shortCircuitSource, shortCircuitDecision, ipinfoLookupAction string) model.AuditRecord {
+func (h *GatewayHandler) auditRecord(req *http.Request, requestID string, service config.ServiceConfig, clientIP string, cacheSource ipctx.CacheSource, decision policy.Decision, ipContext *ipctx.Context, latency time.Duration, state flowState, routeMeta routeContext) model.AuditRecord {
 	record := model.AuditRecord{
-		RequestID:            requestID,
-		ClientIP:             clientIP,
-		ServiceName:          service.Name,
-		UpstreamURL:          service.TargetURL,
-		Host:                 req.Host,
-		Method:               req.Method,
-		Path:                 req.URL.Path,
-		RequestURL:           safeURL(req, h.cfg.Logging.RedactQuery),
-		Allowed:              decision.Allowed,
-		Result:               decision.Result,
-		ReasonCode:           decision.Reason,
-		CacheSource:          cacheSource,
-		DataSourceMode:       dataSourceMode,
-		ShortCircuitHit:      shortCircuitHit,
-		ShortCircuitSource:   shortCircuitSource,
-		ShortCircuitDecision: shortCircuitDecision,
-		IPInfoLookupAction:   ipinfoLookupAction,
-		LatencyMS:            float64(latency.Milliseconds()),
+		RequestID:              requestID,
+		ClientIP:               clientIP,
+		ServiceName:            service.Name,
+		UpstreamURL:            service.TargetURL,
+		Host:                   req.Host,
+		Method:                 req.Method,
+		Path:                   req.URL.Path,
+		RequestURL:             safeURL(req, h.cfg.Logging.RedactQuery),
+		Allowed:                decision.Allowed,
+		Result:                 decision.Result,
+		ReasonCode:             decision.Reason,
+		CacheSource:            cacheSource,
+		DataSourceMode:         state.dataSourceMode,
+		ShortCircuitHit:        state.shortCircuitHit,
+		ShortCircuitSource:     state.shortCircuitSource,
+		ShortCircuitDecision:   state.shortCircuitDecision,
+		IPInfoLookupAction:     state.ipinfoLookupAction,
+		RouteSetKind:           routeMeta.RouteSetKind,
+		RouteID:                routeMeta.RouteID,
+		SourceHost:             routeMeta.SourceHost,
+		SourcePathPrefix:       routeMeta.SourcePathPrefix,
+		TargetHost:             routeMeta.TargetHost,
+		TargetPublicURL:        routeMeta.TargetPublicURL,
+		BackendService:         routeMeta.BackendService,
+		BackendHost:            routeMeta.BackendHost,
+		GrantStatus:            routeMeta.GrantStatus,
+		GrantExpireAt:          routeMeta.GrantExpireAt,
+		LatencyMS:              float64(latency.Milliseconds()),
 	}
 	if ipContext != nil {
 		record.CountryCode = ipContext.CountryCode
@@ -539,6 +935,36 @@ func (h *GatewayHandler) auditRecord(req *http.Request, requestID string, servic
 		record.Privacy = ipContext.Privacy
 	}
 	return record
+}
+
+func (h *GatewayHandler) routeContextFromResolution(resolution routesets.Resolution) routeContext {
+	switch resolution.MatchType {
+	case routesets.MatchSource:
+		return h.routeContextFromRule(resolution.Rule)
+	case routesets.MatchTarget:
+		return routeContext{
+			RouteSetKind:   string(resolution.Binding.RuleKind),
+			TargetHost:     resolution.Host,
+			BackendService: resolution.Binding.BackendService,
+			BackendHost:    resolution.Binding.BackendHost,
+			TargetPublicURL: resolution.Binding.PublicURL,
+		}
+	default:
+		return routeContext{}
+	}
+}
+
+func (h *GatewayHandler) routeContextFromRule(rule routesets.CompiledRule) routeContext {
+	return routeContext{
+		RouteSetKind:     string(rule.Kind),
+		RouteID:          rule.ID,
+		SourceHost:       rule.SourceHost,
+		SourcePathPrefix: rule.SourcePathPrefix,
+		TargetHost:       rule.TargetHost,
+		TargetPublicURL:  rule.TargetPublicURL,
+		BackendService:   rule.BackendService,
+		BackendHost:      rule.BackendHost,
+	}
 }
 
 func workerID() string {

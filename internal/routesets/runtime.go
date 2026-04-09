@@ -1,0 +1,108 @@
+package routesets
+
+import (
+	"errors"
+	"net/http"
+	"time"
+
+	"gw-ipinfo-nginx/internal/config"
+)
+
+type Runtime struct {
+	compiled *Compiled
+	grant    *GrantManager
+}
+
+type V1GrantResult struct {
+	Status    GrantStatus
+	Claims    GrantClaims
+	Rule      CompiledRule
+	Token     string
+	ExpiresAt time.Time
+}
+
+func NewRuntime(compiled *Compiled, cfg config.RouteSetsConfig) *Runtime {
+	if compiled == nil || !compiled.Enabled {
+		return nil
+	}
+	return &Runtime{
+		compiled: compiled,
+		grant:    NewGrantManager(cfg.V1Grant),
+	}
+}
+
+func (r *Runtime) Enabled() bool {
+	return r != nil && r.compiled != nil && r.compiled.Enabled
+}
+
+func (r *Runtime) Resolve(req *http.Request) Resolution {
+	if !r.Enabled() {
+		return Resolution{}
+	}
+	return r.compiled.Resolve(req)
+}
+
+func (r *Runtime) IssueV1Grant(rule CompiledRule, clientIP, userAgent string) (string, time.Time, error) {
+	if r == nil || r.grant == nil {
+		return "", time.Time{}, errors.New("v1 grant manager is not configured")
+	}
+	return r.grant.Issue(rule, clientIP, userAgent, time.Now().UTC())
+}
+
+func (r *Runtime) BuildRedirectURL(publicURL, token string) (string, error) {
+	if r == nil || r.grant == nil {
+		return "", errors.New("v1 grant manager is not configured")
+	}
+	return r.grant.SignRedirectURL(publicURL, token)
+}
+
+func (r *Runtime) ExchangeV1Target(req *http.Request, expectedTargetHost, clientIP string) V1GrantResult {
+	if r == nil || r.grant == nil {
+		return V1GrantResult{Status: GrantStatusInvalid}
+	}
+
+	now := time.Now().UTC()
+	if token := r.grant.QueryToken(req); token != "" {
+		claims, err := r.grant.Validate(token, expectedTargetHost, clientIP, req.UserAgent(), now)
+		return r.validationResult(claims, token, err, GrantStatusQueryOK)
+	}
+	if token := r.grant.CookieToken(req); token != "" {
+		claims, err := r.grant.Validate(token, expectedTargetHost, clientIP, req.UserAgent(), now)
+		return r.validationResult(claims, token, err, GrantStatusCookieOK)
+	}
+	return V1GrantResult{Status: GrantStatusNone}
+}
+
+func (r *Runtime) ExchangeCookie(token string, expiresAt time.Time) *http.Cookie {
+	if r == nil || r.grant == nil {
+		return nil
+	}
+	return r.grant.ExchangeCookie(token, expiresAt)
+}
+
+func (r *Runtime) RedirectStatusCode() int {
+	if r == nil || r.compiled == nil {
+		return http.StatusFound
+	}
+	return r.compiled.RedirectStatusCode
+}
+
+func (r *Runtime) validationResult(claims GrantClaims, token string, err error, successStatus GrantStatus) V1GrantResult {
+	if err == nil {
+		rule, ok := r.compiled.RulesByID[claims.RouteID]
+		if !ok || rule.Kind != KindV1 || rule.TargetHost != claims.TargetHost {
+			return V1GrantResult{Status: GrantStatusInvalid}
+		}
+		return V1GrantResult{
+			Status:    successStatus,
+			Claims:    claims,
+			Rule:      rule,
+			Token:     token,
+			ExpiresAt: timeFromUnix(claims.ExpiresAt),
+		}
+	}
+	if errors.Is(err, ErrGrantExpired) {
+		return V1GrantResult{Status: GrantStatusExpired}
+	}
+	return V1GrantResult{Status: GrantStatusInvalid}
+}

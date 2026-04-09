@@ -32,6 +32,10 @@ type Event struct {
 	Timestamp            time.Time
 	ClientIP             string
 	ServiceName          string
+	RouteSetKind         string
+	RouteID              string
+	SourceHost           string
+	TargetHost           string
 	Host                 string
 	Path                 string
 	RequestURL           string
@@ -54,6 +58,10 @@ type Summary struct {
 	Day                    string             `json:"day" bson:"day"`
 	ClientIP               string             `json:"client_ip" bson:"client_ip"`
 	ServiceName            string             `json:"service_name" bson:"service_name"`
+	RouteSetKind           string             `json:"route_set_kind" bson:"route_set_kind"`
+	RouteID                string             `json:"route_id" bson:"route_id"`
+	SourceHost             string             `json:"source_host" bson:"source_host"`
+	TargetHost             string             `json:"target_host" bson:"target_host"`
 	Host                   string             `json:"host" bson:"host"`
 	Path                   string             `json:"path" bson:"path"`
 	RequestURL             string             `json:"request_url" bson:"request_url"`
@@ -271,6 +279,10 @@ func applyEvent(summary *Summary, event Event, now time.Time) {
 		summary.DenyReasons = map[string]uint64{}
 	}
 	summary.ServiceName = event.ServiceName
+	summary.RouteSetKind = event.RouteSetKind
+	summary.RouteID = event.RouteID
+	summary.SourceHost = event.SourceHost
+	summary.TargetHost = event.TargetHost
 	summary.Host = event.Host
 	summary.Path = event.Path
 	summary.RequestURL = event.RequestURL
@@ -533,6 +545,10 @@ func (s *Service) renderCSV(summaries []Summary) ([]byte, error) {
 		"country",
 		"region",
 		"city",
+		"route_set_kind",
+		"route_id",
+		"source_host",
+		"target_host",
 		"user_agent_summary",
 		"host",
 		"path",
@@ -549,6 +565,10 @@ func (s *Service) renderCSV(summaries []Summary) ([]byte, error) {
 			summary.CountryCode,
 			summary.Region,
 			summary.City,
+			summary.RouteSetKind,
+			summary.RouteID,
+			summary.SourceHost,
+			summary.TargetHost,
 			summary.UserAgentSummary,
 			summary.Host,
 			summary.Path,
@@ -603,7 +623,7 @@ func (s *Service) renderHTML(dayKey string, summaries []Summary) ([]byte, error)
 	buf.WriteString(listBlock("hosts", topMap(topHost, s.cfg.Reports.TopN)))
 	buf.WriteString(listBlock("ua", topMap(topUA, s.cfg.Reports.TopN)))
 	buf.WriteString("</section>")
-	buf.WriteString("<section><h2>Deduplicated IP Summary</h2><table><thead><tr><th>IP</th><th>Allow</th><th>Deny</th><th>Allow reason</th><th>Deny reason</th><th>Country</th><th>Region</th><th>City</th><th>UA</th><th>Host</th><th>Path</th><th>SC allow</th><th>SC deny</th></tr></thead><tbody>")
+	buf.WriteString("<section><h2>Deduplicated IP Summary</h2><table><thead><tr><th>IP</th><th>Allow</th><th>Deny</th><th>Allow reason</th><th>Deny reason</th><th>Country</th><th>Region</th><th>City</th><th>Route set</th><th>Route ID</th><th>Source host</th><th>Target host</th><th>UA</th><th>Host</th><th>Path</th><th>SC allow</th><th>SC deny</th></tr></thead><tbody>")
 	for _, summary := range summaries {
 		buf.WriteString("<tr>")
 		buf.WriteString(td(summary.ClientIP))
@@ -614,6 +634,10 @@ func (s *Service) renderHTML(dayKey string, summaries []Summary) ([]byte, error)
 		buf.WriteString(td(summary.CountryCode))
 		buf.WriteString(td(summary.Region))
 		buf.WriteString(td(summary.City))
+		buf.WriteString(td(summary.RouteSetKind))
+		buf.WriteString(td(summary.RouteID))
+		buf.WriteString(td(summary.SourceHost))
+		buf.WriteString(td(summary.TargetHost))
 		buf.WriteString(td(summary.UserAgentSummary))
 		buf.WriteString(td(summary.Host))
 		buf.WriteString(td(summary.Path))
@@ -715,6 +739,10 @@ func mergeSummaries(left, right Summary) Summary {
 	if right.LastSeenAt.After(merged.LastSeenAt) {
 		merged.LastSeenAt = right.LastSeenAt
 		merged.ServiceName = right.ServiceName
+		merged.RouteSetKind = right.RouteSetKind
+		merged.RouteID = right.RouteID
+		merged.SourceHost = right.SourceHost
+		merged.TargetHost = right.TargetHost
 		merged.Host = right.Host
 		merged.Path = right.Path
 		merged.RequestURL = right.RequestURL

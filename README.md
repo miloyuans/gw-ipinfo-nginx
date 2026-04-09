@@ -329,3 +329,49 @@ Linux deployments can optionally enable `server.prefork.enabled=true` and set `s
 - Mongo healthy: normal concurrent Mongo read/write path stays unchanged.
 - Mongo degraded: each worker writes only its own local shard and reads peer shards from the shared directory.
 - Daily reports run only in the primary prefork worker to avoid duplicate report sends.
+
+## Route Sets
+
+The gateway can now compile three route-set files in parallel:
+
+- `configs/defaultroute.yaml`
+- `configs/passroute_v1.yaml`
+- `configs/passroute_v2.yaml`
+
+Main config lives in `configs/config.yaml` under `route_sets`.
+
+Behavior:
+
+- `default`: only declares which `host + path_prefix` entries may use the existing default gateway flow.
+- `v1`: source host/path runs the full detection flow, then issues a signed grant and redirects to `target.public_url`.
+- `v2`: source host/path runs the full detection flow, then redirects to `target.public_url` without grant lifecycle.
+
+Compiler rules:
+
+- startup loads every enabled file together
+- all source routes are normalized into one global unique `host + path_prefix` table
+- duplicate source keys across `default / v1 / v2` fail startup
+- same target host must keep the same `rule_kind + backend_service + backend_host`
+- `target.public_url` must be absolute `http/https`
+- `backend_service` must exist in `routing.services`
+
+Runtime rules:
+
+- source matching uses exact host + longest path prefix
+- `v1` target host validates query grant first, then cookie grant
+- `v2` target host can directly enter the full detection flow
+- when `route_sets.strict_host_control=true`, only compiled source/target hosts are accepted
+- unmatched requests are denied with `deny_route_not_found`
+
+New audit fields:
+
+- `route_set_kind`
+- `route_id`
+- `source_host`
+- `source_path_prefix`
+- `target_host`
+- `target_public_url`
+- `backend_service`
+- `backend_host`
+- `grant_status`
+- `grant_expire_at`

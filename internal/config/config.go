@@ -23,6 +23,7 @@ type Config struct {
 	Cache    CacheConfig    `yaml:"cache"`
 	Security SecurityConfig `yaml:"security"`
 	Routing  RoutingConfig  `yaml:"routing"`
+	RouteSets RouteSetsConfig `yaml:"route_sets"`
 	Alerts   AlertsConfig   `yaml:"alerts"`
 	Reports  ReportsConfig  `yaml:"reports"`
 	Storage  StorageConfig  `yaml:"storage"`
@@ -151,6 +152,32 @@ type PrivacyConfig struct {
 type RoutingConfig struct {
 	DefaultService string          `yaml:"default_service"`
 	Services       []ServiceConfig `yaml:"services"`
+}
+
+type RouteSetsConfig struct {
+	Default            RouteSetFileConfig `yaml:"default"`
+	V1                 RouteSetFileConfig `yaml:"v1"`
+	V2                 RouteSetFileConfig `yaml:"v2"`
+	StrictHostControl  bool               `yaml:"strict_host_control"`
+	FailFastOnConflict bool               `yaml:"fail_fast_on_conflict"`
+	RedirectStatusCode int                `yaml:"redirect_status_code"`
+	V1Grant            V1GrantConfig      `yaml:"v1_grant"`
+}
+
+type RouteSetFileConfig struct {
+	Enabled    bool   `yaml:"enabled"`
+	ConfigPath string `yaml:"config_path"`
+}
+
+type V1GrantConfig struct {
+	TTL                  time.Duration `yaml:"ttl"`
+	BindUserAgent        bool          `yaml:"bind_user_agent"`
+	BindClientIP         bool          `yaml:"bind_client_ip"`
+	BindClientIPv4Prefix int           `yaml:"bind_client_ip_v4_prefix"`
+	BindClientIPv6Prefix int           `yaml:"bind_client_ip_v6_prefix"`
+	QueryParam           string        `yaml:"query_param"`
+	CookieName           string        `yaml:"cookie_name"`
+	SigningKey           string        `yaml:"signing_key"`
 }
 
 type ServiceConfig struct {
@@ -401,6 +428,33 @@ func (c *Config) applyDefaults() {
 	if c.Routing.DefaultService == "" && len(c.Routing.Services) > 0 {
 		c.Routing.DefaultService = c.Routing.Services[0].Name
 	}
+	if c.RouteSets.Default.ConfigPath == "" {
+		c.RouteSets.Default.ConfigPath = "defaultroute.yaml"
+	}
+	if c.RouteSets.V1.ConfigPath == "" {
+		c.RouteSets.V1.ConfigPath = "passroute_v1.yaml"
+	}
+	if c.RouteSets.V2.ConfigPath == "" {
+		c.RouteSets.V2.ConfigPath = "passroute_v2.yaml"
+	}
+	if c.RouteSets.RedirectStatusCode == 0 {
+		c.RouteSets.RedirectStatusCode = 302
+	}
+	if c.RouteSets.V1Grant.TTL == 0 {
+		c.RouteSets.V1Grant.TTL = time.Hour
+	}
+	if c.RouteSets.V1Grant.BindClientIPv4Prefix == 0 {
+		c.RouteSets.V1Grant.BindClientIPv4Prefix = 24
+	}
+	if c.RouteSets.V1Grant.BindClientIPv6Prefix == 0 {
+		c.RouteSets.V1Grant.BindClientIPv6Prefix = 56
+	}
+	if c.RouteSets.V1Grant.QueryParam == "" {
+		c.RouteSets.V1Grant.QueryParam = "gwgr"
+	}
+	if c.RouteSets.V1Grant.CookieName == "" {
+		c.RouteSets.V1Grant.CookieName = "__Host-gwgr"
+	}
 
 	if c.Alerts.Telegram.APIBaseURL == "" {
 		c.Alerts.Telegram.APIBaseURL = "https://api.telegram.org"
@@ -606,6 +660,21 @@ func (c *Config) Validate() error {
 	}
 	if _, ok := seenServices[c.Routing.DefaultService]; !ok {
 		errs = append(errs, fmt.Errorf("routing.default_service %q is not present in routing.services", c.Routing.DefaultService))
+	}
+	if c.RouteSets.RedirectStatusCode < 300 || c.RouteSets.RedirectStatusCode > 399 {
+		errs = append(errs, errors.New("route_sets.redirect_status_code must be a 3xx code"))
+	}
+	if c.RouteSets.V1Grant.TTL <= 0 {
+		errs = append(errs, errors.New("route_sets.v1_grant.ttl must be > 0"))
+	}
+	if c.RouteSets.V1Grant.BindClientIPv4Prefix < 0 || c.RouteSets.V1Grant.BindClientIPv4Prefix > 32 {
+		errs = append(errs, errors.New("route_sets.v1_grant.bind_client_ip_v4_prefix must be between 0 and 32"))
+	}
+	if c.RouteSets.V1Grant.BindClientIPv6Prefix < 0 || c.RouteSets.V1Grant.BindClientIPv6Prefix > 128 {
+		errs = append(errs, errors.New("route_sets.v1_grant.bind_client_ip_v6_prefix must be between 0 and 128"))
+	}
+	if c.RouteSets.V1.Enabled && strings.TrimSpace(c.RouteSets.V1Grant.SigningKey) == "" {
+		errs = append(errs, errors.New("route_sets.v1_grant.signing_key is required when route_sets.v1.enabled is true"))
 	}
 
 	if c.Security.Geo.DefaultAction != "deny" {

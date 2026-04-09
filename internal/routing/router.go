@@ -43,6 +43,15 @@ func (r *Resolver) Resolve(req *http.Request) config.ServiceConfig {
 	return best
 }
 
+func (r *Resolver) Service(name string) (config.ServiceConfig, bool) {
+	service, ok := r.services[name]
+	return service, ok
+}
+
+func (r *Resolver) Default() config.ServiceConfig {
+	return r.defaultService
+}
+
 func (r *Resolver) ServiceNames() []string {
 	names := make([]string, 0, len(r.services))
 	for name := range r.services {

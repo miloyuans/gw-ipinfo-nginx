@@ -20,9 +20,10 @@ type contextKey string
 const metadataKey contextKey = "proxy_metadata"
 
 type Metadata struct {
-	Service  config.ServiceConfig
-	ClientIP string
-	IPCtx    *ipctx.Context
+	Service      config.ServiceConfig
+	ClientIP     string
+	IPCtx        *ipctx.Context
+	UpstreamHost string
 }
 
 type Manager struct {
@@ -58,7 +59,10 @@ func NewManager(services []config.ServiceConfig, perf config.PerformanceConfig, 
 				pr.SetURL(target)
 				pr.SetXForwarded()
 				meta, _ := pr.In.Context().Value(metadataKey).(Metadata)
-				if svc.PreserveHost {
+				if meta.UpstreamHost != "" {
+					pr.Out.Host = meta.UpstreamHost
+					pr.Out.Header.Set("Host", meta.UpstreamHost)
+				} else if svc.PreserveHost {
 					pr.Out.Host = pr.In.Host
 				}
 				pr.Out.Header.Set("X-Client-Real-IP", meta.ClientIP)
@@ -95,16 +99,17 @@ func NewManager(services []config.ServiceConfig, perf config.PerformanceConfig, 
 	return &Manager{proxies: proxies, metrics: metricsSet, logger: logger, transport: transport}, nil
 }
 
-func (m *Manager) ServeHTTP(w http.ResponseWriter, r *http.Request, service config.ServiceConfig, clientIP string, context *ipctx.Context) {
+func (m *Manager) ServeHTTP(w http.ResponseWriter, r *http.Request, service config.ServiceConfig, clientIP string, ipContext *ipctx.Context, upstreamHost string) {
 	proxy := m.proxies[service.Name]
 	if proxy == nil {
 		http.Error(w, "upstream not configured", http.StatusBadGateway)
 		return
 	}
 	meta := Metadata{
-		Service:  service,
-		ClientIP: clientIP,
-		IPCtx:    context,
+		Service:      service,
+		ClientIP:     clientIP,
+		IPCtx:        ipContext,
+		UpstreamHost: upstreamHost,
 	}
 	ctx := contextWithMetadata(r.Context(), meta)
 	proxy.ServeHTTP(w, r.WithContext(ctx))
