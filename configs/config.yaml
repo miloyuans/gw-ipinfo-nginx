@@ -205,6 +205,8 @@ performance:
   proxy_expect_continue_timeout: 1s
 
 deny_page:
+  target_url: ""
+  preserve_host: false
   title: "Access Unavailable"
   heading: "Request Blocked"
   message: "Your request did not pass the gateway security checks."
