@@ -55,6 +55,9 @@ type CompiledRule struct {
 
 type TargetBinding struct {
 	RuleKind       Kind
+	RuleID         string
+	SourceHost     string
+	SourcePathPrefix string
 	BackendService string
 	BackendHost    string
 	PublicURL      string

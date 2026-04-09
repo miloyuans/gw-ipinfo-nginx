@@ -39,10 +39,14 @@ func NewSender(cfg config.TelegramConfig) (*Sender, error) {
 }
 
 func (s *Sender) Send(ctx context.Context, payload Payload) error {
+	return s.SendText(ctx, formatTelegramMessage(payload))
+}
+
+func (s *Sender) SendText(ctx context.Context, text string) error {
 	requestURL := s.apiBaseURL.ResolveReference(&url.URL{Path: fmt.Sprintf("/bot%s/sendMessage", s.botToken)})
 	body := telegramRequest{
 		ChatID:                s.chatID,
-		Text:                  formatTelegramMessage(payload),
+		Text:                  text,
 		ParseMode:             s.parseMode,
 		DisableWebPagePreview: true,
 	}
@@ -67,6 +71,24 @@ func (s *Sender) Send(ctx context.Context, payload Payload) error {
 	if resp.StatusCode >= 300 {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 		return fmt.Errorf("telegram http %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+	}
+	return nil
+}
+
+func (s *Sender) SelfCheck(ctx context.Context) error {
+	requestURL := s.apiBaseURL.ResolveReference(&url.URL{Path: fmt.Sprintf("/bot%s/getMe", s.botToken)})
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL.String(), nil)
+	if err != nil {
+		return fmt.Errorf("build telegram self-check request: %w", err)
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("send telegram self-check request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		return fmt.Errorf("telegram self-check http %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
 	}
 	return nil
 }

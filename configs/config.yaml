@@ -142,6 +142,14 @@ alerts:
     parse_mode: ""
     mask_query: true
     include_user_agent: true
+    lifecycle:
+      startup_notify: true
+      shutdown_notify: true
+      unclean_exit_notify: true
+      self_check_on_start: true
+      heartbeat_enabled: false
+      heartbeat_interval: 30m
+      notify_mode: "notify"
   delivery:
     worker_enabled: false
     poll_interval: 2s
@@ -156,8 +164,10 @@ alerts:
 
 reports:
   enabled: false
+  timezone_mode: "config"
   timezone: "UTC"
   daily_send_time: "09:00"
+  period_mode: "lookback"
   lookback: 24h
   top_n: 10
   include_csv: true
@@ -165,6 +175,14 @@ reports:
   worker_enabled: true
   poll_interval: 1m
   replay_batch_size: 1000
+  output:
+    telegram_enabled: false
+    file_enabled: false
+    output_dir: "/data/shared/reports"
+  filename:
+    prefix: "gw-report"
+    append_date: true
+    date_format: "2006-01-02"
 
 storage:
   local_path: "/data/shared/gw-ipinfo-nginx.db"

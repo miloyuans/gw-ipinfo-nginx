@@ -422,10 +422,13 @@ func (s *compileState) addTargetBinding(rule CompiledRule) bool {
 
 	s.targetIndex[rule.TargetHost] = rule
 	s.compiled.TargetHostIndex[rule.TargetHost] = TargetBinding{
-		RuleKind:       rule.Kind,
-		BackendService: rule.BackendService,
-		BackendHost:    rule.BackendHost,
-		PublicURL:      rule.TargetPublicURL,
+		RuleKind:         rule.Kind,
+		RuleID:           rule.ID,
+		SourceHost:       rule.SourceHost,
+		SourcePathPrefix: rule.SourcePathPrefix,
+		BackendService:   rule.BackendService,
+		BackendHost:      rule.BackendHost,
+		PublicURL:        rule.TargetPublicURL,
 	}
 	s.compiled.AllowedHosts[rule.TargetHost] = struct{}{}
 	s.targetHostSet[rule.TargetHost] = struct{}{}

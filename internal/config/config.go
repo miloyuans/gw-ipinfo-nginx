@@ -195,16 +195,20 @@ type AlertsConfig struct {
 }
 
 type ReportsConfig struct {
-	Enabled           bool          `yaml:"enabled"`
-	TimeZone          string        `yaml:"timezone"`
-	DailySendTime     string        `yaml:"daily_send_time"`
-	Lookback          time.Duration `yaml:"lookback"`
-	TopN              int           `yaml:"top_n"`
-	IncludeCSV        bool          `yaml:"include_csv"`
-	IncludeHTML       bool          `yaml:"include_html"`
-	WorkerEnabled     bool          `yaml:"worker_enabled"`
-	PollInterval      time.Duration `yaml:"poll_interval"`
-	ReplayBatchSize   int           `yaml:"replay_batch_size"`
+	Enabled         bool                  `yaml:"enabled"`
+	TimeZoneMode    string                `yaml:"timezone_mode"`
+	TimeZone        string                `yaml:"timezone"`
+	DailySendTime   string                `yaml:"daily_send_time"`
+	PeriodMode      string                `yaml:"period_mode"`
+	Lookback        time.Duration         `yaml:"lookback"`
+	TopN            int                   `yaml:"top_n"`
+	IncludeCSV      bool                  `yaml:"include_csv"`
+	IncludeHTML     bool                  `yaml:"include_html"`
+	WorkerEnabled   bool                  `yaml:"worker_enabled"`
+	PollInterval    time.Duration         `yaml:"poll_interval"`
+	ReplayBatchSize int                   `yaml:"replay_batch_size"`
+	Output          ReportsOutputConfig   `yaml:"output"`
+	Filename        ReportsFilenameConfig `yaml:"filename"`
 }
 
 type StorageConfig struct {
@@ -247,6 +251,29 @@ type TelegramConfig struct {
 	ParseMode        string `yaml:"parse_mode"`
 	MaskQuery        bool   `yaml:"mask_query"`
 	IncludeUserAgent bool   `yaml:"include_user_agent"`
+	Lifecycle        TelegramLifecycleConfig `yaml:"lifecycle"`
+}
+
+type TelegramLifecycleConfig struct {
+	StartupNotify    bool          `yaml:"startup_notify"`
+	ShutdownNotify   bool          `yaml:"shutdown_notify"`
+	UncleanExitNotify bool         `yaml:"unclean_exit_notify"`
+	SelfCheckOnStart bool          `yaml:"self_check_on_start"`
+	HeartbeatEnabled bool          `yaml:"heartbeat_enabled"`
+	HeartbeatInterval time.Duration `yaml:"heartbeat_interval"`
+	NotifyMode       string        `yaml:"notify_mode"`
+}
+
+type ReportsOutputConfig struct {
+	TelegramEnabled bool   `yaml:"telegram_enabled"`
+	FileEnabled     bool   `yaml:"file_enabled"`
+	OutputDir       string `yaml:"output_dir"`
+}
+
+type ReportsFilenameConfig struct {
+	Prefix     string `yaml:"prefix"`
+	AppendDate bool   `yaml:"append_date"`
+	DateFormat string `yaml:"date_format"`
 }
 
 type DeliveryConfig struct {
@@ -466,6 +493,12 @@ func (c *Config) applyDefaults() {
 	if c.Alerts.Telegram.Timeout == 0 {
 		c.Alerts.Telegram.Timeout = 5 * time.Second
 	}
+	if c.Alerts.Telegram.Lifecycle.HeartbeatInterval == 0 {
+		c.Alerts.Telegram.Lifecycle.HeartbeatInterval = 30 * time.Minute
+	}
+	if c.Alerts.Telegram.Lifecycle.NotifyMode == "" {
+		c.Alerts.Telegram.Lifecycle.NotifyMode = "notify"
+	}
 	if c.Alerts.Delivery.PollInterval == 0 {
 		c.Alerts.Delivery.PollInterval = 2 * time.Second
 	}
@@ -490,11 +523,17 @@ func (c *Config) applyDefaults() {
 	if c.Alerts.Dedupe.Window == 0 {
 		c.Alerts.Dedupe.Window = 10 * time.Minute
 	}
+	if c.Reports.TimeZoneMode == "" {
+		c.Reports.TimeZoneMode = "config"
+	}
 	if c.Reports.TimeZone == "" {
 		c.Reports.TimeZone = "UTC"
 	}
 	if c.Reports.DailySendTime == "" {
 		c.Reports.DailySendTime = "09:00"
+	}
+	if c.Reports.PeriodMode == "" {
+		c.Reports.PeriodMode = "lookback"
 	}
 	if c.Reports.Lookback == 0 {
 		c.Reports.Lookback = 24 * time.Hour
@@ -511,6 +550,18 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Reports.ReplayBatchSize == 0 {
 		c.Reports.ReplayBatchSize = 1000
+	}
+	if !c.Reports.Output.TelegramEnabled && !c.Reports.Output.FileEnabled && c.Reports.Enabled && c.Alerts.Telegram.Enabled {
+		c.Reports.Output.TelegramEnabled = true
+	}
+	if c.Reports.Filename.Prefix == "" {
+		c.Reports.Filename.Prefix = "gw-report"
+	}
+	if c.Reports.Filename.DateFormat == "" {
+		c.Reports.Filename.DateFormat = "2006-01-02"
+	}
+	if !c.Reports.Filename.AppendDate && c.Reports.Filename.Prefix == "gw-report" && c.Reports.Filename.DateFormat == "2006-01-02" {
+		c.Reports.Filename.AppendDate = true
 	}
 
 	if c.Storage.LocalPath == "" {
@@ -731,13 +782,28 @@ func (c *Config) Validate() error {
 			errs = append(errs, errors.New("alerts.telegram.chat_id is required when alerts.telegram.enabled is true"))
 		}
 	}
+	if !slices.Contains([]string{"notify", "log_only"}, c.Alerts.Telegram.Lifecycle.NotifyMode) {
+		errs = append(errs, errors.New("alerts.telegram.lifecycle.notify_mode must be notify or log_only"))
+	}
+	if c.Alerts.Telegram.Lifecycle.HeartbeatInterval <= 0 {
+		errs = append(errs, errors.New("alerts.telegram.lifecycle.heartbeat_interval must be > 0"))
+	}
 	if c.Alerts.Delivery.WorkerEnabled && !c.Alerts.Telegram.Enabled {
 		errs = append(errs, errors.New("alerts.delivery.worker_enabled requires alerts.telegram.enabled to be true"))
 	}
-	if c.Reports.Enabled && !c.Alerts.Telegram.Enabled {
-		errs = append(errs, errors.New("reports.enabled requires alerts.telegram.enabled to be true"))
+	if !slices.Contains([]string{"config", "system"}, c.Reports.TimeZoneMode) {
+		errs = append(errs, errors.New("reports.timezone_mode must be config or system"))
 	}
-	if c.Reports.TimeZone != "" {
+	if !slices.Contains([]string{"previous_day", "lookback"}, c.Reports.PeriodMode) {
+		errs = append(errs, errors.New("reports.period_mode must be previous_day or lookback"))
+	}
+	if c.Reports.Enabled && c.Reports.Output.TelegramEnabled && !c.Alerts.Telegram.Enabled {
+		errs = append(errs, errors.New("reports.output.telegram_enabled requires alerts.telegram.enabled to be true"))
+	}
+	if c.Reports.Enabled && c.Reports.Output.FileEnabled && strings.TrimSpace(c.Reports.Output.OutputDir) == "" {
+		errs = append(errs, errors.New("reports.output.output_dir is required when reports.output.file_enabled is true"))
+	}
+	if c.Reports.TimeZoneMode == "config" && c.Reports.TimeZone != "" {
 		if _, err := time.LoadLocation(c.Reports.TimeZone); err != nil {
 			errs = append(errs, fmt.Errorf("invalid reports.timezone %q: %w", c.Reports.TimeZone, err))
 		}

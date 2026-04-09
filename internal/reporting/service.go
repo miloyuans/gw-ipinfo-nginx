@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"html"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -94,6 +96,7 @@ type Service struct {
 	sender         *alerts.Sender
 	metrics        *metrics.GatewayMetrics
 	location       *time.Location
+	locationName   string
 	queue          chan Event
 	workerID       string
 	collectionName string
@@ -101,7 +104,7 @@ type Service struct {
 }
 
 func NewService(cfg *config.Config, controller *storage.Controller, logger *slog.Logger, sender *alerts.Sender, metricsSet *metrics.GatewayMetrics, workerID string) (*Service, error) {
-	location, err := time.LoadLocation(cfg.Reports.TimeZone)
+	location, locationName, err := resolveReportLocation(cfg.Reports)
 	if err != nil {
 		return nil, err
 	}
@@ -112,6 +115,7 @@ func NewService(cfg *config.Config, controller *storage.Controller, logger *slog
 		sender:         sender,
 		metrics:        metricsSet,
 		location:       location,
+		locationName:   locationName,
 		queue:          make(chan Event, cfg.Perf.StatsQueueSize),
 		workerID:       workerID,
 		collectionName: cfg.Cache.MongoCollections.ReportEvents,
@@ -151,7 +155,17 @@ func (s *Service) Run(ctx context.Context, workers int) {
 	for idx := 0; idx < workers; idx++ {
 		go s.runWorker(ctx)
 	}
-	if s.cfg.Reports.Enabled && s.cfg.Reports.WorkerEnabled && s.sender != nil && runtimex.IsPrimaryProcess() {
+	if s.cfg.Reports.Enabled && s.cfg.Reports.WorkerEnabled && runtimex.IsPrimaryProcess() {
+		if s.logger != nil {
+			s.logger.Info("daily_report_scheduler_started",
+				"event", "daily_report_scheduler_started",
+				"timezone_mode", s.cfg.Reports.TimeZoneMode,
+				"resolved_timezone", s.locationName,
+				"period_mode", s.cfg.Reports.PeriodMode,
+				"telegram_enabled", s.cfg.Reports.Output.TelegramEnabled,
+				"file_enabled", s.cfg.Reports.Output.FileEnabled,
+			)
+		}
 		go s.runScheduler(ctx)
 	}
 }
@@ -354,10 +368,19 @@ func (s *Service) trySendDailyReport(ctx context.Context, now time.Time) error {
 		return err
 	}
 	if now.In(s.location).Before(reportTime) {
+		if s.logger != nil {
+			s.logger.Info("daily_report_skipped_before_time",
+				"event", "daily_report_skipped_before_time",
+				"timezone_mode", s.cfg.Reports.TimeZoneMode,
+				"resolved_timezone", s.locationName,
+				"period_mode", s.cfg.Reports.PeriodMode,
+			)
+		}
 		return nil
 	}
-	reportDay := reportTime.Add(-s.cfg.Reports.Lookback)
+	reportDay := s.resolveReportDay(reportTime)
 	dayKey := reportDay.In(s.location).Format("2006-01-02")
+	dayLabel := reportDay.In(s.location).Format(s.cfg.Reports.Filename.DateFormat)
 	if sent, err := s.isReportSent(ctx, dayKey); err == nil && sent {
 		return nil
 	}
@@ -366,25 +389,86 @@ func (s *Service) trySendDailyReport(ctx context.Context, now time.Time) error {
 	if err != nil {
 		return err
 	}
+	if s.logger != nil {
+		s.logger.Info("daily_report_generated",
+			"event", "daily_report_generated",
+			"day_key", dayKey,
+			"period_mode", s.cfg.Reports.PeriodMode,
+			"timezone_mode", s.cfg.Reports.TimeZoneMode,
+			"resolved_timezone", s.locationName,
+		)
+	}
 	caption := fmt.Sprintf("gw-ipinfo-nginx daily report %s", dayKey)
-	sendCtx, cancel := context.WithTimeout(ctx, s.cfg.Alerts.Telegram.Timeout)
-	defer cancel()
+	if !s.cfg.Reports.Output.TelegramEnabled && !s.cfg.Reports.Output.FileEnabled {
+		if s.logger != nil {
+			s.logger.Warn("daily_report_no_output_sink",
+				"event", "daily_report_no_output_sink",
+				"day_key", dayKey,
+				"period_mode", s.cfg.Reports.PeriodMode,
+				"timezone_mode", s.cfg.Reports.TimeZoneMode,
+				"resolved_timezone", s.locationName,
+			)
+		}
+		return s.markReportSent(ctx, dayKey)
+	}
 
-	if s.cfg.Reports.IncludeHTML {
-		if err := s.sender.SendDocument(sendCtx, "gw-report-"+dayKey+".html", "text/html", htmlReport, caption); err != nil {
-			if s.metrics != nil {
-				s.metrics.ReportRuns.Inc(metrics.Labels{"status": "send_error"})
+	success := false
+
+	if s.cfg.Reports.Output.FileEnabled {
+		if s.cfg.Reports.IncludeHTML {
+			path, err := s.writeReportFile(dayLabel, "html", htmlReport)
+			if err != nil {
+				if s.logger != nil {
+					s.logger.Warn("daily_report_write_error", "event", "daily_report_write_error", "day_key", dayKey, "format", "html", "output_dir", s.cfg.Reports.Output.OutputDir, "error", err)
+				}
+			} else {
+				success = true
+				if s.logger != nil {
+					s.logger.Info("daily_report_written", "event", "daily_report_written", "day_key", dayKey, "format", "html", "path", path)
+				}
 			}
-			return err
+		}
+		if s.cfg.Reports.IncludeCSV {
+			path, err := s.writeReportFile(dayLabel, "csv", csvReport)
+			if err != nil {
+				if s.logger != nil {
+					s.logger.Warn("daily_report_write_error", "event", "daily_report_write_error", "day_key", dayKey, "format", "csv", "output_dir", s.cfg.Reports.Output.OutputDir, "error", err)
+				}
+			} else {
+				success = true
+				if s.logger != nil {
+					s.logger.Info("daily_report_written", "event", "daily_report_written", "day_key", dayKey, "format", "csv", "path", path)
+				}
+			}
 		}
 	}
-	if s.cfg.Reports.IncludeCSV {
-		if err := s.sender.SendDocument(sendCtx, "gw-report-"+dayKey+".csv", "text/csv", csvReport, caption); err != nil {
-			if s.metrics != nil {
-				s.metrics.ReportRuns.Inc(metrics.Labels{"status": "send_error"})
+
+	if s.cfg.Reports.Output.TelegramEnabled && s.sender != nil {
+		if s.cfg.Reports.IncludeHTML {
+			if err := s.sendReportDocument(ctx, dayLabel, "html", "text/html", htmlReport, caption); err != nil {
+				if s.logger != nil {
+					s.logger.Warn("daily_report_send_error", "event", "daily_report_send_error", "day_key", dayKey, "format", "html", "error", err)
+				}
+			} else {
+				success = true
 			}
-			return err
 		}
+		if s.cfg.Reports.IncludeCSV {
+			if err := s.sendReportDocument(ctx, dayLabel, "csv", "text/csv", csvReport, caption); err != nil {
+				if s.logger != nil {
+					s.logger.Warn("daily_report_send_error", "event", "daily_report_send_error", "day_key", dayKey, "format", "csv", "error", err)
+				}
+			} else {
+				success = true
+			}
+		}
+	}
+
+	if !success {
+		if s.metrics != nil {
+			s.metrics.ReportRuns.Inc(metrics.Labels{"status": "send_error"})
+		}
+		return fmt.Errorf("daily report %s had no successful output sink", dayKey)
 	}
 	if err := s.markReportSent(ctx, dayKey); err != nil {
 		if s.metrics != nil {
@@ -409,6 +493,14 @@ func (s *Service) reportTime(now time.Time) (time.Time, error) {
 	}
 	localNow := now.In(s.location)
 	return time.Date(localNow.Year(), localNow.Month(), localNow.Day(), hour, minute, 0, 0, s.location), nil
+}
+
+func (s *Service) resolveReportDay(reportTime time.Time) time.Time {
+	if s.cfg.Reports.PeriodMode == "previous_day" {
+		target := reportTime.In(s.location).AddDate(0, 0, -1)
+		return time.Date(target.Year(), target.Month(), target.Day(), 0, 0, 0, 0, s.location)
+	}
+	return reportTime.Add(-s.cfg.Reports.Lookback)
 }
 
 func (s *Service) isReportSent(ctx context.Context, dayKey string) (bool, error) {
@@ -697,6 +789,51 @@ func listBlock(title string, rows []aggregateRow) string {
 
 func td(value string) string {
 	return "<td>" + html.EscapeString(value) + "</td>"
+}
+
+func (s *Service) writeReportFile(dayLabel, format string, data []byte) (string, error) {
+	if err := os.MkdirAll(s.cfg.Reports.Output.OutputDir, 0o755); err != nil {
+		return "", fmt.Errorf("mkdir report output dir: %w", err)
+	}
+	fileName := s.buildReportFileName(dayLabel, format)
+	finalPath := filepath.Join(s.cfg.Reports.Output.OutputDir, fileName)
+	tmpPath := finalPath + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
+		return "", fmt.Errorf("write report tmp file: %w", err)
+	}
+	if err := os.Rename(tmpPath, finalPath); err != nil {
+		return "", fmt.Errorf("rename report file: %w", err)
+	}
+	return finalPath, nil
+}
+
+func (s *Service) sendReportDocument(ctx context.Context, dayLabel, format, contentType string, data []byte, caption string) error {
+	sendCtx, cancel := context.WithTimeout(ctx, s.cfg.Alerts.Telegram.Timeout)
+	defer cancel()
+	return s.sender.SendDocument(sendCtx, s.buildReportFileName(dayLabel, format), contentType, data, caption)
+}
+
+func (s *Service) buildReportFileName(dayLabel, format string) string {
+	base := strings.TrimSpace(s.cfg.Reports.Filename.Prefix)
+	if base == "" {
+		base = "gw-report"
+	}
+	if s.cfg.Reports.Filename.AppendDate {
+		base += "-" + dayLabel
+	}
+	return base + "." + format
+}
+
+func resolveReportLocation(cfg config.ReportsConfig) (*time.Location, string, error) {
+	if cfg.TimeZoneMode == "system" {
+		location := time.Local
+		return location, location.String(), nil
+	}
+	location, err := time.LoadLocation(cfg.TimeZone)
+	if err != nil {
+		return nil, "", err
+	}
+	return location, location.String(), nil
 }
 
 func mergeSummaries(left, right Summary) Summary {

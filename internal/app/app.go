@@ -46,6 +46,7 @@ type Application struct {
 	storageControl   *storage.Controller
 	shortCircuit     *shortcircuit.Service
 	alertWorkers     []*alerts.Worker
+	lifecycleManager *alerts.LifecycleManager
 	reportingService *reporting.Service
 	startReplayLoop  bool
 }
@@ -171,6 +172,9 @@ func New(configPath string) (*Application, error) {
 			return nil, err
 		}
 	}
+	lifecycleStatePath := filepath.Join(filepath.Dir(cfg.Storage.LocalPath), "gw-ipinfo-nginx.runtime.json")
+	hostname, _ := os.Hostname()
+	lifecycleManager := alerts.NewLifecycleManager(cfg.Alerts.Telegram, sender, logger, workerID(), hostname, lifecycleStatePath)
 
 	healthHandler := health.New(mongoChecker{controller: storageControl})
 	auditor := audit.New(logger)
@@ -211,6 +215,7 @@ func New(configPath string) (*Application, error) {
 		storageControl:   storageControl,
 		shortCircuit:     shortCircuitService,
 		alertWorkers:     alertWorkers,
+		lifecycleManager: lifecycleManager,
 		reportingService: reportingService,
 		startReplayLoop:  mongoConfigured,
 	}, nil
@@ -229,6 +234,9 @@ func (a *Application) run(ctx context.Context, listener net.Listener) error {
 
 	if a.startReplayLoop && a.storageControl != nil {
 		go a.storageControl.Start(ctx)
+	}
+	if a.lifecycleManager != nil {
+		a.lifecycleManager.Startup(ctx, a.cfg.Reports.Enabled, a.cfg.Alerts.Telegram.Enabled)
 	}
 	if a.shortCircuit != nil {
 		a.shortCircuit.Run(ctx, a.cfg.Perf.DecisionWorkers)
@@ -265,6 +273,9 @@ func (a *Application) run(ctx context.Context, listener net.Listener) error {
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), a.cfg.Server.ShutdownTimeout)
 	defer cancel()
+	if a.lifecycleManager != nil {
+		a.lifecycleManager.Shutdown(shutdownCtx)
+	}
 
 	if err := a.server.Shutdown(shutdownCtx); err != nil {
 		return fmt.Errorf("shutdown http server: %w", err)
@@ -532,7 +543,19 @@ func (h *GatewayHandler) serveSourceRoute(w http.ResponseWriter, r *http.Request
 			},
 		)
 	default:
-		h.finish(w, r, requestID, outcome.service, outcome.clientIP, outcome.ipContext, outcome.decision, start, outcome.state, routeMeta, responseAction{})
+		h.finish(
+			w,
+			r,
+			requestID,
+			fallbackService,
+			"",
+			ipctx.Context{},
+			policy.Decision{Allowed: false, Result: "deny", Reason: "deny_route_not_found"},
+			start,
+			h.newFlowState(),
+			routeMeta,
+			responseAction{},
+		)
 	}
 }
 
@@ -676,11 +699,15 @@ func (h *GatewayHandler) serveTargetRoute(w http.ResponseWriter, r *http.Request
 }
 
 func (h *GatewayHandler) newFlowState() flowState {
+	mode := storage.ModeLocal
+	if h.controller != nil {
+		mode = h.controller.Mode()
+	}
 	return flowState{
 		cacheSource:        ipctx.CacheSourceNone,
 		ipinfoLookupAction: "disabled",
 		shortCircuitSource: "none",
-		dataSourceMode:     string(h.controller.Mode()),
+		dataSourceMode:     string(mode),
 	}
 }
 
@@ -1050,11 +1077,14 @@ func (h *GatewayHandler) routeContextFromResolution(resolution routesets.Resolut
 		return h.routeContextFromRule(resolution.Rule)
 	case routesets.MatchTarget:
 		return routeContext{
-			RouteSetKind:   string(resolution.Binding.RuleKind),
-			TargetHost:     resolution.Host,
-			BackendService: resolution.Binding.BackendService,
-			BackendHost:    resolution.Binding.BackendHost,
-			TargetPublicURL: resolution.Binding.PublicURL,
+			RouteSetKind:     string(resolution.Binding.RuleKind),
+			RouteID:          resolution.Binding.RuleID,
+			SourceHost:       resolution.Binding.SourceHost,
+			SourcePathPrefix: resolution.Binding.SourcePathPrefix,
+			TargetHost:       resolution.Host,
+			BackendService:   resolution.Binding.BackendService,
+			BackendHost:      resolution.Binding.BackendHost,
+			TargetPublicURL:  resolution.Binding.PublicURL,
 		}
 	default:
 		return routeContext{}
