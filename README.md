@@ -51,6 +51,7 @@ Mongo 是共享缓存和共享 outbox 的首选存储，但不是主链路可用
 
 - 如果你是单机普通 Mongo：
   - 推荐 URI 使用 `directConnection=true&retryWrites=false`
+  - `authSource` 必须写“用户实际创建在哪个数据库”；很多管理员账号实际在 `admin`
   - 因为它不是副本集，`replicaSet=...` 和 `w=majority` 没有实际收益，反而更容易在拓扑发现异常时触发 `ReplicaSetNoPrimary`
 - 如果你是单节点副本集：
   - 只有在 `rs.status()` 明确显示 `PRIMARY`

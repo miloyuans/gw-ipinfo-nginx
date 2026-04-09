@@ -42,11 +42,13 @@ ipinfo:
 
 mongo:
   # 如果是单机普通 mongod，建议：
-  # mongodb://user:pass@host:27017/gw_ipinfo_nginx?authSource=gw_ipinfo_nginx&directConnection=true&retryWrites=false
+  # mongodb://user:pass@host:27017/gw_ipinfo_nginx?authSource=admin&directConnection=true&retryWrites=false
+  # 注意：authSource 要写“用户实际创建在哪个库”。
+  # 如果你用的是管理员账号，例如 gwadmin，通常更可能是 admin。
   #
   # 如果是单节点副本集，并且 rs.status() 明确是 PRIMARY，且副本集成员地址对网关 Pod 可达，
   # 可以继续使用：
-  # mongodb://user:pass@host:27017/gw_ipinfo_nginx?authSource=gw_ipinfo_nginx&replicaSet=mongodb-rs&retryWrites=true&w=majority
+  # mongodb://user:pass@host:27017/gw_ipinfo_nginx?authSource=admin&replicaSet=mongodb-rs&retryWrites=true&w=majority
   #
   # 生产推荐还是 3 节点副本集。即使 Mongo 暂时不可用，网关也会自动降级到本地磁盘继续服务。
   uri: "${MONGO_URI}"
@@ -200,6 +202,8 @@ performance:
   proxy_expect_continue_timeout: 1s
 
 deny_page:
+  target_url: "https://vpbet.com"
+  preserve_host: false
   title: "Access Unavailable"
   heading: "Request Blocked"
   message: "Your request did not pass the gateway security checks."

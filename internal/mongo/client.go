@@ -3,6 +3,7 @@ package mongostore
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"gw-ipinfo-nginx/internal/config"
@@ -39,14 +40,14 @@ func Connect(ctx context.Context, cfg config.MongoConfig) (*Client, error) {
 
 	client, err := mongo.Connect(ctx, clientOptions)
 	if err != nil {
-		return nil, fmt.Errorf("connect mongo: %w", err)
+		return nil, wrapMongoError("connect mongo", err)
 	}
 
 	pingCtx, cancel := context.WithTimeout(ctx, cfg.OperationTimeout)
 	defer cancel()
 	if err := client.Ping(pingCtx, nil); err != nil {
 		_ = client.Disconnect(context.Background())
-		return nil, fmt.Errorf("ping mongo: %w", err)
+		return nil, wrapMongoError("ping mongo", err)
 	}
 
 	return &Client{
@@ -72,4 +73,15 @@ func (c *Client) Disconnect(ctx context.Context) error {
 
 func (c *Client) WithTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, c.operationTimeout)
+}
+
+func wrapMongoError(operation string, err error) error {
+	if err == nil {
+		return nil
+	}
+	message := err.Error()
+	if strings.Contains(message, "AuthenticationFailed") || strings.Contains(message, "unable to authenticate") {
+		return fmt.Errorf("%s: %w; hint: check mongo uri, authSource, username and password. If the user was created in the admin database, use authSource=admin", operation, err)
+	}
+	return fmt.Errorf("%s: %w", operation, err)
 }
