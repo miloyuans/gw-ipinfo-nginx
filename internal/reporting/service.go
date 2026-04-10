@@ -916,73 +916,596 @@ func (s *Service) renderHTML(dayKey string, summaries []Summary) ([]byte, error)
 	totalRequests := uint64(0)
 	allowed := uint64(0)
 	denied := uint64(0)
+	shortCircuitAllow := uint64(0)
+	shortCircuitDeny := uint64(0)
+
 	topDeny := map[string]uint64{}
 	topAllow := map[string]uint64{}
 	topCountry := map[string]uint64{}
 	topHost := map[string]uint64{}
 	topUA := map[string]uint64{}
+
 	for _, summary := range summaries {
-		totalRequests += summary.AllowCount + summary.DenyCount
+		requests := summary.AllowCount + summary.DenyCount
+		totalRequests += requests
 		allowed += summary.AllowCount
 		denied += summary.DenyCount
+		shortCircuitAllow += summary.ShortCircuitAllowCount
+		shortCircuitDeny += summary.ShortCircuitDenyCount
+
 		for key, value := range summary.AllowReasons {
 			topAllow[key] += value
 		}
 		for key, value := range summary.DenyReasons {
 			topDeny[key] += value
 		}
-		topCountry[summary.CountryCode] += summary.AllowCount + summary.DenyCount
-		topHost[summary.Host] += summary.AllowCount + summary.DenyCount
-		topUA[summary.UserAgentSummary] += summary.AllowCount + summary.DenyCount
+
+		countryKey := strings.TrimSpace(summary.CountryName)
+		if countryKey == "" {
+			countryKey = strings.TrimSpace(summary.CountryCode)
+		}
+		if countryKey == "" {
+			countryKey = "(unknown)"
+		}
+		topCountry[countryKey] += requests
+
+		hostKey := strings.TrimSpace(summary.Host)
+		if hostKey == "" {
+			hostKey = strings.TrimSpace(summary.SourceHost)
+		}
+		if hostKey == "" {
+			hostKey = "(unknown)"
+		}
+		topHost[hostKey] += requests
+
+		uaKey := strings.TrimSpace(summary.UserAgentSummary)
+		if uaKey == "" {
+			uaKey = "(unknown)"
+		}
+		topUA[uaKey] += requests
 	}
 
-	buf := &bytes.Buffer{}
 	title := strings.TrimSpace(s.cfg.Reports.Title)
 	if title == "" {
 		title = "gw-ipinfo-nginx daily report"
 	}
-	buf.WriteString("<!doctype html><html><head><meta charset=\"utf-8\"><title>" + html.EscapeString(title) + "</title>")
-	buf.WriteString("<style>body{font-family:Arial,sans-serif;margin:24px;background:#f8fafc;color:#0f172a}table{border-collapse:collapse;width:100%}th,td{border:1px solid #cbd5e1;padding:8px;font-size:13px;text-align:left}th{background:#e2e8f0}h1,h2{margin:0 0 12px}section{margin:24px 0}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.card{background:#fff;padding:12px;border:1px solid #cbd5e1;border-radius:8px}</style></head><body>")
-	buf.WriteString("<h1>" + html.EscapeString(title) + " " + html.EscapeString(dayKey) + "</h1>")
-	buf.WriteString("<section class=\"grid\">")
-	buf.WriteString(card("total requests", fmt.Sprintf("%d", totalRequests)))
-	buf.WriteString(card("unique IPs", fmt.Sprintf("%d", len(summaries))))
-	buf.WriteString(card("allowed", fmt.Sprintf("%d", allowed)))
-	buf.WriteString(card("denied", fmt.Sprintf("%d", denied)))
-	buf.WriteString("</section>")
-	buf.WriteString("<section><h2>Top Aggregates</h2>")
-	buf.WriteString(listBlock("deny reasons", topMap(topDeny, s.cfg.Reports.TopN)))
-	buf.WriteString(listBlock("allow reasons", topMap(topAllow, s.cfg.Reports.TopN)))
-	buf.WriteString(listBlock("countries", topMap(topCountry, s.cfg.Reports.TopN)))
-	buf.WriteString(listBlock("hosts", topMap(topHost, s.cfg.Reports.TopN)))
-	buf.WriteString(listBlock("ua", topMap(topUA, s.cfg.Reports.TopN)))
-	buf.WriteString("</section>")
-	buf.WriteString("<section><h2>Deduplicated IP Summary</h2><table><thead><tr><th>IP</th><th>Allow</th><th>Deny</th><th>Allow reason</th><th>Deny reason</th><th>Country</th><th>Region</th><th>City</th><th>Route set</th><th>Route ID</th><th>V3 strategy</th><th>V3 target ID</th><th>V3 target host</th><th>Source host</th><th>Target host</th><th>UA</th><th>Host</th><th>Path</th><th>SC allow</th><th>SC deny</th></tr></thead><tbody>")
-	for _, summary := range summaries {
-		buf.WriteString("<tr>")
-		buf.WriteString(td(summary.ClientIP))
-		buf.WriteString(td(fmt.Sprintf("%d", summary.AllowCount)))
-		buf.WriteString(td(fmt.Sprintf("%d", summary.DenyCount)))
-		buf.WriteString(td(joinTopReasons(summary.AllowReasons)))
-		buf.WriteString(td(joinTopReasons(summary.DenyReasons)))
-		buf.WriteString(td(summary.CountryCode))
-		buf.WriteString(td(summary.Region))
-		buf.WriteString(td(summary.City))
-		buf.WriteString(td(summary.RouteSetKind))
-		buf.WriteString(td(summary.RouteID))
-		buf.WriteString(td(summary.V3StrategyMode))
-		buf.WriteString(td(summary.V3SelectedTargetID))
-		buf.WriteString(td(summary.V3SelectedTargetHost))
-		buf.WriteString(td(summary.SourceHost))
-		buf.WriteString(td(summary.TargetHost))
-		buf.WriteString(td(summary.UserAgentSummary))
-		buf.WriteString(td(summary.Host))
-		buf.WriteString(td(summary.Path))
-		buf.WriteString(td(fmt.Sprintf("%d", summary.ShortCircuitAllowCount)))
-		buf.WriteString(td(fmt.Sprintf("%d", summary.ShortCircuitDenyCount)))
-		buf.WriteString("</tr>")
+
+	topN := s.cfg.Reports.TopN
+	if topN <= 0 {
+		topN = 5
 	}
-	buf.WriteString("</tbody></table></section></body></html>")
+
+	topDenyRows := topMap(topDeny, topN)
+	topAllowRows := topMap(topAllow, topN)
+	topCountryRows := topMap(topCountry, topN)
+	topHostRows := topMap(topHost, topN)
+	topUARows := topMap(topUA, topN)
+
+	leadDeny := reportFirstAggregate(topDenyRows, "no deny reasons")
+	leadCountry := reportFirstAggregate(topCountryRows, "no country data")
+	leadHost := reportFirstAggregate(topHostRows, "no host data")
+
+	shortCircuitTotal := shortCircuitAllow + shortCircuitDeny
+
+	buf := &bytes.Buffer{}
+	buf.WriteString(`<!doctype html><html lang="en"><head><meta charset="utf-8">`)
+	buf.WriteString(`<meta name="viewport" content="width=device-width,initial-scale=1">`)
+	buf.WriteString(`<title>` + html.EscapeString(title) + `</title>`)
+	buf.WriteString(`
+<style>
+:root{
+	--bg:#f3f7fb;
+	--panel:#ffffff;
+	--panel-soft:#f8fbff;
+	--text:#0f172a;
+	--muted:#64748b;
+	--line:#dbe5f0;
+	--line-strong:#c7d5e5;
+	--shadow:0 10px 30px rgba(15,23,42,.08);
+	--blue:#2563eb;
+	--blue-soft:#dbeafe;
+	--green:#16a34a;
+	--green-soft:#dcfce7;
+	--red:#ef4444;
+	--red-soft:#fee2e2;
+	--amber:#d97706;
+	--amber-soft:#fef3c7;
+	--slate:#334155;
+	--slate-soft:#e2e8f0;
+}
+*{box-sizing:border-box}
+body{
+	margin:0;
+	padding:24px;
+	background:
+		radial-gradient(circle at top left, rgba(37,99,235,.08), transparent 28%),
+		radial-gradient(circle at top right, rgba(22,163,74,.06), transparent 22%),
+		var(--bg);
+	color:var(--text);
+	font-family:Inter, Arial, Helvetica, sans-serif;
+}
+.wrapper{
+	max-width:1500px;
+	margin:0 auto;
+}
+.hero{
+	background:linear-gradient(135deg, #0f172a 0%, #1e3a8a 100%);
+	color:#fff;
+	border-radius:24px;
+	padding:28px 28px 24px;
+	box-shadow:var(--shadow);
+}
+.hero-eyebrow{
+	font-size:12px;
+	font-weight:700;
+	letter-spacing:.12em;
+	text-transform:uppercase;
+	opacity:.72;
+	margin-bottom:10px;
+}
+.hero h1{
+	margin:0;
+	font-size:30px;
+	line-height:1.15;
+}
+.hero-meta{
+	margin-top:12px;
+	font-size:14px;
+	line-height:1.6;
+	opacity:.86;
+}
+.metric-grid{
+	display:grid;
+	grid-template-columns:repeat(6,minmax(0,1fr));
+	gap:16px;
+	margin-top:18px;
+}
+.metric-card{
+	background:rgba(255,255,255,.10);
+	backdrop-filter:blur(6px);
+	border:1px solid rgba(255,255,255,.14);
+	border-radius:20px;
+	padding:18px 18px 16px;
+	min-height:116px;
+}
+.metric-card .label{
+	font-size:12px;
+	font-weight:700;
+	text-transform:uppercase;
+	letter-spacing:.08em;
+	opacity:.75;
+}
+.metric-card .value{
+	margin-top:10px;
+	font-size:32px;
+	font-weight:800;
+	line-height:1;
+}
+.metric-card .sub{
+	margin-top:10px;
+	font-size:13px;
+	line-height:1.45;
+	opacity:.82;
+}
+.section{
+	margin-top:22px;
+}
+.section-title{
+	display:flex;
+	align-items:flex-end;
+	justify-content:space-between;
+	gap:12px;
+	margin:0 0 12px;
+}
+.section-title h2{
+	margin:0;
+	font-size:20px;
+}
+.section-title p{
+	margin:0;
+	font-size:13px;
+	color:var(--muted);
+}
+.insight-grid{
+	display:grid;
+	grid-template-columns:repeat(3,minmax(0,1fr));
+	gap:16px;
+}
+.insight-card,
+.panel{
+	background:var(--panel);
+	border:1px solid var(--line);
+	border-radius:22px;
+	box-shadow:var(--shadow);
+}
+.insight-card{
+	padding:18px;
+}
+.insight-label{
+	font-size:12px;
+	font-weight:700;
+	letter-spacing:.08em;
+	text-transform:uppercase;
+	color:var(--muted);
+}
+.insight-value{
+	margin-top:10px;
+	font-size:20px;
+	font-weight:800;
+	line-height:1.35;
+}
+.insight-sub{
+	margin-top:8px;
+	font-size:13px;
+	color:var(--muted);
+}
+.chart-grid{
+	display:grid;
+	grid-template-columns:1.12fr 1.88fr;
+	gap:16px;
+}
+.chart-grid-right{
+	display:grid;
+	grid-template-columns:repeat(2,minmax(0,1fr));
+	gap:16px;
+}
+.panel{
+	padding:18px;
+}
+.panel h3{
+	margin:0;
+	font-size:17px;
+}
+.panel-head{
+	display:flex;
+	align-items:flex-start;
+	justify-content:space-between;
+	gap:12px;
+	margin-bottom:16px;
+}
+.panel-sub{
+	font-size:13px;
+	color:var(--muted);
+	margin-top:6px;
+}
+.donut-shell{
+	display:flex;
+	align-items:center;
+	justify-content:center;
+	gap:20px;
+	min-height:340px;
+}
+.donut-chart{
+	width:220px;
+	height:220px;
+	border-radius:50%;
+	position:relative;
+	flex:0 0 auto;
+	box-shadow:inset 0 0 0 1px rgba(15,23,42,.06);
+}
+.donut-hole{
+	position:absolute;
+	inset:28px;
+	background:var(--panel);
+	border-radius:50%;
+	display:flex;
+	flex-direction:column;
+	align-items:center;
+	justify-content:center;
+	text-align:center;
+	box-shadow:0 0 0 1px var(--line) inset;
+	padding:18px;
+}
+.donut-hole .big{
+	font-size:28px;
+	font-weight:800;
+	line-height:1;
+}
+.donut-hole .small{
+	margin-top:8px;
+	font-size:12px;
+	color:var(--muted);
+	line-height:1.45;
+}
+.legend{
+	display:grid;
+	gap:12px;
+	min-width:220px;
+}
+.legend-item{
+	display:flex;
+	align-items:center;
+	justify-content:space-between;
+	gap:12px;
+	padding:12px 14px;
+	border:1px solid var(--line);
+	border-radius:16px;
+	background:var(--panel-soft);
+}
+.legend-left{
+	display:flex;
+	align-items:center;
+	gap:10px;
+	font-size:14px;
+	font-weight:700;
+}
+.legend-dot{
+	width:12px;
+	height:12px;
+	border-radius:50%;
+}
+.legend-dot.allow{background:var(--green)}
+.legend-dot.deny{background:var(--red)}
+.legend-right{
+	text-align:right;
+	font-size:13px;
+	color:var(--muted);
+	line-height:1.35;
+}
+.bar-list{
+	display:grid;
+	gap:14px;
+}
+.bar-row{
+	display:grid;
+	gap:8px;
+}
+.bar-meta{
+	display:flex;
+	align-items:center;
+	justify-content:space-between;
+	gap:12px;
+	font-size:13px;
+}
+.bar-label{
+	font-weight:700;
+	color:var(--slate);
+	max-width:68%;
+	white-space:nowrap;
+	overflow:hidden;
+	text-overflow:ellipsis;
+}
+.bar-value{
+	color:var(--muted);
+	white-space:nowrap;
+}
+.bar-track{
+	height:12px;
+	border-radius:999px;
+	background:#edf2f7;
+	overflow:hidden;
+}
+.bar-fill{
+	height:100%;
+	border-radius:999px;
+}
+.bar-fill.danger{background:linear-gradient(90deg, #f97316 0%, #ef4444 100%)}
+.bar-fill.success{background:linear-gradient(90deg, #22c55e 0%, #16a34a 100%)}
+.bar-fill.info{background:linear-gradient(90deg, #38bdf8 0%, #2563eb 100%)}
+.bar-fill.neutral{background:linear-gradient(90deg, #94a3b8 0%, #475569 100%)}
+.table-panel{
+	padding:0;
+	overflow:hidden;
+}
+.table-panel .section-title{
+	padding:18px 18px 0;
+}
+.table-wrap{
+	overflow:auto;
+	padding:0 18px 18px;
+}
+table{
+	width:100%;
+	border-collapse:separate;
+	border-spacing:0;
+	min-width:1200px;
+}
+thead th{
+	position:sticky;
+	top:0;
+	z-index:1;
+	background:#eff6ff;
+	color:#1e3a8a;
+	font-size:12px;
+	text-transform:uppercase;
+	letter-spacing:.06em;
+	border-bottom:1px solid var(--line-strong);
+	padding:12px 12px;
+	text-align:left;
+}
+tbody td{
+	padding:12px;
+	border-bottom:1px solid var(--line);
+	vertical-align:top;
+	font-size:13px;
+}
+tbody tr:nth-child(even){
+	background:#fbfdff;
+}
+tbody tr:hover{
+	background:#f6fbff;
+}
+.num{
+	text-align:right;
+	font-variant-numeric:tabular-nums;
+	white-space:nowrap;
+}
+.ip{
+	font-weight:800;
+	color:#0f172a;
+}
+.stacked{
+	display:grid;
+	gap:4px;
+}
+.stacked .primary{
+	font-weight:700;
+	color:#0f172a;
+	word-break:break-word;
+}
+.stacked .secondary{
+	font-size:12px;
+	color:var(--muted);
+	word-break:break-word;
+}
+.badge{
+	display:inline-flex;
+	align-items:center;
+	border-radius:999px;
+	padding:5px 10px;
+	font-size:12px;
+	font-weight:800;
+	white-space:nowrap;
+}
+.badge.success{
+	background:var(--green-soft);
+	color:#166534;
+}
+.badge.danger{
+	background:var(--red-soft);
+	color:#991b1b;
+}
+.badge.info{
+	background:var(--blue-soft);
+	color:#1d4ed8;
+}
+.badge.warning{
+	background:var(--amber-soft);
+	color:#92400e;
+}
+.badge.neutral{
+	background:var(--slate-soft);
+	color:#334155;
+}
+.empty{
+	padding:22px 0 8px;
+	color:var(--muted);
+	font-size:13px;
+}
+.footer-note{
+	margin-top:14px;
+	font-size:12px;
+	color:var(--muted);
+}
+@media (max-width: 1280px){
+	.metric-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
+	.chart-grid{grid-template-columns:1fr}
+	.chart-grid-right{grid-template-columns:repeat(2,minmax(0,1fr))}
+	.insight-grid{grid-template-columns:1fr}
+}
+@media (max-width: 780px){
+	body{padding:14px}
+	.hero{padding:20px}
+	.metric-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+	.chart-grid-right{grid-template-columns:1fr}
+	.donut-shell{flex-direction:column}
+	.legend{width:100%}
+}
+</style></head><body><div class="wrapper">`)
+
+	buf.WriteString(`<section class="hero">`)
+	buf.WriteString(`<div class="hero-eyebrow">gateway daily report</div>`)
+	buf.WriteString(`<h1>` + html.EscapeString(title) + ` · ` + html.EscapeString(dayKey) + `</h1>`)
+	buf.WriteString(`<div class="hero-meta">Deduplicated by real client IP · Timezone: ` + html.EscapeString(reportSafeText(s.locationName)) + ` · TopN: ` + fmt.Sprintf("%d", topN) + ` · Generated by gw-ipinfo-nginx reporting service</div>`)
+
+	buf.WriteString(`<div class="metric-grid">`)
+	buf.WriteString(reportMetricCard("total requests", fmt.Sprintf("%d", totalRequests), "Total allow + deny request volume", "neutral"))
+	buf.WriteString(reportMetricCard("unique IPs", fmt.Sprintf("%d", len(summaries)), "Unique real client IPs after daily dedup", "info"))
+	buf.WriteString(reportMetricCard("allowed", fmt.Sprintf("%d", allowed), reportPercentString(allowed, totalRequests)+" of total traffic", "success"))
+	buf.WriteString(reportMetricCard("denied", fmt.Sprintf("%d", denied), reportPercentString(denied, totalRequests)+" of total traffic", "danger"))
+	buf.WriteString(reportMetricCard("allow rate", reportPercentString(allowed, totalRequests), "Traffic accepted by policy engine", "success"))
+	buf.WriteString(reportMetricCard("short-circuit hits", fmt.Sprintf("%d", shortCircuitTotal), reportPercentString(shortCircuitTotal, totalRequests)+" of total requests", "warning"))
+	buf.WriteString(`</div></section>`)
+
+	buf.WriteString(`<section class="section">`)
+	buf.WriteString(`<div class="section-title"><h2>Executive highlights</h2><p>The highest-impact signals from the daily aggregate.</p></div>`)
+	buf.WriteString(`<div class="insight-grid">`)
+	buf.WriteString(reportInsightCard("Top deny reason", leadDeny, denied, "danger"))
+	buf.WriteString(reportInsightCard("Top country", leadCountry, totalRequests, "info"))
+	buf.WriteString(reportInsightCard("Top host", leadHost, totalRequests, "neutral"))
+	buf.WriteString(`</div></section>`)
+
+	buf.WriteString(`<section class="section">`)
+	buf.WriteString(`<div class="section-title"><h2>Visual overview</h2><p>Use the donut to read health quickly, then use the bar charts to locate concentration.</p></div>`)
+	buf.WriteString(`<div class="chart-grid">`)
+	buf.WriteString(reportDonutPanel(allowed, denied))
+	buf.WriteString(`<div class="chart-grid-right">`)
+	buf.WriteString(reportBarPanel("Top deny reasons", "Most frequent causes of blocked traffic", topDenyRows, denied, "danger"))
+	buf.WriteString(reportBarPanel("Top allow reasons", "Most frequent pass reasons", topAllowRows, allowed, "success"))
+	buf.WriteString(reportBarPanel("Top countries", "Geographic request concentration", topCountryRows, totalRequests, "info"))
+	buf.WriteString(reportBarPanel("Top hosts / domains", "Most active requested hostnames", topHostRows, totalRequests, "neutral"))
+	buf.WriteString(`</div></div></section>`)
+
+	buf.WriteString(`<section class="section">`)
+	buf.WriteString(`<div class="section-title"><h2>Client profile distribution</h2><p>User agent concentration by deduplicated traffic volume.</p></div>`)
+	buf.WriteString(reportBarPanel("Top user agents", "Condensed UA fingerprints seen in this period", topUARows, totalRequests, "info"))
+	buf.WriteString(`</section>`)
+
+	buf.WriteString(`<section class="section panel table-panel">`)
+	buf.WriteString(`<div class="section-title"><div><h2>Deduplicated IP summary</h2><p>Grouped by real client IP. Key routing, decision, and traffic context are preserved in a denser layout.</p></div></div>`)
+	buf.WriteString(`<div class="table-wrap"><table><thead><tr>`)
+	buf.WriteString(`<th>IP</th>`)
+	buf.WriteString(`<th class="num">Requests</th>`)
+	buf.WriteString(`<th>Allow</th>`)
+	buf.WriteString(`<th>Deny</th>`)
+	buf.WriteString(`<th>Top allow reason</th>`)
+	buf.WriteString(`<th>Top deny reason</th>`)
+	buf.WriteString(`<th>Location</th>`)
+	buf.WriteString(`<th>Host / Path</th>`)
+	buf.WriteString(`<th>Route / Target</th>`)
+	buf.WriteString(`<th>Short-circuit</th>`)
+	buf.WriteString(`<th>User agent</th>`)
+	buf.WriteString(`</tr></thead><tbody>`)
+
+	for _, summary := range summaries {
+		total := summary.AllowCount + summary.DenyCount
+
+		locationPrimary := reportFirstNonEmpty(strings.TrimSpace(summary.CountryName), strings.TrimSpace(summary.CountryCode), "(unknown)")
+		locationSecondary := reportJoinParts(
+			strings.TrimSpace(summary.Region),
+			strings.TrimSpace(summary.City),
+		)
+
+		hostPrimary := reportFirstNonEmpty(strings.TrimSpace(summary.Host), strings.TrimSpace(summary.SourceHost), "(unknown)")
+		hostSecondary := reportFirstNonEmpty(strings.TrimSpace(summary.Path), strings.TrimSpace(summary.RequestURL), "—")
+
+		routePrimary := reportFirstNonEmpty(strings.TrimSpace(summary.RouteID), strings.TrimSpace(summary.RouteSetKind), "—")
+		routeSecondary := reportJoinParts(
+			reportFirstNonEmpty(strings.TrimSpace(summary.V3SelectedTargetHost), strings.TrimSpace(summary.TargetHost), ""),
+			reportFirstNonEmpty(strings.TrimSpace(summary.V3SelectedTargetID), strings.TrimSpace(summary.V3StrategyMode), ""),
+		)
+
+		shortCircuitLabel := "none"
+		shortCircuitTone := "neutral"
+		if summary.ShortCircuitAllowCount > 0 || summary.ShortCircuitDenyCount > 0 {
+			shortCircuitLabel = fmt.Sprintf("allow %d / deny %d", summary.ShortCircuitAllowCount, summary.ShortCircuitDenyCount)
+			if summary.ShortCircuitDenyCount > 0 {
+				shortCircuitTone = "danger"
+			} else {
+				shortCircuitTone = "warning"
+			}
+		}
+
+		buf.WriteString(`<tr>`)
+		buf.WriteString(reportTDClass(summary.ClientIP, "ip"))
+		buf.WriteString(reportTDClass(fmt.Sprintf("%d", total), "num"))
+		buf.WriteString(reportTDHTML("", reportBadge(fmt.Sprintf("%d", summary.AllowCount), "success")))
+		buf.WriteString(reportTDHTML("", reportBadge(fmt.Sprintf("%d", summary.DenyCount), "danger")))
+		buf.WriteString(reportTD(joinTopReasons(summary.AllowReasons)))
+		buf.WriteString(reportTD(joinTopReasons(summary.DenyReasons)))
+		buf.WriteString(reportTDHTML("", reportStackedValue(locationPrimary, locationSecondary)))
+		buf.WriteString(reportTDHTML("", reportStackedValue(hostPrimary, hostSecondary)))
+		buf.WriteString(reportTDHTML("", reportStackedValue(routePrimary, routeSecondary)))
+		buf.WriteString(reportTDHTML("", reportBadge(shortCircuitLabel, shortCircuitTone)))
+		buf.WriteString(reportTD(reportSafeText(summary.UserAgentSummary)))
+		buf.WriteString(`</tr>`)
+	}
+
+	buf.WriteString(`</tbody></table></div>`)
+	buf.WriteString(`<div class="footer-note" style="padding:0 18px 18px;">Tip: the summary table stays detailed, while the sections above are optimized for quick scanning and management-level review.</div>`)
+	buf.WriteString(`</section>`)
+
+	buf.WriteString(`</div></body></html>`)
 	return buf.Bytes(), nil
 }
 
@@ -1147,6 +1670,226 @@ func mergeSummaries(left, right Summary) Summary {
 	}
 
 	return merged
+}
+
+func reportMetricCard(title, value, sub, tone string) string {
+	return `<div class="metric-card ` + html.EscapeString(tone) + `">` +
+		`<div class="label">` + html.EscapeString(reportSafeText(title)) + `</div>` +
+		`<div class="value">` + html.EscapeString(reportSafeText(value)) + `</div>` +
+		`<div class="sub">` + html.EscapeString(reportSafeText(sub)) + `</div>` +
+		`</div>`
+}
+
+func reportInsightCard(title string, row aggregateRow, total uint64, tone string) string {
+	label := reportSafeText(row.Key)
+	if label == "—" {
+		label = "no data"
+	}
+
+	sub := "0 occurrences"
+	if row.Value > 0 {
+		sub = fmt.Sprintf("%d occurrences · %s", row.Value, reportPercentString(row.Value, total))
+	}
+	return `<div class="insight-card ` + html.EscapeString(tone) + `">` +
+		`<div class="insight-label">` + html.EscapeString(reportSafeText(title)) + `</div>` +
+		`<div class="insight-value">` + html.EscapeString(label) + `</div>` +
+		`<div class="insight-sub">` + html.EscapeString(sub) + `</div>` +
+		`</div>`
+}
+
+func reportDonutPanel(allowed, denied uint64) string {
+	total := allowed + denied
+	allowPct := reportPercentValue(allowed, total)
+	denyPct := reportPercentValue(denied, total)
+
+	gradient := fmt.Sprintf(
+		"background:conic-gradient(#16a34a 0 %.2f%%, #ef4444 %.2f%% 100%%);",
+		allowPct,
+		allowPct,
+	)
+
+	return `<div class="panel">` +
+		`<div class="panel-head">` +
+		`<div><h3>Allow vs deny ratio</h3><div class="panel-sub">Quick health read of accepted versus rejected traffic.</div></div>` +
+		`</div>` +
+		`<div class="donut-shell">` +
+		`<div class="donut-chart" style="` + gradient + `">` +
+		`<div class="donut-hole">` +
+		`<div class="big">` + html.EscapeString(reportPercentString(allowed, total)) + `</div>` +
+		`<div class="small">allow rate<br>` + fmt.Sprintf("%d total", total) + `</div>` +
+		`</div></div>` +
+		`<div class="legend">` +
+		`<div class="legend-item">` +
+		`<div class="legend-left"><span class="legend-dot allow"></span><span>Allowed</span></div>` +
+		`<div class="legend-right">` + fmt.Sprintf("%d", allowed) + `<br>` + html.EscapeString(reportPercentString(allowed, total)) + `</div>` +
+		`</div>` +
+		`<div class="legend-item">` +
+		`<div class="legend-left"><span class="legend-dot deny"></span><span>Denied</span></div>` +
+		`<div class="legend-right">` + fmt.Sprintf("%d", denied) + `<br>` + html.EscapeString(reportPercentString(denied, total)) + `</div>` +
+		`</div>` +
+		`<div class="legend-item">` +
+		`<div class="legend-left"><span class="legend-dot allow" style="background:#f59e0b"></span><span>Traffic posture</span></div>` +
+		`<div class="legend-right">` + html.EscapeString(reportTrafficPosture(allowPct, denyPct)) + `</div>` +
+		`</div>` +
+		`</div></div></div>`
+}
+
+func reportBarPanel(title, subtitle string, rows []aggregateRow, total uint64, tone string) string {
+	var maxValue uint64
+	for _, row := range rows {
+		if row.Value > maxValue {
+			maxValue = row.Value
+		}
+	}
+
+	var b strings.Builder
+	b.WriteString(`<div class="panel">`)
+	b.WriteString(`<div class="panel-head"><div><h3>`)
+	b.WriteString(html.EscapeString(reportSafeText(title)))
+	b.WriteString(`</h3><div class="panel-sub">`)
+	b.WriteString(html.EscapeString(reportSafeText(subtitle)))
+	b.WriteString(`</div></div></div>`)
+
+	if len(rows) == 0 {
+		b.WriteString(`<div class="empty">No aggregate data available for this section.</div></div>`)
+		return b.String()
+	}
+
+	b.WriteString(`<div class="bar-list">`)
+	for _, row := range rows {
+		width := 0.0
+		if maxValue > 0 {
+			width = float64(row.Value) * 100 / float64(maxValue)
+		}
+
+		b.WriteString(`<div class="bar-row">`)
+		b.WriteString(`<div class="bar-meta">`)
+		b.WriteString(`<span class="bar-label" title="`)
+		b.WriteString(html.EscapeString(reportSafeText(row.Key)))
+		b.WriteString(`">`)
+		b.WriteString(html.EscapeString(reportCompactText(reportSafeText(row.Key), 48)))
+		b.WriteString(`</span>`)
+		b.WriteString(`<span class="bar-value">`)
+		b.WriteString(fmt.Sprintf("%d", row.Value))
+		b.WriteString(` · `)
+		b.WriteString(html.EscapeString(reportPercentString(row.Value, total)))
+		b.WriteString(`</span></div>`)
+		b.WriteString(`<div class="bar-track"><div class="bar-fill `)
+		b.WriteString(html.EscapeString(tone))
+		b.WriteString(`" style="width:`)
+		b.WriteString(fmt.Sprintf("%.2f", width))
+		b.WriteString(`%"></div></div>`)
+		b.WriteString(`</div>`)
+	}
+	b.WriteString(`</div></div>`)
+	return b.String()
+}
+
+func reportTD(value string) string {
+	return `<td>` + html.EscapeString(reportSafeText(value)) + `</td>`
+}
+
+func reportTDClass(value, className string) string {
+	return `<td class="` + html.EscapeString(strings.TrimSpace(className)) + `">` +
+		html.EscapeString(reportSafeText(value)) +
+		`</td>`
+}
+
+func reportTDHTML(className, raw string) string {
+	return `<td class="` + html.EscapeString(strings.TrimSpace(className)) + `">` + raw + `</td>`
+}
+
+func reportBadge(label, tone string) string {
+	return `<span class="badge ` + html.EscapeString(strings.TrimSpace(tone)) + `">` +
+		html.EscapeString(reportSafeText(label)) +
+		`</span>`
+}
+
+func reportStackedValue(primary, secondary string) string {
+	return `<div class="stacked">` +
+		`<div class="primary">` + html.EscapeString(reportSafeText(primary)) + `</div>` +
+		`<div class="secondary">` + html.EscapeString(reportSafeText(secondary)) + `</div>` +
+		`</div>`
+}
+
+func reportPercentValue(part, total uint64) float64 {
+	if total == 0 {
+		return 0
+	}
+	return float64(part) * 100 / float64(total)
+}
+
+func reportPercentString(part, total uint64) string {
+	return fmt.Sprintf("%.1f%%", reportPercentValue(part, total))
+}
+
+func reportSafeText(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "—"
+	}
+	return value
+}
+
+func reportFirstNonEmpty(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func reportJoinParts(values ...string) string {
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" && value != "—" {
+			parts = append(parts, value)
+		}
+	}
+	if len(parts) == 0 {
+		return "—"
+	}
+	return strings.Join(parts, " · ")
+}
+
+func reportCompactText(value string, limit int) string {
+	if limit <= 0 {
+		return value
+	}
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	if limit <= 1 {
+		return string(runes[:limit])
+	}
+	return string(runes[:limit-1]) + "…"
+}
+
+func reportFirstAggregate(rows []aggregateRow, fallback string) aggregateRow {
+	if len(rows) == 0 {
+		return aggregateRow{
+			Key:   fallback,
+			Value: 0,
+		}
+	}
+	return rows[0]
+}
+
+func reportTrafficPosture(allowPct, denyPct float64) string {
+	switch {
+	case allowPct >= 95:
+		return "mostly clean traffic"
+	case allowPct >= 80:
+		return "healthy with visible filtering"
+	case denyPct >= 40:
+		return "elevated block pressure"
+	default:
+		return "mixed traffic profile"
+	}
 }
 
 func (s *Service) summaryFromEvent(event Event) Summary {
