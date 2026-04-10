@@ -422,7 +422,7 @@ func formatLookupSummaryHTML(cacheSource, lookupAction, dataSourceMode string, o
 	zhOrdinal, enOrdinal := formatQueryOrdinal(ordinal)
 
 	zhLine := fmt.Sprintf("数据来源 %s，%s，%s%s", zhSource, zhOrdinal, zhMode, zhAction)
-	enLine := fmt.Sprintf("Source: %s, %s, %s%s", enSource, enOrdinal, enMode, enAction)
+	enLine := fmt.Sprintf("Source: %s, %s, %s %s", enSource, enOrdinal, enMode, enAction)
 
 	return fmt.Sprintf(
 		"<b>%s</b>\n%s\n%s\n",

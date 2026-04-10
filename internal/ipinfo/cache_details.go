@@ -37,6 +37,11 @@ func detailsFromEntry(entry cache.Entry) LookupDetails {
 	return DetailsFromContext(entry.IPContext)
 }
 
+func hasLookupDetails(entry cache.Entry) bool {
+	_, ok := decodeLookupDetails(entry.DetailsJSON)
+	return ok
+}
+
 func (s *LookupService) successEntryFromDetails(details LookupDetails, now time.Time) cache.Entry {
 	return cache.Entry{
 		IPContext:          details.ToContext(),

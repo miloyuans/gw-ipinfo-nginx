@@ -146,11 +146,14 @@ func (s *LookupService) LookupDetails(ctx context.Context, ip string) (LookupDet
 	now := time.Now().UTC()
 
 	if entry, ok := s.l1.Get(ip, now, s.enableResidentialProxy); ok {
-		s.recordLookup(ipctx.CacheSourceL1, entry.Failure == "")
 		if entry.Failure != "" {
+			s.recordLookup(ipctx.CacheSourceL1, false)
 			return LookupDetails{}, ipctx.CacheSourceL1, "cache_hit_l1", errors.New(entry.Failure)
 		}
-		return detailsFromEntry(entry), ipctx.CacheSourceL1, "cache_hit_l1", nil
+		if hasLookupDetails(entry) {
+			s.recordLookup(ipctx.CacheSourceL1, true)
+			return detailsFromEntry(entry), ipctx.CacheSourceL1, "cache_hit_l1", nil
+		}
 	}
 
 	if s.repo != nil {
@@ -159,12 +162,16 @@ func (s *LookupService) LookupDetails(ctx context.Context, ip string) (LookupDet
 		s.recordMongoLatency(time.Since(repoStart))
 
 		if err == nil && found && entry.Fresh(now, s.enableResidentialProxy) {
-			s.l1.Set(ip, entry)
-			s.recordLookup(source, entry.Failure == "")
 			if entry.Failure != "" {
+				s.l1.Set(ip, entry)
+				s.recordLookup(source, false)
 				return LookupDetails{}, source, actionForCacheSource(source), errors.New(entry.Failure)
 			}
-			return detailsFromEntry(entry), source, actionForCacheSource(source), nil
+			if hasLookupDetails(entry) {
+				s.l1.Set(ip, entry)
+				s.recordLookup(source, true)
+				return detailsFromEntry(entry), source, actionForCacheSource(source), nil
+			}
 		}
 
 		if err != nil {
@@ -179,7 +186,9 @@ func (s *LookupService) LookupDetails(ctx context.Context, ip string) (LookupDet
 			if entry.Failure != "" {
 				return lookupDetailsResult{source: ipctx.CacheSourceL1, err: errors.New(entry.Failure)}, nil
 			}
-			return lookupDetailsResult{source: ipctx.CacheSourceL1, value: detailsFromEntry(entry)}, nil
+			if hasLookupDetails(entry) {
+				return lookupDetailsResult{source: ipctx.CacheSourceL1, value: detailsFromEntry(entry)}, nil
+			}
 		}
 
 		if s.repo != nil {
@@ -188,11 +197,14 @@ func (s *LookupService) LookupDetails(ctx context.Context, ip string) (LookupDet
 			s.recordMongoLatency(time.Since(repoStart))
 
 			if err == nil && found && entry.Fresh(now, s.enableResidentialProxy) {
-				s.l1.Set(ip, entry)
 				if entry.Failure != "" {
+					s.l1.Set(ip, entry)
 					return lookupDetailsResult{source: source, err: errors.New(entry.Failure)}, nil
 				}
-				return lookupDetailsResult{source: source, value: detailsFromEntry(entry)}, nil
+				if hasLookupDetails(entry) {
+					s.l1.Set(ip, entry)
+					return lookupDetailsResult{source: source, value: detailsFromEntry(entry)}, nil
+				}
 			}
 		}
 

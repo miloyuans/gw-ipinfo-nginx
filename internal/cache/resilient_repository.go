@@ -127,6 +127,7 @@ func (r *ResilientRepository) upsertMongo(ctx context.Context, client *mongostor
 	update := bson.M{
 		"$set": bson.M{
 			"ip_context":          entry.IPContext,
+			"details_json":        entry.DetailsJSON,
 			"failure":             entry.Failure,
 			"geo_expires_at":      entry.GeoExpiresAt,
 			"privacy_expires_at":  entry.PrivacyExpiresAt,
