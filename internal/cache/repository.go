@@ -68,9 +68,11 @@ func (r *Repository) Upsert(ctx context.Context, ip string, entry Entry) error {
 	defer cancel()
 
 	now := time.Now().UTC()
+
 	update := bson.M{
 		"$set": bson.M{
 			"ip_context":          entry.IPContext,
+			"details_json":        entry.DetailsJSON,
 			"failure":             entry.Failure,
 			"geo_expires_at":      entry.GeoExpiresAt,
 			"privacy_expires_at":  entry.PrivacyExpiresAt,

@@ -9,14 +9,17 @@ import (
 )
 
 type Entry struct {
-	IPContext         ipctx.Context `bson:"ip_context" json:"ip_context"`
-	Failure           string        `bson:"failure" json:"failure"`
-	GeoExpiresAt      time.Time     `bson:"geo_expires_at" json:"geo_expires_at"`
-	PrivacyExpiresAt  time.Time     `bson:"privacy_expires_at" json:"privacy_expires_at"`
-	ResProxyExpiresAt time.Time     `bson:"resproxy_expires_at" json:"resproxy_expires_at"`
-	FailureExpiresAt  time.Time     `bson:"failure_expires_at" json:"failure_expires_at"`
-	ExpiresAt         time.Time     `bson:"expires_at" json:"expires_at"`
-	UpdatedAt         time.Time     `bson:"updated_at" json:"updated_at"`
+	IPContext   ipctx.Context `bson:"ip_context" json:"ip_context"`
+	DetailsJSON string        `bson:"details_json,omitempty" json:"details_json,omitempty"`
+
+	Failure string `bson:"failure" json:"failure"`
+
+	GeoExpiresAt      time.Time `bson:"geo_expires_at" json:"geo_expires_at"`
+	PrivacyExpiresAt  time.Time `bson:"privacy_expires_at" json:"privacy_expires_at"`
+	ResProxyExpiresAt time.Time `bson:"resproxy_expires_at" json:"resproxy_expires_at"`
+	FailureExpiresAt  time.Time `bson:"failure_expires_at" json:"failure_expires_at"`
+	ExpiresAt         time.Time `bson:"expires_at" json:"expires_at"`
+	UpdatedAt         time.Time `bson:"updated_at" json:"updated_at"`
 }
 
 func (e Entry) Fresh(now time.Time, needResidentialProxy bool) bool {
