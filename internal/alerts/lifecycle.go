@@ -95,7 +95,7 @@ func (m *LifecycleManager) Shutdown(ctx context.Context) {
 		return
 	}
 
-	sendCtx, cancel := context.WithTimeout(ctx, minDuration(m.cfg.Timeout, 3*time.Second))
+	sendCtx, cancel := context.WithTimeout(ctx, minLifecycleDuration(m.cfg.Timeout, 3*time.Second))
 	defer cancel()
 	if err := m.sender.SendText(sendCtx, m.formatMessage("Shutdown", false, m.cfg.Enabled)); err != nil {
 		if m.logger != nil {
@@ -196,7 +196,7 @@ func pid() int {
 	return os.Getpid()
 }
 
-func minDuration(left, right time.Duration) time.Duration {
+func minLifecycleDuration(left, right time.Duration) time.Duration {
 	if left <= 0 {
 		return right
 	}
