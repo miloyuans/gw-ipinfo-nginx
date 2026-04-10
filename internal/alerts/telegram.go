@@ -90,6 +90,28 @@ func (s *Sender) SelfCheck(ctx context.Context) error {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 		return fmt.Errorf("telegram self-check http %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
 	}
+	if strings.TrimSpace(s.chatID) == "" {
+		return nil
+	}
+
+	chatURL := s.apiBaseURL.ResolveReference(&url.URL{Path: fmt.Sprintf("/bot%s/getChat", s.botToken)})
+	query := chatURL.Query()
+	query.Set("chat_id", s.chatID)
+	chatURL.RawQuery = query.Encode()
+
+	chatReq, err := http.NewRequestWithContext(ctx, http.MethodGet, chatURL.String(), nil)
+	if err != nil {
+		return fmt.Errorf("build telegram chat self-check request: %w", err)
+	}
+	chatResp, err := s.client.Do(chatReq)
+	if err != nil {
+		return fmt.Errorf("send telegram chat self-check request: %w", err)
+	}
+	defer chatResp.Body.Close()
+	if chatResp.StatusCode >= 300 {
+		data, _ := io.ReadAll(io.LimitReader(chatResp.Body, 64<<10))
+		return fmt.Errorf("telegram chat self-check http %d: %s", chatResp.StatusCode, strings.TrimSpace(string(data)))
+	}
 	return nil
 }
 

@@ -119,6 +119,9 @@ route_sets:
   v2:
     enabled: false
     config_path: "passroute_v2.yaml"
+  v3:
+    enabled: false
+    config_path: "passroute_v3.yaml"
   strict_host_control: false
   fail_fast_on_conflict: true
   redirect_status_code: 302
@@ -132,6 +135,13 @@ route_sets:
     cookie_name: "__Host-gwgr"
     signing_key: "${GW_V1_GRANT_SIGNING_KEY}"
 
+v3_defaults:
+  health_check:
+    interval: 30s
+    timeout: 3s
+    healthy_threshold: 2
+    unhealthy_threshold: 2
+
 alerts:
   telegram:
     enabled: false
@@ -140,6 +150,10 @@ alerts:
     api_base_url: "https://api.telegram.org"
     timeout: 5s
     parse_mode: ""
+    # 机器人显示名，用于生命周期通知和日报标题。
+    display_name: "gw-ipinfo-nginx"
+    # Telegram 通知标题前缀；为空时自动回落到 display_name。
+    title_prefix: "[gw-ipinfo-nginx]"
     mask_query: true
     include_user_agent: true
     lifecycle:
@@ -209,11 +223,17 @@ alerts:
 
 reports:
   enabled: false
+  # 日报标题，会用于 HTML 标题和 Telegram 附件说明。
+  title: "gw-ipinfo-nginx 日报"
   timezone_mode: "config"
   timezone: "UTC"
   daily_send_time: "09:00"
   period_mode: "lookback"
   lookback: 24h
+  # 日报发送失败后的重试间隔。
+  retry_interval: 15m
+  # 最多向前回补多少天的日报状态。
+  max_backfill_days: 7
   top_n: 10
   include_csv: true
   include_html: true
@@ -228,6 +248,9 @@ reports:
     prefix: "gw-report"
     append_date: true
     date_format: "2006-01-02"
+
+branding:
+  display_name: "gw-ipinfo-nginx"
 
 storage:
   local_path: "/data/shared/gw-ipinfo-nginx.db"

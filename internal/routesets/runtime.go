@@ -1,7 +1,9 @@
 package routesets
 
 import (
+	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -11,6 +13,7 @@ import (
 type Runtime struct {
 	compiled *Compiled
 	grant    *GrantManager
+	v3       *V3Runtime
 }
 
 type V1GrantResult struct {
@@ -21,13 +24,14 @@ type V1GrantResult struct {
 	ExpiresAt time.Time
 }
 
-func NewRuntime(compiled *Compiled, cfg config.RouteSetsConfig) *Runtime {
+func NewRuntime(compiled *Compiled, cfg config.RouteSetsConfig, logger *slog.Logger) *Runtime {
 	if compiled == nil || !compiled.Enabled {
 		return nil
 	}
 	return &Runtime{
 		compiled: compiled,
 		grant:    NewGrantManager(cfg.V1Grant),
+		v3:       NewV3Runtime(compiled, logger),
 	}
 }
 
@@ -85,6 +89,20 @@ func (r *Runtime) RedirectStatusCode() int {
 		return http.StatusFound
 	}
 	return r.compiled.RedirectStatusCode
+}
+
+func (r *Runtime) Run(ctx context.Context) {
+	if r == nil || r.v3 == nil {
+		return
+	}
+	r.v3.Run(ctx)
+}
+
+func (r *Runtime) SelectV3Target(rule CompiledRule, clientIP string) (V3Selection, error) {
+	if r == nil || r.v3 == nil {
+		return V3Selection{}, ErrNoHealthyTarget
+	}
+	return r.v3.Select(rule, clientIP, time.Now().UTC())
 }
 
 func (r *Runtime) validationResult(claims GrantClaims, token string, err error, successStatus GrantStatus) V1GrantResult {

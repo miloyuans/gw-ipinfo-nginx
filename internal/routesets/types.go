@@ -20,6 +20,7 @@ const (
 	KindDefault Kind = "default"
 	KindV1      Kind = "v1"
 	KindV2      Kind = "v2"
+	KindV3      Kind = "v3"
 )
 
 type MatchType string
@@ -49,8 +50,26 @@ type CompiledRule struct {
 	TargetPublicURL  string
 	BackendService   string
 	BackendHost      string
+	V3StrategyMode   string
+	V3SessionTTL     time.Duration
+	V3SessionIdleTimeout time.Duration
+	V3SecurityFilterEnabled bool
+	V3PoolTargets    []V3PoolTarget
 	SourceFile       string
 	RawRule          string
+}
+
+type V3PoolTarget struct {
+	ID                 string
+	PublicURL          string
+	Host               string
+	Weight             int
+	HealthCheckEnabled bool
+	HealthCheckURL     string
+	HealthCheckInterval time.Duration
+	HealthCheckTimeout  time.Duration
+	HealthyThreshold    int
+	UnhealthyThreshold  int
 }
 
 type TargetBinding struct {
@@ -68,6 +87,7 @@ type CompileSummary struct {
 	DefaultRulesCount    int
 	V1RulesCount         int
 	V2RulesCount         int
+	V3RulesCount         int
 	AllowedSourceHosts   int
 	AllowedTargetHosts   int
 	ConflictCount        int
@@ -78,6 +98,7 @@ type Compiled struct {
 	StrictHostControl  bool
 	RedirectStatusCode int
 	BypassRulesByHost  map[string][]CompiledRule
+	V3RulesByHost      map[string][]CompiledRule
 	SourceRulesByHost  map[string][]CompiledRule
 	TargetHostIndex    map[string]TargetBinding
 	AllowedHosts       map[string]struct{}

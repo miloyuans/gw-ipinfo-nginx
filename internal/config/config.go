@@ -25,10 +25,12 @@ type Config struct {
 	Security SecurityConfig `yaml:"security"`
 	Routing  RoutingConfig  `yaml:"routing"`
 	RouteSets RouteSetsConfig `yaml:"route_sets"`
+	V3Defaults V3DefaultsConfig `yaml:"v3_defaults"`
 	Alerts   AlertsConfig   `yaml:"alerts"`
 	Reports  ReportsConfig  `yaml:"reports"`
 	Storage  StorageConfig  `yaml:"storage"`
 	Perf     PerformanceConfig `yaml:"performance"`
+	Branding BrandingConfig `yaml:"branding"`
 	DenyPage DenyPageConfig `yaml:"deny_page"`
 	Logging  LoggingConfig  `yaml:"logging"`
 	Metrics  MetricsConfig  `yaml:"metrics"`
@@ -160,6 +162,7 @@ type RouteSetsConfig struct {
 	Default            RouteSetFileConfig `yaml:"default"`
 	V1                 RouteSetFileConfig `yaml:"v1"`
 	V2                 RouteSetFileConfig `yaml:"v2"`
+	V3                 RouteSetFileConfig `yaml:"v3"`
 	StrictHostControl  bool               `yaml:"strict_host_control"`
 	FailFastOnConflict bool               `yaml:"fail_fast_on_conflict"`
 	RedirectStatusCode int                `yaml:"redirect_status_code"`
@@ -197,11 +200,14 @@ type AlertsConfig struct {
 
 type ReportsConfig struct {
 	Enabled         bool                  `yaml:"enabled"`
+	Title           string                `yaml:"title"`
 	TimeZoneMode    string                `yaml:"timezone_mode"`
 	TimeZone        string                `yaml:"timezone"`
 	DailySendTime   string                `yaml:"daily_send_time"`
 	PeriodMode      string                `yaml:"period_mode"`
 	Lookback        time.Duration         `yaml:"lookback"`
+	RetryInterval   time.Duration         `yaml:"retry_interval"`
+	MaxBackfillDays int                   `yaml:"max_backfill_days"`
 	TopN            int                   `yaml:"top_n"`
 	IncludeCSV      bool                  `yaml:"include_csv"`
 	IncludeHTML     bool                  `yaml:"include_html"`
@@ -250,6 +256,8 @@ type TelegramConfig struct {
 	APIBaseURL       string `yaml:"api_base_url"`
 	Timeout          time.Duration `yaml:"timeout"`
 	ParseMode        string `yaml:"parse_mode"`
+	DisplayName      string `yaml:"display_name"`
+	TitlePrefix      string `yaml:"title_prefix"`
 	MaskQuery        bool   `yaml:"mask_query"`
 	IncludeUserAgent bool   `yaml:"include_user_agent"`
 	Lifecycle        TelegramLifecycleConfig `yaml:"lifecycle"`
@@ -334,6 +342,21 @@ type LoggingConfig struct {
 type MetricsConfig struct {
 	Enabled bool   `yaml:"enabled"`
 	Path    string `yaml:"path"`
+}
+
+type BrandingConfig struct {
+	DisplayName string `yaml:"display_name"`
+}
+
+type V3DefaultsConfig struct {
+	HealthCheck V3HealthDefaultsConfig `yaml:"health_check"`
+}
+
+type V3HealthDefaultsConfig struct {
+	Interval           time.Duration `yaml:"interval"`
+	Timeout            time.Duration `yaml:"timeout"`
+	HealthyThreshold   int           `yaml:"healthy_threshold"`
+	UnhealthyThreshold int           `yaml:"unhealthy_threshold"`
 }
 
 func Load(path string) (*Config, error) {
@@ -501,6 +524,9 @@ func (c *Config) applyDefaults() {
 	if c.RouteSets.V2.ConfigPath == "" {
 		c.RouteSets.V2.ConfigPath = "passroute_v2.yaml"
 	}
+	if c.RouteSets.V3.ConfigPath == "" {
+		c.RouteSets.V3.ConfigPath = "passroute_v3.yaml"
+	}
 	if c.RouteSets.RedirectStatusCode == 0 {
 		c.RouteSets.RedirectStatusCode = 302
 	}
@@ -523,8 +549,14 @@ func (c *Config) applyDefaults() {
 	if c.Alerts.Telegram.APIBaseURL == "" {
 		c.Alerts.Telegram.APIBaseURL = "https://api.telegram.org"
 	}
+	if c.Branding.DisplayName == "" {
+		c.Branding.DisplayName = "gw-ipinfo-nginx"
+	}
 	if c.Alerts.Telegram.Timeout == 0 {
 		c.Alerts.Telegram.Timeout = 5 * time.Second
+	}
+	if c.Alerts.Telegram.DisplayName == "" {
+		c.Alerts.Telegram.DisplayName = c.Branding.DisplayName
 	}
 	if c.Alerts.Telegram.Lifecycle.HeartbeatInterval == 0 {
 		c.Alerts.Telegram.Lifecycle.HeartbeatInterval = 30 * time.Minute
@@ -626,6 +658,9 @@ func (c *Config) applyDefaults() {
 	if c.Reports.TimeZone == "" {
 		c.Reports.TimeZone = "UTC"
 	}
+	if c.Reports.Title == "" {
+		c.Reports.Title = c.Branding.DisplayName + " 日报"
+	}
 	if c.Reports.DailySendTime == "" {
 		c.Reports.DailySendTime = "09:00"
 	}
@@ -634,6 +669,12 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Reports.Lookback == 0 {
 		c.Reports.Lookback = 24 * time.Hour
+	}
+	if c.Reports.RetryInterval == 0 {
+		c.Reports.RetryInterval = 15 * time.Minute
+	}
+	if c.Reports.MaxBackfillDays == 0 {
+		c.Reports.MaxBackfillDays = 7
 	}
 	if c.Reports.TopN == 0 {
 		c.Reports.TopN = 10
@@ -663,6 +704,18 @@ func (c *Config) applyDefaults() {
 
 	if c.Storage.LocalPath == "" {
 		c.Storage.LocalPath = "/data/shared/gw-ipinfo-nginx.db"
+	}
+	if c.V3Defaults.HealthCheck.Interval == 0 {
+		c.V3Defaults.HealthCheck.Interval = 30 * time.Second
+	}
+	if c.V3Defaults.HealthCheck.Timeout == 0 {
+		c.V3Defaults.HealthCheck.Timeout = 3 * time.Second
+	}
+	if c.V3Defaults.HealthCheck.HealthyThreshold == 0 {
+		c.V3Defaults.HealthCheck.HealthyThreshold = 2
+	}
+	if c.V3Defaults.HealthCheck.UnhealthyThreshold == 0 {
+		c.V3Defaults.HealthCheck.UnhealthyThreshold = 2
 	}
 	if c.Storage.ReplayInterval == 0 {
 		c.Storage.ReplayInterval = 30 * time.Second
@@ -944,6 +997,12 @@ func (c *Config) Validate() error {
 	if !slices.Contains([]string{"previous_day", "lookback"}, c.Reports.PeriodMode) {
 		errs = append(errs, errors.New("reports.period_mode must be previous_day or lookback"))
 	}
+	if c.Reports.RetryInterval <= 0 {
+		errs = append(errs, errors.New("reports.retry_interval must be > 0"))
+	}
+	if c.Reports.MaxBackfillDays <= 0 {
+		errs = append(errs, errors.New("reports.max_backfill_days must be > 0"))
+	}
 	if c.Reports.Enabled && c.Reports.Output.TelegramEnabled && !c.Alerts.Telegram.Enabled {
 		errs = append(errs, errors.New("reports.output.telegram_enabled requires alerts.telegram.enabled to be true"))
 	}
@@ -972,6 +1031,18 @@ func (c *Config) Validate() error {
 	}
 	if c.Storage.ReplayWorkers <= 0 {
 		errs = append(errs, errors.New("storage.replay_workers must be > 0"))
+	}
+	if c.V3Defaults.HealthCheck.Interval <= 0 {
+		errs = append(errs, errors.New("v3_defaults.health_check.interval must be > 0"))
+	}
+	if c.V3Defaults.HealthCheck.Timeout <= 0 {
+		errs = append(errs, errors.New("v3_defaults.health_check.timeout must be > 0"))
+	}
+	if c.V3Defaults.HealthCheck.HealthyThreshold <= 0 {
+		errs = append(errs, errors.New("v3_defaults.health_check.healthy_threshold must be > 0"))
+	}
+	if c.V3Defaults.HealthCheck.UnhealthyThreshold <= 0 {
+		errs = append(errs, errors.New("v3_defaults.health_check.unhealthy_threshold must be > 0"))
 	}
 	if c.Perf.RequestQueueSize <= 0 {
 		errs = append(errs, errors.New("performance.request_queue_size must be > 0"))

@@ -1,0 +1,24 @@
+version: 1
+routes:
+  # - id: "landing-v3"
+  #   source:
+  #     host: "landing.example.com"
+  #     path_prefix: "/"
+  #   strategy:
+  #     mode: "weighted_round_robin"
+  #     session_ttl: 1h
+  #     session_idle_timeout: 15m
+  #     security_filter_enabled: false
+  #   pool:
+  #     - id: "landing-a"
+  #       public_url: "https://a.example.com/"
+  #       weight: 3
+  #       health_check:
+  #         enabled: true
+  #         url: "https://a.example.com/healthz"
+  #     - id: "landing-b"
+  #       public_url: "https://b.example.com/"
+  #       weight: 1
+  #       health_check:
+  #         enabled: true
+  #         url: "https://b.example.com/healthz"

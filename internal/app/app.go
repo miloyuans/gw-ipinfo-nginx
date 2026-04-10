@@ -44,6 +44,7 @@ type Application struct {
 	mongoClient      *mongostore.Client
 	localStore       *localdisk.Store
 	storageControl   *storage.Controller
+	routeRuntime     *routesets.Runtime
 	shortCircuit     *shortcircuit.Service
 	alertWorkers     []*alerts.Worker
 	commandBot       *alerts.CommandBot
@@ -113,11 +114,11 @@ func New(configPath string) (*Application, error) {
 		return nil, err
 	}
 	resolver := routing.NewResolver(cfg.Routing)
-	compiledRouteSets, err := routesets.LoadAndCompile(configPath, cfg.RouteSets, cfg.Routing, logger)
+	compiledRouteSets, err := routesets.LoadAndCompile(configPath, cfg.RouteSets, cfg.Routing, cfg.V3Defaults, logger)
 	if err != nil {
 		return nil, fmt.Errorf("compile route sets: %w", err)
 	}
-	routeRuntime := routesets.NewRuntime(compiledRouteSets, cfg.RouteSets)
+	routeRuntime := routesets.NewRuntime(compiledRouteSets, cfg.RouteSets, logger)
 	proxyManager, err := proxy.NewManager(cfg.Routing.Services, cfg.Perf, metricSet, logger)
 	if err != nil {
 		return nil, err
@@ -242,6 +243,7 @@ func New(configPath string) (*Application, error) {
 		mongoClient:      mongoClient,
 		localStore:       localStore,
 		storageControl:   storageControl,
+		routeRuntime:     routeRuntime,
 		shortCircuit:     shortCircuitService,
 		alertWorkers:     alertWorkers,
 		commandBot:       commandBot,
@@ -270,6 +272,9 @@ func (a *Application) run(ctx context.Context, listener net.Listener) error {
 	}
 	if a.shortCircuit != nil {
 		a.shortCircuit.Run(ctx, a.cfg.Perf.DecisionWorkers)
+	}
+	if a.routeRuntime != nil {
+		a.routeRuntime.Run(ctx)
 	}
 	if a.reportingService != nil {
 		a.reportingService.Run(ctx, a.cfg.Storage.ReplayWorkers)
@@ -377,6 +382,11 @@ type routeContext struct {
 	BackendHost      string
 	GrantStatus      string
 	GrantExpireAt    string
+	V3SecurityFilterEnabled bool
+	V3SelectedTargetID      string
+	V3SelectedTargetHost    string
+	V3StrategyMode          string
+	V3BindingReused         bool
 }
 
 type responseAction struct {
@@ -476,6 +486,38 @@ func (h *GatewayHandler) serveSourceRoute(w http.ResponseWriter, r *http.Request
 			outcome.state,
 			routeMeta,
 			responseAction{upstreamHost: resolution.Rule.BackendHost},
+		)
+		return
+	case routesets.KindV3:
+		outcome, selectedTarget, bindingReused := h.evaluateV3Chain(r, fallbackService, resolution.Rule)
+		routeMeta.V3SecurityFilterEnabled = resolution.Rule.V3SecurityFilterEnabled
+		routeMeta.V3StrategyMode = resolution.Rule.V3StrategyMode
+		if selectedTarget.ID != "" {
+			routeMeta.V3SelectedTargetID = selectedTarget.ID
+			routeMeta.V3SelectedTargetHost = selectedTarget.Host
+			routeMeta.TargetHost = selectedTarget.Host
+			routeMeta.TargetPublicURL = selectedTarget.PublicURL
+			routeMeta.V3BindingReused = bindingReused
+		}
+		if !outcome.decision.Allowed {
+			h.finish(w, r, requestID, outcome.service, outcome.clientIP, outcome.ipContext, outcome.decision, start, outcome.state, routeMeta, responseAction{})
+			return
+		}
+		h.finish(
+			w,
+			r,
+			requestID,
+			outcome.service,
+			outcome.clientIP,
+			outcome.ipContext,
+			outcome.decision,
+			start,
+			outcome.state,
+			routeMeta,
+			responseAction{
+				redirectURL:  selectedTarget.PublicURL,
+				redirectCode: h.routeRuntime.RedirectStatusCode(),
+			},
 		)
 		return
 	case routesets.KindDefault:
@@ -825,6 +867,71 @@ func (h *GatewayHandler) evaluateBypassChain(r *http.Request, service config.Ser
 	}
 }
 
+func (h *GatewayHandler) evaluateV3Chain(r *http.Request, service config.ServiceConfig, rule routesets.CompiledRule) (evaluationResult, routesets.V3PoolTarget, bool) {
+	if rule.V3SecurityFilterEnabled {
+		outcome := h.evaluateFullChain(r, service)
+		if !outcome.decision.Allowed {
+			return outcome, routesets.V3PoolTarget{}, false
+		}
+		selected, err := h.routeRuntime.SelectV3Target(rule, outcome.clientIP)
+		if err != nil {
+			outcome.decision = policy.Decision{Allowed: false, Result: "deny", Reason: "deny_v3_no_healthy_target"}
+			return outcome, routesets.V3PoolTarget{}, false
+		}
+		outcome.decision.Reason = "allow_v3_redirect"
+		return outcome, selected.Target, selected.BindingReused
+	}
+
+	state := h.newFlowState()
+	clientIP := ""
+	if extracted, err := h.realIPExtractor.Extract(r); err == nil {
+		clientIP = extracted
+	} else if h.logger != nil {
+		h.logger.Warn("v3_real_ip_extract_failed",
+			"event", "v3_real_ip_extract_failed",
+			"route_set_kind", "v3",
+			"route_id", rule.ID,
+			"host", r.Host,
+			"path", r.URL.Path,
+			"error", err,
+		)
+	}
+
+	ipContext := ipctx.Context{}
+	reason := "allow_v3_redirect"
+	if clientIP == "" {
+		reason = "allow_v3_redirect_no_real_ip"
+	} else if h.lookupService != nil && h.cfg.IPInfo.Enabled {
+		state.ipinfoLookupAction = "start"
+		lookupContext, cacheSource, lookupAction, lookupErr := h.lookupService.Lookup(r.Context(), clientIP)
+		ipContext = lookupContext
+		state.cacheSource = cacheSource
+		state.ipinfoLookupAction = lookupAction
+		if lookupErr != nil {
+			reason = "allow_v3_redirect_with_ipinfo_error"
+		}
+	}
+
+	selected, err := h.routeRuntime.SelectV3Target(rule, clientIP)
+	if err != nil {
+		return evaluationResult{
+			service:   service,
+			clientIP:  clientIP,
+			ipContext: ipContext,
+			decision:  policy.Decision{Allowed: false, Result: "deny", Reason: "deny_v3_no_healthy_target"},
+			state:     state,
+		}, routesets.V3PoolTarget{}, false
+	}
+
+	return evaluationResult{
+		service:   service,
+		clientIP:  clientIP,
+		ipContext: ipContext,
+		decision:  policy.Decision{Allowed: true, Result: "allow", Reason: reason},
+		state:     state,
+	}, selected.Target, selected.BindingReused
+}
+
 func (h *GatewayHandler) evaluateFullChain(r *http.Request, service config.ServiceConfig) evaluationResult {
 	clientIP, extractDecision, state := h.extractClientIP(r)
 	if extractDecision != nil {
@@ -999,6 +1106,13 @@ func (h *GatewayHandler) trackReport(req *http.Request, record model.AuditRecord
 		Privacy:              record.Privacy,
 		ShortCircuitHit:      record.ShortCircuitHit,
 		ShortCircuitDecision: record.ShortCircuitDecision,
+		V3SecurityFilterEnabled: record.V3SecurityFilterEnabled,
+		V3SelectedTargetID:      record.V3SelectedTargetID,
+		V3SelectedTargetHost:    record.V3SelectedTargetHost,
+		V3StrategyMode:          record.V3StrategyMode,
+		V3BindingReused:         record.V3BindingReused,
+		IPInfoLookupAction:      record.IPInfoLookupAction,
+		DataSourceMode:          record.DataSourceMode,
 	})
 }
 
@@ -1099,6 +1213,11 @@ func (h *GatewayHandler) auditRecord(req *http.Request, requestID string, servic
 		BackendHost:            routeMeta.BackendHost,
 		GrantStatus:            routeMeta.GrantStatus,
 		GrantExpireAt:          routeMeta.GrantExpireAt,
+		V3SecurityFilterEnabled: routeMeta.V3SecurityFilterEnabled,
+		V3SelectedTargetID:      routeMeta.V3SelectedTargetID,
+		V3SelectedTargetHost:    routeMeta.V3SelectedTargetHost,
+		V3StrategyMode:          routeMeta.V3StrategyMode,
+		V3BindingReused:         routeMeta.V3BindingReused,
 		LatencyMS:              float64(latency.Milliseconds()),
 	}
 	if ipContext != nil {
@@ -1141,6 +1260,8 @@ func (h *GatewayHandler) routeContextFromRule(rule routesets.CompiledRule) route
 		TargetPublicURL:  rule.TargetPublicURL,
 		BackendService:   rule.BackendService,
 		BackendHost:      rule.BackendHost,
+		V3SecurityFilterEnabled: rule.V3SecurityFilterEnabled,
+		V3StrategyMode:          rule.V3StrategyMode,
 	}
 }
 

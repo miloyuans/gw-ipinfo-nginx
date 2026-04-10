@@ -52,6 +52,13 @@ type Event struct {
 	Privacy              ipctx.PrivacyFlags
 	ShortCircuitHit      bool
 	ShortCircuitDecision string
+	V3SecurityFilterEnabled bool
+	V3SelectedTargetID      string
+	V3SelectedTargetHost    string
+	V3StrategyMode          string
+	V3BindingReused         bool
+	IPInfoLookupAction      string
+	DataSourceMode          string
 }
 
 type Summary struct {
@@ -64,6 +71,13 @@ type Summary struct {
 	RouteID                string             `json:"route_id" bson:"route_id"`
 	SourceHost             string             `json:"source_host" bson:"source_host"`
 	TargetHost             string             `json:"target_host" bson:"target_host"`
+	V3SecurityFilterEnabled bool              `json:"v3_security_filter_enabled" bson:"v3_security_filter_enabled"`
+	V3SelectedTargetID      string            `json:"v3_selected_target_id" bson:"v3_selected_target_id"`
+	V3SelectedTargetHost    string            `json:"v3_selected_target_host" bson:"v3_selected_target_host"`
+	V3StrategyMode          string            `json:"v3_strategy_mode" bson:"v3_strategy_mode"`
+	V3BindingReused         bool              `json:"v3_binding_reused" bson:"v3_binding_reused"`
+	IPInfoLookupAction      string            `json:"ipinfo_lookup_action" bson:"ipinfo_lookup_action"`
+	DataSourceMode          string            `json:"data_source_mode" bson:"data_source_mode"`
 	Host                   string             `json:"host" bson:"host"`
 	Path                   string             `json:"path" bson:"path"`
 	RequestURL             string             `json:"request_url" bson:"request_url"`
@@ -89,6 +103,31 @@ type aggregateRow struct {
 	Value uint64
 }
 
+type reportDeliveryState struct {
+	ID                string    `json:"id" bson:"_id"`
+	Kind              string    `json:"kind" bson:"kind"`
+	Day               string    `json:"day" bson:"day"`
+	AttemptCount      int       `json:"attempt_count" bson:"attempt_count"`
+	LastAttemptAt     time.Time `json:"last_attempt_at" bson:"last_attempt_at"`
+	LastError         string    `json:"last_error" bson:"last_error"`
+	TelegramHTMLSent  bool      `json:"telegram_html_sent" bson:"telegram_html_sent"`
+	TelegramCSVSent   bool      `json:"telegram_csv_sent" bson:"telegram_csv_sent"`
+	FileHTMLWritten   bool      `json:"file_html_written" bson:"file_html_written"`
+	FileCSVWritten    bool      `json:"file_csv_written" bson:"file_csv_written"`
+	TelegramSuccess   bool      `json:"telegram_success" bson:"telegram_success"`
+	FileSuccess       bool      `json:"file_success" bson:"file_success"`
+	OverallSuccess    bool      `json:"overall_success" bson:"overall_success"`
+	UpdatedAt         time.Time `json:"updated_at" bson:"updated_at"`
+}
+
+type reportCandidate struct {
+	ReportDay  time.Time
+	ReportTime time.Time
+	DayKey     string
+	DayLabel   string
+	State      reportDeliveryState
+}
+
 type Service struct {
 	cfg            *config.Config
 	controller     *storage.Controller
@@ -101,6 +140,8 @@ type Service struct {
 	workerID       string
 	collectionName string
 	indexOnce      sync.Once
+	scheduleMu     sync.Mutex
+	lastSkipLogKey string
 }
 
 func NewService(cfg *config.Config, controller *storage.Controller, logger *slog.Logger, sender *alerts.Sender, metricsSet *metrics.GatewayMetrics, workerID string) (*Service, error) {
@@ -131,8 +172,8 @@ func (s *Service) Name() string {
 }
 
 func (s *Service) Track(event Event) {
-	if event.ClientIP == "" {
-		return
+	if strings.TrimSpace(event.ClientIP) == "" {
+		event.ClientIP = "(unknown)"
 	}
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now().UTC()
@@ -159,9 +200,12 @@ func (s *Service) Run(ctx context.Context, workers int) {
 		if s.logger != nil {
 			s.logger.Info("daily_report_scheduler_started",
 				"event", "daily_report_scheduler_started",
+				"title", s.cfg.Reports.Title,
 				"timezone_mode", s.cfg.Reports.TimeZoneMode,
 				"resolved_timezone", s.locationName,
 				"period_mode", s.cfg.Reports.PeriodMode,
+				"retry_interval", s.cfg.Reports.RetryInterval,
+				"max_backfill_days", s.cfg.Reports.MaxBackfillDays,
 				"telegram_enabled", s.cfg.Reports.Output.TelegramEnabled,
 				"file_enabled", s.cfg.Reports.Output.FileEnabled,
 			)
@@ -297,6 +341,13 @@ func applyEvent(summary *Summary, event Event, now time.Time) {
 	summary.RouteID = event.RouteID
 	summary.SourceHost = event.SourceHost
 	summary.TargetHost = event.TargetHost
+	summary.V3SecurityFilterEnabled = event.V3SecurityFilterEnabled
+	summary.V3SelectedTargetID = event.V3SelectedTargetID
+	summary.V3SelectedTargetHost = event.V3SelectedTargetHost
+	summary.V3StrategyMode = event.V3StrategyMode
+	summary.V3BindingReused = event.V3BindingReused
+	summary.IPInfoLookupAction = event.IPInfoLookupAction
+	summary.DataSourceMode = event.DataSourceMode
 	summary.Host = event.Host
 	summary.Path = event.Path
 	summary.RequestURL = event.RequestURL
@@ -335,6 +386,10 @@ func (s *Service) upsertMongo(ctx context.Context, client *mongostore.Client, su
 				Keys:    bson.D{{Key: "day", Value: 1}, {Key: "client_ip", Value: 1}},
 				Options: options.Index().SetName("daily_ip_lookup"),
 			},
+			{
+				Keys:    bson.D{{Key: "kind", Value: 1}, {Key: "day", Value: 1}},
+				Options: options.Index().SetName("report_kind_day"),
+			},
 		}
 		_, _ = collection.Indexes().CreateMany(child, indexes)
 	})
@@ -363,123 +418,21 @@ func (s *Service) runScheduler(ctx context.Context) {
 }
 
 func (s *Service) trySendDailyReport(ctx context.Context, now time.Time) error {
+	candidate, err := s.nextReportCandidate(ctx, now)
+	if err != nil {
+		return err
+	}
+
 	reportTime, err := s.reportTime(now)
 	if err != nil {
 		return err
 	}
-	if now.In(s.location).Before(reportTime) {
-		if s.logger != nil {
-			s.logger.Info("daily_report_skipped_before_time",
-				"event", "daily_report_skipped_before_time",
-				"timezone_mode", s.cfg.Reports.TimeZoneMode,
-				"resolved_timezone", s.locationName,
-				"period_mode", s.cfg.Reports.PeriodMode,
-			)
-		}
-		return nil
-	}
-	reportDay := s.resolveReportDay(reportTime)
-	dayKey := reportDay.In(s.location).Format("2006-01-02")
-	dayLabel := reportDay.In(s.location).Format(s.cfg.Reports.Filename.DateFormat)
-	if sent, err := s.isReportSent(ctx, dayKey); err == nil && sent {
+	if candidate == nil {
+		s.logSkipBeforeTimeOnce(now, reportTime)
 		return nil
 	}
 
-	htmlReport, csvReport, err := s.GenerateDaily(ctx, reportDay)
-	if err != nil {
-		return err
-	}
-	if s.logger != nil {
-		s.logger.Info("daily_report_generated",
-			"event", "daily_report_generated",
-			"day_key", dayKey,
-			"period_mode", s.cfg.Reports.PeriodMode,
-			"timezone_mode", s.cfg.Reports.TimeZoneMode,
-			"resolved_timezone", s.locationName,
-		)
-	}
-	caption := fmt.Sprintf("gw-ipinfo-nginx daily report %s", dayKey)
-	if !s.cfg.Reports.Output.TelegramEnabled && !s.cfg.Reports.Output.FileEnabled {
-		if s.logger != nil {
-			s.logger.Warn("daily_report_no_output_sink",
-				"event", "daily_report_no_output_sink",
-				"day_key", dayKey,
-				"period_mode", s.cfg.Reports.PeriodMode,
-				"timezone_mode", s.cfg.Reports.TimeZoneMode,
-				"resolved_timezone", s.locationName,
-			)
-		}
-		return s.markReportSent(ctx, dayKey)
-	}
-
-	success := false
-
-	if s.cfg.Reports.Output.FileEnabled {
-		if s.cfg.Reports.IncludeHTML {
-			path, err := s.writeReportFile(dayLabel, "html", htmlReport)
-			if err != nil {
-				if s.logger != nil {
-					s.logger.Warn("daily_report_write_error", "event", "daily_report_write_error", "day_key", dayKey, "format", "html", "output_dir", s.cfg.Reports.Output.OutputDir, "error", err)
-				}
-			} else {
-				success = true
-				if s.logger != nil {
-					s.logger.Info("daily_report_written", "event", "daily_report_written", "day_key", dayKey, "format", "html", "path", path)
-				}
-			}
-		}
-		if s.cfg.Reports.IncludeCSV {
-			path, err := s.writeReportFile(dayLabel, "csv", csvReport)
-			if err != nil {
-				if s.logger != nil {
-					s.logger.Warn("daily_report_write_error", "event", "daily_report_write_error", "day_key", dayKey, "format", "csv", "output_dir", s.cfg.Reports.Output.OutputDir, "error", err)
-				}
-			} else {
-				success = true
-				if s.logger != nil {
-					s.logger.Info("daily_report_written", "event", "daily_report_written", "day_key", dayKey, "format", "csv", "path", path)
-				}
-			}
-		}
-	}
-
-	if s.cfg.Reports.Output.TelegramEnabled && s.sender != nil {
-		if s.cfg.Reports.IncludeHTML {
-			if err := s.sendReportDocument(ctx, dayLabel, "html", "text/html", htmlReport, caption); err != nil {
-				if s.logger != nil {
-					s.logger.Warn("daily_report_send_error", "event", "daily_report_send_error", "day_key", dayKey, "format", "html", "error", err)
-				}
-			} else {
-				success = true
-			}
-		}
-		if s.cfg.Reports.IncludeCSV {
-			if err := s.sendReportDocument(ctx, dayLabel, "csv", "text/csv", csvReport, caption); err != nil {
-				if s.logger != nil {
-					s.logger.Warn("daily_report_send_error", "event", "daily_report_send_error", "day_key", dayKey, "format", "csv", "error", err)
-				}
-			} else {
-				success = true
-			}
-		}
-	}
-
-	if !success {
-		if s.metrics != nil {
-			s.metrics.ReportRuns.Inc(metrics.Labels{"status": "send_error"})
-		}
-		return fmt.Errorf("daily report %s had no successful output sink", dayKey)
-	}
-	if err := s.markReportSent(ctx, dayKey); err != nil {
-		if s.metrics != nil {
-			s.metrics.ReportRuns.Inc(metrics.Labels{"status": "mark_error"})
-		}
-		return err
-	}
-	if s.metrics != nil {
-		s.metrics.ReportRuns.Inc(metrics.Labels{"status": "sent"})
-	}
-	return nil
+	return s.deliverReportCandidate(ctx, now, *candidate)
 }
 
 func (s *Service) reportTime(now time.Time) (time.Time, error) {
@@ -503,54 +456,332 @@ func (s *Service) resolveReportDay(reportTime time.Time) time.Time {
 	return reportTime.Add(-s.cfg.Reports.Lookback)
 }
 
-func (s *Service) isReportSent(ctx context.Context, dayKey string) (bool, error) {
-	if client := s.controller.Client(); client != nil && s.controller.Mode() != storage.ModeLocal {
-		child, cancel := client.WithTimeout(ctx)
-		defer cancel()
-		count, err := client.Database().Collection(s.collectionName).CountDocuments(child, bson.M{
-			"_id":  "report_sent:" + dayKey,
-			"kind": "report_sent",
-		})
-		if err == nil {
-			return count > 0, nil
+func (s *Service) nextReportCandidate(ctx context.Context, now time.Time) (*reportCandidate, error) {
+	localNow := now.In(s.location)
+	for offset := s.cfg.Reports.MaxBackfillDays - 1; offset >= 0; offset-- {
+		scheduledLocal := localNow.AddDate(0, 0, -offset)
+		reportTime := time.Date(scheduledLocal.Year(), scheduledLocal.Month(), scheduledLocal.Day(), 0, 0, 0, 0, s.location)
+		dailyTime, err := s.reportTime(reportTime)
+		if err != nil {
+			return nil, err
 		}
-		s.controller.HandleMongoError(err)
+		if dailyTime.After(localNow) {
+			continue
+		}
+
+		reportDay := s.resolveReportDay(dailyTime)
+		dayKey := reportDay.In(s.location).Format("2006-01-02")
+		state, err := s.loadReportState(ctx, dayKey)
+		if err != nil {
+			return nil, err
+		}
+		if state.OverallSuccess {
+			continue
+		}
+		if !state.LastAttemptAt.IsZero() && now.UTC().Sub(state.LastAttemptAt) < s.cfg.Reports.RetryInterval {
+			continue
+		}
+		return &reportCandidate{
+			ReportDay:  reportDay,
+			ReportTime: dailyTime,
+			DayKey:     dayKey,
+			DayLabel:   reportDay.In(s.location).Format(s.cfg.Reports.Filename.DateFormat),
+			State:      state,
+		}, nil
+	}
+	return nil, nil
+}
+
+func (s *Service) deliverReportCandidate(ctx context.Context, now time.Time, candidate reportCandidate) error {
+	state := candidate.State
+	state.AttemptCount++
+	state.LastAttemptAt = now.UTC()
+	state.UpdatedAt = now.UTC()
+
+	if state.AttemptCount > 1 && s.logger != nil {
+		s.logger.Info("daily_report_backfill_started",
+			"event", "daily_report_backfill_started",
+			"day_key", candidate.DayKey,
+			"attempt_count", state.AttemptCount,
+			"retry_interval", s.cfg.Reports.RetryInterval,
+		)
 	}
 
-	type marker struct {
-		SentAt time.Time `json:"sent_at"`
+	htmlReport, csvReport, err := s.GenerateDaily(ctx, candidate.ReportDay)
+	if err != nil {
+		state.LastError = err.Error()
+		_ = s.saveReportState(ctx, state)
+		return err
 	}
-	var value marker
-	err := s.controller.Local().GetJSON(ctx, localdisk.BucketMetadata, "report_sent:"+dayKey, &value)
-	if err == nil {
-		return true, nil
+	if s.logger != nil {
+		s.logger.Info("daily_report_generated",
+			"event", "daily_report_generated",
+			"day_key", candidate.DayKey,
+			"title", s.cfg.Reports.Title,
+			"period_mode", s.cfg.Reports.PeriodMode,
+			"timezone_mode", s.cfg.Reports.TimeZoneMode,
+			"resolved_timezone", s.locationName,
+			"attempt_count", state.AttemptCount,
+		)
 	}
-	if err == localdisk.ErrNotFound {
-		return false, nil
+
+	if !s.cfg.Reports.Output.TelegramEnabled && !s.cfg.Reports.Output.FileEnabled {
+		if s.logger != nil {
+			s.logger.Warn("daily_report_no_output_sink",
+				"event", "daily_report_no_output_sink",
+				"day_key", candidate.DayKey,
+			)
+		}
+		state.OverallSuccess = true
+		state.LastError = ""
+		return s.saveReportState(ctx, state)
 	}
-	return false, err
+
+	caption := s.reportCaption(candidate.DayKey)
+	var errorsList []string
+
+	if s.cfg.Reports.Output.FileEnabled {
+		if s.cfg.Reports.IncludeHTML && !state.FileHTMLWritten {
+			path, writeErr := s.writeReportFile(candidate.DayLabel, "html", htmlReport)
+			if writeErr != nil {
+				errorsList = append(errorsList, writeErr.Error())
+				if s.logger != nil {
+					s.logger.Warn("daily_report_write_error", "event", "daily_report_write_error", "day_key", candidate.DayKey, "format", "html", "output_dir", s.cfg.Reports.Output.OutputDir, "error", writeErr)
+				}
+			} else {
+				state.FileHTMLWritten = true
+				if s.logger != nil {
+					s.logger.Info("daily_report_written", "event", "daily_report_written", "day_key", candidate.DayKey, "format", "html", "path", path)
+				}
+			}
+		}
+		if s.cfg.Reports.IncludeCSV && !state.FileCSVWritten {
+			path, writeErr := s.writeReportFile(candidate.DayLabel, "csv", csvReport)
+			if writeErr != nil {
+				errorsList = append(errorsList, writeErr.Error())
+				if s.logger != nil {
+					s.logger.Warn("daily_report_write_error", "event", "daily_report_write_error", "day_key", candidate.DayKey, "format", "csv", "output_dir", s.cfg.Reports.Output.OutputDir, "error", writeErr)
+				}
+			} else {
+				state.FileCSVWritten = true
+				if s.logger != nil {
+					s.logger.Info("daily_report_written", "event", "daily_report_written", "day_key", candidate.DayKey, "format", "csv", "path", path)
+				}
+			}
+		}
+	}
+
+	if s.cfg.Reports.Output.TelegramEnabled && s.sender != nil {
+		if s.cfg.Reports.IncludeHTML && !state.TelegramHTMLSent {
+			if sendErr := s.sendReportDocument(ctx, candidate.DayLabel, "html", "text/html", htmlReport, caption); sendErr != nil {
+				errorsList = append(errorsList, sendErr.Error())
+				if s.logger != nil {
+					s.logger.Warn("daily_report_send_error", "event", "daily_report_send_error", "day_key", candidate.DayKey, "format", "html", "error", sendErr)
+				}
+			} else {
+				state.TelegramHTMLSent = true
+			}
+		}
+		if s.cfg.Reports.IncludeCSV && !state.TelegramCSVSent {
+			if sendErr := s.sendReportDocument(ctx, candidate.DayLabel, "csv", "text/csv", csvReport, caption); sendErr != nil {
+				errorsList = append(errorsList, sendErr.Error())
+				if s.logger != nil {
+					s.logger.Warn("daily_report_send_error", "event", "daily_report_send_error", "day_key", candidate.DayKey, "format", "csv", "error", sendErr)
+				}
+			} else {
+				state.TelegramCSVSent = true
+			}
+		}
+	}
+
+	state.TelegramSuccess = s.telegramReportSatisfied(state)
+	state.FileSuccess = s.fileReportSatisfied(state)
+	state.OverallSuccess = state.TelegramSuccess && state.FileSuccess
+	state.UpdatedAt = time.Now().UTC()
+	if len(errorsList) > 0 {
+		state.LastError = strings.Join(errorsList, " | ")
+	} else {
+		state.LastError = ""
+	}
+
+	if err := s.saveReportState(ctx, state); err != nil {
+		if s.metrics != nil {
+			s.metrics.ReportRuns.Inc(metrics.Labels{"status": "state_error"})
+		}
+		return err
+	}
+
+	status := "partial"
+	switch {
+	case state.OverallSuccess:
+		status = "sent"
+	case state.TelegramSuccess || state.FileSuccess:
+		status = "partial"
+	default:
+		status = "send_error"
+	}
+	if s.metrics != nil {
+		s.metrics.ReportRuns.Inc(metrics.Labels{"status": status})
+	}
+	if state.OverallSuccess {
+		if s.logger != nil {
+			s.logger.Info("daily_report_completed",
+				"event", "daily_report_completed",
+				"day_key", candidate.DayKey,
+				"telegram_success", state.TelegramSuccess,
+				"file_success", state.FileSuccess,
+				"attempt_count", state.AttemptCount,
+			)
+		}
+		return nil
+	}
+	return fmt.Errorf("daily report %s not fully delivered yet: %s", candidate.DayKey, state.LastError)
+}
+
+func (s *Service) isReportSent(ctx context.Context, dayKey string) (bool, error) {
+	state, err := s.loadReportState(ctx, dayKey)
+	if err != nil {
+		return false, err
+	}
+	return state.OverallSuccess, nil
 }
 
 func (s *Service) markReportSent(ctx context.Context, dayKey string) error {
+	state, err := s.loadReportState(ctx, dayKey)
+	if err != nil {
+		return err
+	}
+	state.TelegramSuccess = true
+	state.FileSuccess = true
+	state.OverallSuccess = true
+	state.UpdatedAt = time.Now().UTC()
+	state.LastError = ""
+	return s.saveReportState(ctx, state)
+}
+
+func (s *Service) reportStateKey(dayKey string) string {
+	return "report_state:" + dayKey
+}
+
+func (s *Service) defaultReportState(dayKey string) reportDeliveryState {
+	return reportDeliveryState{
+		ID:   s.reportStateKey(dayKey),
+		Kind: "report_state",
+		Day:  dayKey,
+	}
+}
+
+func (s *Service) loadReportState(ctx context.Context, dayKey string) (reportDeliveryState, error) {
+	defaultState := s.defaultReportState(dayKey)
 	if client := s.controller.Client(); client != nil && s.controller.Mode() != storage.ModeLocal {
 		child, cancel := client.WithTimeout(ctx)
 		defer cancel()
-		_, err := client.Database().Collection(s.collectionName).UpdateByID(child, "report_sent:"+dayKey, bson.M{
-			"$set": bson.M{
-				"kind":    "report_sent",
-				"day":     dayKey,
-				"sent_at": time.Now().UTC(),
-			},
-		}, options.Update().SetUpsert(true))
+
+		var state reportDeliveryState
+		err := client.Database().Collection(s.collectionName).FindOne(child, bson.M{"_id": s.reportStateKey(dayKey)}).Decode(&state)
+		if err == nil {
+			return state, nil
+		}
+		if !errors.Is(err, mongo.ErrNoDocuments) {
+			s.controller.HandleMongoError(err)
+		}
+	}
+
+	var state reportDeliveryState
+	err := s.controller.Local().GetJSON(ctx, localdisk.BucketMetadata, s.reportStateKey(dayKey), &state)
+	if err == nil {
+		return state, nil
+	}
+	if errors.Is(err, localdisk.ErrNotFound) {
+		return defaultState, nil
+	}
+	return defaultState, err
+}
+
+func (s *Service) saveReportState(ctx context.Context, state reportDeliveryState) error {
+	state.TelegramSuccess = s.telegramReportSatisfied(state)
+	state.FileSuccess = s.fileReportSatisfied(state)
+	state.OverallSuccess = state.TelegramSuccess && state.FileSuccess
+	state.UpdatedAt = time.Now().UTC()
+
+	if client := s.controller.Client(); client != nil && s.controller.Mode() != storage.ModeLocal {
+		child, cancel := client.WithTimeout(ctx)
+		defer cancel()
+
+		_, err := client.Database().Collection(s.collectionName).ReplaceOne(
+			child,
+			bson.M{"_id": state.ID},
+			state,
+			options.Replace().SetUpsert(true),
+		)
 		if err == nil {
 			return nil
 		}
 		s.controller.HandleMongoError(err)
 	}
 
-	return s.controller.Local().PutJSON(ctx, localdisk.BucketMetadata, "report_sent:"+dayKey, map[string]time.Time{
-		"sent_at": time.Now().UTC(),
-	})
+	return s.controller.Local().PutJSON(ctx, localdisk.BucketMetadata, state.ID, state)
+}
+
+func (s *Service) telegramReportSatisfied(state reportDeliveryState) bool {
+	if !s.cfg.Reports.Output.TelegramEnabled || s.sender == nil {
+		return true
+	}
+	if s.cfg.Reports.IncludeHTML && !state.TelegramHTMLSent {
+		return false
+	}
+	if s.cfg.Reports.IncludeCSV && !state.TelegramCSVSent {
+		return false
+	}
+	return true
+}
+
+func (s *Service) fileReportSatisfied(state reportDeliveryState) bool {
+	if !s.cfg.Reports.Output.FileEnabled {
+		return true
+	}
+	if s.cfg.Reports.IncludeHTML && !state.FileHTMLWritten {
+		return false
+	}
+	if s.cfg.Reports.IncludeCSV && !state.FileCSVWritten {
+		return false
+	}
+	return true
+}
+
+func (s *Service) logSkipBeforeTimeOnce(now, reportTime time.Time) {
+	if !now.In(s.location).Before(reportTime) {
+		return
+	}
+	logKey := reportTime.Format(time.RFC3339)
+	s.scheduleMu.Lock()
+	if s.lastSkipLogKey == logKey {
+		s.scheduleMu.Unlock()
+		return
+	}
+	s.lastSkipLogKey = logKey
+	s.scheduleMu.Unlock()
+
+	if s.logger != nil {
+		s.logger.Info("daily_report_waiting_for_schedule",
+			"event", "daily_report_waiting_for_schedule",
+			"title", s.cfg.Reports.Title,
+			"next_report_time", reportTime.Format(time.RFC3339),
+			"timezone_mode", s.cfg.Reports.TimeZoneMode,
+			"resolved_timezone", s.locationName,
+		)
+	}
+}
+
+func (s *Service) reportCaption(dayKey string) string {
+	title := strings.TrimSpace(s.cfg.Reports.Title)
+	if title == "" {
+		title = "gw-ipinfo-nginx daily report"
+	}
+	if prefix := strings.TrimSpace(s.cfg.Alerts.Telegram.TitlePrefix); prefix != "" {
+		return prefix + " " + title + " " + dayKey
+	}
+	return title + " " + dayKey
 }
 
 func (s *Service) loadDay(ctx context.Context, dayKey string) ([]Summary, error) {
@@ -639,6 +870,9 @@ func (s *Service) renderCSV(summaries []Summary) ([]byte, error) {
 		"city",
 		"route_set_kind",
 		"route_id",
+		"v3_strategy_mode",
+		"v3_selected_target_id",
+		"v3_selected_target_host",
 		"source_host",
 		"target_host",
 		"user_agent_summary",
@@ -659,6 +893,9 @@ func (s *Service) renderCSV(summaries []Summary) ([]byte, error) {
 			summary.City,
 			summary.RouteSetKind,
 			summary.RouteID,
+			summary.V3StrategyMode,
+			summary.V3SelectedTargetID,
+			summary.V3SelectedTargetHost,
 			summary.SourceHost,
 			summary.TargetHost,
 			summary.UserAgentSummary,
@@ -699,9 +936,13 @@ func (s *Service) renderHTML(dayKey string, summaries []Summary) ([]byte, error)
 	}
 
 	buf := &bytes.Buffer{}
-	buf.WriteString("<!doctype html><html><head><meta charset=\"utf-8\"><title>gw-ipinfo-nginx report</title>")
+	title := strings.TrimSpace(s.cfg.Reports.Title)
+	if title == "" {
+		title = "gw-ipinfo-nginx daily report"
+	}
+	buf.WriteString("<!doctype html><html><head><meta charset=\"utf-8\"><title>" + html.EscapeString(title) + "</title>")
 	buf.WriteString("<style>body{font-family:Arial,sans-serif;margin:24px;background:#f8fafc;color:#0f172a}table{border-collapse:collapse;width:100%}th,td{border:1px solid #cbd5e1;padding:8px;font-size:13px;text-align:left}th{background:#e2e8f0}h1,h2{margin:0 0 12px}section{margin:24px 0}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.card{background:#fff;padding:12px;border:1px solid #cbd5e1;border-radius:8px}</style></head><body>")
-	buf.WriteString("<h1>gw-ipinfo-nginx Daily Report " + html.EscapeString(dayKey) + "</h1>")
+	buf.WriteString("<h1>" + html.EscapeString(title) + " " + html.EscapeString(dayKey) + "</h1>")
 	buf.WriteString("<section class=\"grid\">")
 	buf.WriteString(card("total requests", fmt.Sprintf("%d", totalRequests)))
 	buf.WriteString(card("unique IPs", fmt.Sprintf("%d", len(summaries))))
@@ -715,7 +956,7 @@ func (s *Service) renderHTML(dayKey string, summaries []Summary) ([]byte, error)
 	buf.WriteString(listBlock("hosts", topMap(topHost, s.cfg.Reports.TopN)))
 	buf.WriteString(listBlock("ua", topMap(topUA, s.cfg.Reports.TopN)))
 	buf.WriteString("</section>")
-	buf.WriteString("<section><h2>Deduplicated IP Summary</h2><table><thead><tr><th>IP</th><th>Allow</th><th>Deny</th><th>Allow reason</th><th>Deny reason</th><th>Country</th><th>Region</th><th>City</th><th>Route set</th><th>Route ID</th><th>Source host</th><th>Target host</th><th>UA</th><th>Host</th><th>Path</th><th>SC allow</th><th>SC deny</th></tr></thead><tbody>")
+	buf.WriteString("<section><h2>Deduplicated IP Summary</h2><table><thead><tr><th>IP</th><th>Allow</th><th>Deny</th><th>Allow reason</th><th>Deny reason</th><th>Country</th><th>Region</th><th>City</th><th>Route set</th><th>Route ID</th><th>V3 strategy</th><th>V3 target ID</th><th>V3 target host</th><th>Source host</th><th>Target host</th><th>UA</th><th>Host</th><th>Path</th><th>SC allow</th><th>SC deny</th></tr></thead><tbody>")
 	for _, summary := range summaries {
 		buf.WriteString("<tr>")
 		buf.WriteString(td(summary.ClientIP))
@@ -728,6 +969,9 @@ func (s *Service) renderHTML(dayKey string, summaries []Summary) ([]byte, error)
 		buf.WriteString(td(summary.City))
 		buf.WriteString(td(summary.RouteSetKind))
 		buf.WriteString(td(summary.RouteID))
+		buf.WriteString(td(summary.V3StrategyMode))
+		buf.WriteString(td(summary.V3SelectedTargetID))
+		buf.WriteString(td(summary.V3SelectedTargetHost))
 		buf.WriteString(td(summary.SourceHost))
 		buf.WriteString(td(summary.TargetHost))
 		buf.WriteString(td(summary.UserAgentSummary))
@@ -880,6 +1124,13 @@ func mergeSummaries(left, right Summary) Summary {
 		merged.RouteID = right.RouteID
 		merged.SourceHost = right.SourceHost
 		merged.TargetHost = right.TargetHost
+		merged.V3SecurityFilterEnabled = right.V3SecurityFilterEnabled
+		merged.V3SelectedTargetID = right.V3SelectedTargetID
+		merged.V3SelectedTargetHost = right.V3SelectedTargetHost
+		merged.V3StrategyMode = right.V3StrategyMode
+		merged.V3BindingReused = right.V3BindingReused
+		merged.IPInfoLookupAction = right.IPInfoLookupAction
+		merged.DataSourceMode = right.DataSourceMode
 		merged.Host = right.Host
 		merged.Path = right.Path
 		merged.RequestURL = right.RequestURL

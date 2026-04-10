@@ -30,6 +30,11 @@ type AuditRecord struct {
 	BackendHost            string
 	GrantStatus            string
 	GrantExpireAt          string
+	V3SecurityFilterEnabled bool
+	V3SelectedTargetID      string
+	V3SelectedTargetHost    string
+	V3StrategyMode          string
+	V3BindingReused         bool
 	CountryCode            string
 	CountryName            string
 	Region                 string

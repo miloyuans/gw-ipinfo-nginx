@@ -140,6 +140,42 @@ routing:
       target_url: "${NGINX_TARGET_URL}"
       preserve_host: true
 
+route_sets:
+  bypass:
+    enabled: false
+    config_path: "bypassroute.yaml"
+  default:
+    enabled: false
+    config_path: "defaultroute.yaml"
+  v1:
+    enabled: false
+    config_path: "passroute_v1.yaml"
+  v2:
+    enabled: false
+    config_path: "passroute_v2.yaml"
+  v3:
+    enabled: false
+    config_path: "passroute_v3.yaml"
+  strict_host_control: false
+  fail_fast_on_conflict: true
+  redirect_status_code: 302
+  v1_grant:
+    ttl: 1h
+    bind_user_agent: true
+    bind_client_ip: true
+    bind_client_ip_v4_prefix: 24
+    bind_client_ip_v6_prefix: 56
+    query_param: "gwgr"
+    cookie_name: "__Host-gwgr"
+    signing_key: "${GW_V1_GRANT_SIGNING_KEY}"
+
+v3_defaults:
+  health_check:
+    interval: 30s
+    timeout: 3s
+    healthy_threshold: 2
+    unhealthy_threshold: 2
+
 alerts:
   telegram:
     enabled: false
@@ -148,8 +184,20 @@ alerts:
     api_base_url: "https://api.telegram.org"
     timeout: 5s
     parse_mode: ""
+    # 机器人显示名，用于生命周期通知和日报标题
+    display_name: "gw-ipinfo-nginx"
+    # Telegram 通知标题前缀；为空时会自动回落到 display_name
+    title_prefix: "[gw-ipinfo-nginx]"
     mask_query: true
     include_user_agent: true
+    lifecycle:
+      startup_notify: true
+      shutdown_notify: true
+      unclean_exit_notify: true
+      self_check_on_start: true
+      heartbeat_enabled: false
+      heartbeat_interval: 30m
+      notify_mode: "notify"
     command_bot:
       # Telegram 群交互机器人开关。
       # 开启后支持在指定群里发送 /q 114.114.114.114 8.8.8.8 这种命令来查 IPinfo /lookup。
@@ -212,15 +260,34 @@ alerts:
 reports:
   # 开启后会每天定时通过 Telegram 发送 HTML + CSV 两个附件
   enabled: false
+  # 日报标题，会用于 HTML 标题和 Telegram 附件标题
+  title: "gw-ipinfo-nginx 日报"
+  timezone_mode: "config"
   timezone: "UTC"
   daily_send_time: "09:00"
+  period_mode: "lookback"
   lookback: 24h
+  # 日报发送失败后，每隔多久重试一次
+  retry_interval: 15m
+  # 最多向前补发多少天的日报
+  max_backfill_days: 7
   top_n: 10
   include_csv: true
   include_html: true
   worker_enabled: true
   poll_interval: 1m
   replay_batch_size: 1000
+  output:
+    telegram_enabled: false
+    file_enabled: false
+    output_dir: "/data/shared/reports"
+  filename:
+    prefix: "gw-report"
+    append_date: true
+    date_format: "2006-01-02"
+
+branding:
+  display_name: "gw-ipinfo-nginx"
 
 storage:
   # 本地降级数据库路径；Docker / K8s 都建议挂载到持久目录。

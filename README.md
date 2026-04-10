@@ -357,36 +357,61 @@ Linux deployments can optionally enable `server.prefork.enabled=true` and set `s
 
 ## Route Sets
 
-The gateway can now compile three route-set files in parallel:
+The gateway can now compile five route-set files in parallel:
 
+- `configs/bypassroute.yaml`
 - `configs/defaultroute.yaml`
 - `configs/passroute_v1.yaml`
 - `configs/passroute_v2.yaml`
+- `configs/passroute_v3.yaml`
 
 Main config lives in `configs/config.yaml` under `route_sets`.
 
 Behavior:
 
+- `bypass`: still runs request-level bot / crawler checks and optional IPinfo lookup, then skips the later Geo / Privacy deny chain and proxies directly to the configured backend service.
 - `default`: only declares which `host + path_prefix` entries may use the existing default gateway flow.
 - `v1`: source host/path runs the full detection flow, then issues a signed grant and redirects to `target.public_url`.
 - `v2`: source host/path runs the full detection flow, then redirects to `target.public_url` without grant lifecycle.
+- `v3`: source host/path can choose a healthy target from a pool and redirect to that target URL. It supports `random`, `round_robin`, and `weighted_round_robin`, per-target health checks, and temporary client-IP binding.
 
 Compiler rules:
 
 - startup loads every enabled file together
 - all source routes are normalized into one global unique `host + path_prefix` table
-- duplicate source keys across `default / v1 / v2` fail startup
+- duplicate source keys across `bypass / default / v1 / v2 / v3` fail startup
 - same target host must keep the same `rule_kind + backend_service + backend_host`
 - `target.public_url` must be absolute `http/https`
 - `backend_service` must exist in `routing.services`
 
 Runtime rules:
 
+- `bypass` source rules are matched before the other source rule kinds
 - source matching uses exact host + longest path prefix
 - `v1` target host validates query grant first, then cookie grant
 - `v2` target host can directly enter the full detection flow
+- `v3` source rules can run in lightweight redirect mode or full-security-filter mode before choosing a target
 - when `route_sets.strict_host_control=true`, only compiled source/target hosts are accepted
 - unmatched requests are denied with `deny_route_not_found`
+
+## Report Delivery
+
+Daily reports now keep a persistent delivery ledger per day.
+
+- sink delivery state is tracked independently for Telegram HTML, Telegram CSV, file HTML, and file CSV
+- scheduler retries failed or partially delivered days using `reports.retry_interval`
+- scheduler backfills previous days inside `reports.max_backfill_days`
+- repeated `daily_report_skipped_before_time` log spam is suppressed
+- HTML title and Telegram caption use `reports.title`
+
+## Telegram Lifecycle
+
+Telegram lifecycle notifications now support:
+
+- `alerts.telegram.display_name`
+- `alerts.telegram.title_prefix`
+- chat reachability verification during self-check
+- clearer lifecycle events such as `telegram_healthcheck_started`, `telegram_healthcheck_ok`, and `telegram_healthcheck_error`
 
 New audit fields:
 

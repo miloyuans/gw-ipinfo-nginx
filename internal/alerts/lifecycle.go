@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"gw-ipinfo-nginx/internal/config"
@@ -65,7 +66,11 @@ func (m *LifecycleManager) Startup(ctx context.Context, reportsEnabled, alertsEn
 	}
 
 	if unclean && m.cfg.Lifecycle.UncleanExitNotify && m.cfg.Lifecycle.NotifyMode == "notify" {
-		go m.sendTextWithLog("telegram_unclean_exit_notify_sent", "telegram_unclean_exit_notify_error", fmt.Sprintf("gw-ipinfo-nginx recovered after possible unclean exit\ninstance_id: %s\nhostname: %s\ntime: %s", m.instanceID, m.hostname, time.Now().UTC().Format(time.RFC3339)))
+		go m.sendTextWithLog(
+			"telegram_unclean_exit_notify_sent",
+			"telegram_unclean_exit_notify_error",
+			m.formatMessage("Recovered After Unclean Exit", reportsEnabled, alertsEnabled),
+		)
 	}
 
 	if m.cfg.Lifecycle.HeartbeatEnabled {
@@ -92,7 +97,7 @@ func (m *LifecycleManager) Shutdown(ctx context.Context) {
 
 	sendCtx, cancel := context.WithTimeout(ctx, minDuration(m.cfg.Timeout, 3*time.Second))
 	defer cancel()
-	if err := m.sender.SendText(sendCtx, fmt.Sprintf("gw-ipinfo-nginx shutdown\ninstance_id: %s\nhostname: %s\ntime: %s", m.instanceID, m.hostname, time.Now().UTC().Format(time.RFC3339))); err != nil {
+	if err := m.sender.SendText(sendCtx, m.formatMessage("Shutdown", false, m.cfg.Enabled)); err != nil {
 		if m.logger != nil {
 			m.logger.Warn("telegram_shutdown_notify_error", "event", "telegram_shutdown_notify_error", "hostname", m.hostname, "instance_id", m.instanceID, "error", err)
 		}
@@ -105,18 +110,18 @@ func (m *LifecycleManager) Shutdown(ctx context.Context) {
 
 func (m *LifecycleManager) selfCheck(reportsEnabled, alertsEnabled bool) {
 	if m.logger != nil {
-		m.logger.Info("telegram_self_check_started", "event", "telegram_self_check_started", "hostname", m.hostname, "instance_id", m.instanceID, "notify_mode", m.cfg.Lifecycle.NotifyMode)
+		m.logger.Info("telegram_healthcheck_started", "event", "telegram_healthcheck_started", "hostname", m.hostname, "instance_id", m.instanceID, "notify_mode", m.cfg.Lifecycle.NotifyMode)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), m.cfg.Timeout)
 	defer cancel()
 	if err := m.sender.SelfCheck(ctx); err != nil {
 		if m.logger != nil {
-			m.logger.Warn("telegram_self_check_error", "event", "telegram_self_check_error", "hostname", m.hostname, "instance_id", m.instanceID, "error", err)
+			m.logger.Warn("telegram_healthcheck_error", "event", "telegram_healthcheck_error", "hostname", m.hostname, "instance_id", m.instanceID, "error", err)
 		}
 		return
 	}
 	if m.logger != nil {
-		m.logger.Info("telegram_self_check_ok", "event", "telegram_self_check_ok", "hostname", m.hostname, "instance_id", m.instanceID)
+		m.logger.Info("telegram_healthcheck_ok", "event", "telegram_healthcheck_ok", "hostname", m.hostname, "instance_id", m.instanceID)
 	}
 	if m.cfg.Lifecycle.StartupNotify && m.cfg.Lifecycle.NotifyMode == "notify" {
 		m.sendStartupNotify(reportsEnabled, alertsEnabled)
@@ -127,15 +132,7 @@ func (m *LifecycleManager) sendStartupNotify(reportsEnabled, alertsEnabled bool)
 	if m.cfg.Lifecycle.NotifyMode != "notify" {
 		return
 	}
-	text := fmt.Sprintf(
-		"gw-ipinfo-nginx startup\ninstance_id: %s\nhostname: %s\nreports_enabled: %t\nalerts_enabled: %t\ntelegram_enabled: %t\ntime: %s",
-		m.instanceID,
-		m.hostname,
-		reportsEnabled,
-		alertsEnabled,
-		m.cfg.Enabled,
-		time.Now().UTC().Format(time.RFC3339),
-	)
+	text := m.formatMessage("Startup", reportsEnabled, alertsEnabled)
 	m.sendTextWithLog("telegram_startup_notify_sent", "telegram_startup_notify_error", text)
 }
 
@@ -148,7 +145,7 @@ func (m *LifecycleManager) runHeartbeat(ctx context.Context, reportsEnabled, ale
 			return
 		case <-ticker.C:
 			if m.cfg.Lifecycle.NotifyMode == "notify" {
-				m.sendTextWithLog("telegram_heartbeat_ok", "telegram_heartbeat_error", fmt.Sprintf("gw-ipinfo-nginx heartbeat\ninstance_id: %s\nhostname: %s\nreports_enabled: %t\nalerts_enabled: %t\ntime: %s", m.instanceID, m.hostname, reportsEnabled, alertsEnabled, time.Now().UTC().Format(time.RFC3339)))
+				m.sendTextWithLog("telegram_heartbeat_ok", "telegram_heartbeat_error", m.formatMessage("Heartbeat", reportsEnabled, alertsEnabled))
 				continue
 			}
 			if m.logger != nil {
@@ -156,6 +153,29 @@ func (m *LifecycleManager) runHeartbeat(ctx context.Context, reportsEnabled, ale
 			}
 		}
 	}
+}
+
+func (m *LifecycleManager) formatMessage(status string, reportsEnabled, alertsEnabled bool) string {
+	displayName := strings.TrimSpace(m.cfg.DisplayName)
+	if displayName == "" {
+		displayName = "gw-ipinfo-nginx"
+	}
+	title := strings.TrimSpace(m.cfg.TitlePrefix)
+	if title == "" {
+		title = displayName
+	}
+	return fmt.Sprintf(
+		"%s %s\napp: %s\ninstance_id: %s\nhostname: %s\nreports_enabled: %t\nalerts_enabled: %t\ntelegram_enabled: %t\ntime: %s",
+		title,
+		status,
+		displayName,
+		m.instanceID,
+		m.hostname,
+		reportsEnabled,
+		alertsEnabled,
+		m.cfg.Enabled,
+		time.Now().UTC().Format(time.RFC3339),
+	)
 }
 
 func (m *LifecycleManager) sendTextWithLog(okEvent, errEvent, text string) {

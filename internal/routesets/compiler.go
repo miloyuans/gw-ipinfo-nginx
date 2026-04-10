@@ -14,6 +14,7 @@ type compileState struct {
 	serviceNames    map[string]struct{}
 	sourceIndex     map[string]CompiledRule
 	targetIndex     map[string]CompiledRule
+	v3Defaults      config.V3DefaultsConfig
 	failFast        bool
 	logger          *slog.Logger
 	conflictCount   int
@@ -23,13 +24,14 @@ type compileState struct {
 	ruleIDIndex     map[string]CompiledRule
 }
 
-func LoadAndCompile(baseConfigPath string, cfg config.RouteSetsConfig, routing config.RoutingConfig, logger *slog.Logger) (*Compiled, error) {
+func LoadAndCompile(baseConfigPath string, cfg config.RouteSetsConfig, routing config.RoutingConfig, v3Defaults config.V3DefaultsConfig, logger *slog.Logger) (*Compiled, error) {
 	state := &compileState{
 		compiled: &Compiled{
-			Enabled:            cfg.Bypass.Enabled || cfg.Default.Enabled || cfg.V1.Enabled || cfg.V2.Enabled,
+			Enabled:            cfg.Bypass.Enabled || cfg.Default.Enabled || cfg.V1.Enabled || cfg.V2.Enabled || cfg.V3.Enabled,
 			StrictHostControl:  cfg.StrictHostControl,
 			RedirectStatusCode: cfg.RedirectStatusCode,
 			BypassRulesByHost:  make(map[string][]CompiledRule),
+			V3RulesByHost:      make(map[string][]CompiledRule),
 			SourceRulesByHost:  make(map[string][]CompiledRule),
 			TargetHostIndex:    make(map[string]TargetBinding),
 			AllowedHosts:       make(map[string]struct{}),
@@ -38,6 +40,7 @@ func LoadAndCompile(baseConfigPath string, cfg config.RouteSetsConfig, routing c
 		serviceNames:  make(map[string]struct{}, len(routing.Services)),
 		sourceIndex:   make(map[string]CompiledRule),
 		targetIndex:   make(map[string]CompiledRule),
+		v3Defaults:    v3Defaults,
 		failFast:      cfg.FailFastOnConflict,
 		logger:        logger,
 		sourceHostSet: make(map[string]struct{}),
@@ -73,6 +76,11 @@ func LoadAndCompile(baseConfigPath string, cfg config.RouteSetsConfig, routing c
 			return nil, err
 		}
 	}
+	if cfg.V3.Enabled {
+		if err := state.compileV3(resolveFilePath(baseConfigPath, cfg.V3.ConfigPath)); err != nil {
+			return nil, err
+		}
+	}
 
 	if len(state.issues) > 0 {
 		return nil, errors.Join(state.issues...)
@@ -81,6 +89,10 @@ func LoadAndCompile(baseConfigPath string, cfg config.RouteSetsConfig, routing c
 	for host, rules := range state.compiled.BypassRulesByHost {
 		sortRulesByPathLen(rules)
 		state.compiled.BypassRulesByHost[host] = rules
+	}
+	for host, rules := range state.compiled.V3RulesByHost {
+		sortRulesByPathLen(rules)
+		state.compiled.V3RulesByHost[host] = rules
 	}
 	for host, rules := range state.compiled.SourceRulesByHost {
 		sortRulesByPathLen(rules)
@@ -98,6 +110,7 @@ func LoadAndCompile(baseConfigPath string, cfg config.RouteSetsConfig, routing c
 			"default_rules_count", state.compiled.Summary.DefaultRulesCount,
 			"v1_rules_count", state.compiled.Summary.V1RulesCount,
 			"v2_rules_count", state.compiled.Summary.V2RulesCount,
+			"v3_rules_count", state.compiled.Summary.V3RulesCount,
 			"allowed_source_hosts_count", state.compiled.Summary.AllowedSourceHosts,
 			"allowed_target_hosts_count", state.compiled.Summary.AllowedTargetHosts,
 			"conflict_count", state.compiled.Summary.ConflictCount,
@@ -187,6 +200,27 @@ func (s *compileState) compilePassKind(path string, kind Kind) error {
 			return errors.Join(s.issues...)
 		}
 		if !s.addTargetBinding(rule) && s.failFast {
+			return errors.Join(s.issues...)
+		}
+	}
+	return nil
+}
+
+func (s *compileState) compileV3(path string) error {
+	file, err := loadV3File(path)
+	if err != nil {
+		return fmt.Errorf("load %s routes %s: %w", KindV3, path, err)
+	}
+
+	for _, raw := range file.Routes {
+		rule, ok := s.normalizeV3Route(path, raw)
+		if !ok {
+			if s.failFast {
+				return errors.Join(s.issues...)
+			}
+			continue
+		}
+		if !s.addSourceRule(rule) && s.failFast {
 			return errors.Join(s.issues...)
 		}
 	}
@@ -355,6 +389,123 @@ func (s *compileState) normalizePassRoute(path string, kind Kind, raw passRoute)
 	return rule, true
 }
 
+func (s *compileState) normalizeV3Route(path string, raw v3Route) (CompiledRule, bool) {
+	ruleID := strings.TrimSpace(raw.ID)
+	if ruleID == "" {
+		ruleID = string(KindV3) + ":" + strings.TrimSpace(raw.Source.Host) + strings.TrimSpace(raw.Source.PathPrefix)
+	}
+	if existing, ok := s.ruleIDIndex[ruleID]; ok {
+		s.recordIssue(
+			"duplicate_route_id",
+			fmt.Errorf("duplicate route id %q", ruleID),
+			"file", path,
+			"rule_id", ruleID,
+			"left_file", existing.SourceFile,
+			"left_rule_id", existing.ID,
+		)
+		return CompiledRule{}, false
+	}
+
+	sourceHost, err := normalizeHost(raw.Source.Host)
+	if err != nil {
+		s.recordIssue("invalid_v3_route_entry", fmt.Errorf("invalid v3 source host for rule %q: %w", ruleID, err), "file", path, "rule_id", ruleID, "raw_entry", raw)
+		return CompiledRule{}, false
+	}
+	sourcePrefix, err := normalizePathPrefix(raw.Source.PathPrefix)
+	if err != nil {
+		s.recordIssue("invalid_v3_route_entry", fmt.Errorf("invalid v3 path prefix for rule %q: %w", ruleID, err), "file", path, "rule_id", ruleID, "raw_entry", raw)
+		return CompiledRule{}, false
+	}
+
+	mode := strings.TrimSpace(raw.Strategy.Mode)
+	if mode == "" {
+		mode = "random"
+	}
+	switch mode {
+	case "random", "round_robin", "weighted_round_robin":
+	default:
+		s.recordIssue("invalid_v3_strategy_mode", fmt.Errorf("invalid v3 strategy mode %q for rule %q", mode, ruleID), "file", path, "rule_id", ruleID, "strategy_mode", mode)
+		return CompiledRule{}, false
+	}
+	if raw.Strategy.SessionTTL <= 0 {
+		s.recordIssue("invalid_v3_route_entry", fmt.Errorf("v3 session_ttl must be > 0 for rule %q", ruleID), "file", path, "rule_id", ruleID, "raw_entry", raw)
+		return CompiledRule{}, false
+	}
+	if raw.Strategy.SessionIdleTimeout < 0 {
+		s.recordIssue("invalid_v3_route_entry", fmt.Errorf("v3 session_idle_timeout must be >= 0 for rule %q", ruleID), "file", path, "rule_id", ruleID, "raw_entry", raw)
+		return CompiledRule{}, false
+	}
+	if len(raw.Pool) == 0 {
+		s.recordIssue("invalid_v3_route_entry", fmt.Errorf("v3 pool must not be empty for rule %q", ruleID), "file", path, "rule_id", ruleID, "raw_entry", raw)
+		return CompiledRule{}, false
+	}
+
+	poolTargets := make([]V3PoolTarget, 0, len(raw.Pool))
+	seenTargetIDs := make(map[string]struct{}, len(raw.Pool))
+	for idx, entry := range raw.Pool {
+		targetID := strings.TrimSpace(entry.ID)
+		if targetID == "" {
+			targetID = fmt.Sprintf("%s-%d", ruleID, idx+1)
+		}
+		if _, exists := seenTargetIDs[targetID]; exists {
+			s.recordIssue("invalid_v3_route_entry", fmt.Errorf("duplicate v3 target id %q for rule %q", targetID, ruleID), "file", path, "rule_id", ruleID, "target_id", targetID)
+			return CompiledRule{}, false
+		}
+		seenTargetIDs[targetID] = struct{}{}
+		publicURL, targetHost, err := normalizePublicURL(entry.PublicURL)
+		if err != nil {
+			s.recordIssue("invalid_target_public_url", fmt.Errorf("invalid v3 target public url for rule %q target %q: %w", ruleID, targetID, err), "file", path, "rule_id", ruleID, "value", entry.PublicURL)
+			return CompiledRule{}, false
+		}
+		weight := entry.Weight
+		if weight <= 0 {
+			if mode == "weighted_round_robin" {
+				s.recordIssue("invalid_v3_route_entry", fmt.Errorf("v3 weight must be > 0 for weighted_round_robin rule %q target %q", ruleID, targetID), "file", path, "rule_id", ruleID, "target_id", targetID)
+				return CompiledRule{}, false
+			}
+			weight = 1
+		}
+
+		target := V3PoolTarget{
+			ID:                   targetID,
+			PublicURL:            publicURL,
+			Host:                 targetHost,
+			Weight:               weight,
+			HealthCheckEnabled:   entry.HealthCheck.Enabled,
+			HealthCheckURL:       strings.TrimSpace(entry.HealthCheck.URL),
+			HealthCheckInterval:  s.v3Defaults.HealthCheck.Interval,
+			HealthCheckTimeout:   s.v3Defaults.HealthCheck.Timeout,
+			HealthyThreshold:     s.v3Defaults.HealthCheck.HealthyThreshold,
+			UnhealthyThreshold:   s.v3Defaults.HealthCheck.UnhealthyThreshold,
+		}
+		if target.HealthCheckEnabled {
+			normalizedURL, _, err := normalizePublicURL(target.HealthCheckURL)
+			if err != nil {
+				s.recordIssue("invalid_v3_health_check_url", fmt.Errorf("invalid v3 health_check url for rule %q target %q: %w", ruleID, targetID, err), "file", path, "rule_id", ruleID, "target_id", targetID, "value", target.HealthCheckURL)
+				return CompiledRule{}, false
+			}
+			target.HealthCheckURL = normalizedURL
+		}
+		poolTargets = append(poolTargets, target)
+	}
+
+	rule := CompiledRule{
+		Kind:                    KindV3,
+		ID:                      ruleID,
+		SourceHost:              sourceHost,
+		SourcePathPrefix:        sourcePrefix,
+		V3StrategyMode:          mode,
+		V3SessionTTL:            raw.Strategy.SessionTTL,
+		V3SessionIdleTimeout:    raw.Strategy.SessionIdleTimeout,
+		V3SecurityFilterEnabled: raw.Strategy.SecurityFilterEnabled,
+		V3PoolTargets:           poolTargets,
+		SourceFile:              path,
+		RawRule:                 ruleID,
+	}
+	s.ruleIDIndex[rule.ID] = rule
+	return rule, true
+}
+
 func (s *compileState) addSourceRule(rule CompiledRule) bool {
 	key := routeKey(rule.SourceHost, rule.SourcePathPrefix)
 	if existing, ok := s.sourceIndex[key]; ok {
@@ -371,9 +522,12 @@ func (s *compileState) addSourceRule(rule CompiledRule) bool {
 	}
 
 	s.sourceIndex[key] = rule
-	if rule.Kind == KindBypass {
+	switch rule.Kind {
+	case KindBypass:
 		s.compiled.BypassRulesByHost[rule.SourceHost] = append(s.compiled.BypassRulesByHost[rule.SourceHost], rule)
-	} else {
+	case KindV3:
+		s.compiled.V3RulesByHost[rule.SourceHost] = append(s.compiled.V3RulesByHost[rule.SourceHost], rule)
+	default:
 		s.compiled.SourceRulesByHost[rule.SourceHost] = append(s.compiled.SourceRulesByHost[rule.SourceHost], rule)
 	}
 	s.compiled.AllowedHosts[rule.SourceHost] = struct{}{}
@@ -387,6 +541,8 @@ func (s *compileState) addSourceRule(rule CompiledRule) bool {
 		s.compiled.Summary.V1RulesCount++
 	case KindV2:
 		s.compiled.Summary.V2RulesCount++
+	case KindV3:
+		s.compiled.Summary.V3RulesCount++
 	}
 	if rule.ID != "" {
 		s.compiled.RulesByID[rule.ID] = rule
