@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gw-ipinfo-nginx/internal/config"
@@ -26,6 +27,7 @@ type CommandBot struct {
 	logger          *slog.Logger
 	client          *telegramBotClient
 	lookupService   *ipinfo.LookupService
+	queryCounter    *queryOrdinalTracker
 	stateStore      *commandBotStateStore
 	instanceID      string
 	allowedChatID   int64
@@ -80,7 +82,16 @@ type commandQueryResult struct {
 	cacheSource      string
 	lookupAction     string
 	dataSourceMode   string
+	queryOrdinal     uint64
 	err              error
+}
+
+type queryOrdinalTracker struct {
+	values sync.Map
+}
+
+type queryOrdinalValue struct {
+	value uint64
 }
 
 func NewCommandBot(cfg config.TelegramCommandBotConfig, logger *slog.Logger, lookupService *ipinfo.LookupService, controller *storage.Controller, statePath string, instanceID string) (*CommandBot, error) {
@@ -112,6 +123,7 @@ func NewCommandBot(cfg config.TelegramCommandBotConfig, logger *slog.Logger, loo
 			client:    &http.Client{Timeout: httpTimeout},
 		},
 		lookupService:  lookupService,
+		queryCounter:   newQueryOrdinalTracker(),
 		stateStore:     newCommandBotStateStore(controller, statePath, cfg.LeaseName),
 		instanceID:     instanceID,
 		allowedChatID:  chatID,
@@ -343,17 +355,20 @@ func (b *CommandBot) handleQuery(ctx context.Context, ips []string) string {
 				return
 			}
 
-			details, cacheSource, lookupAction, err := b.lookupService.LookupDetails(ctx, rawIP)
+			normalizedIP := ip.String()
+			queryOrdinal := b.queryCounter.Next(normalizedIP)
+			details, cacheSource, lookupAction, err := b.lookupService.LookupDetails(ctx, normalizedIP)
 			mode := "localdisk"
 			if b.stateStore != nil && b.stateStore.controller != nil {
 				mode = string(b.stateStore.controller.Mode())
 			}
 			results[index] = commandQueryResult{
-				ip:             rawIP,
+				ip:             normalizedIP,
 				details:        details,
 				cacheSource:    string(cacheSource),
 				lookupAction:   lookupAction,
 				dataSourceMode: mode,
+				queryOrdinal:   queryOrdinal,
 				err:            err,
 			}
 		}(idx, ipValue)
@@ -376,14 +391,95 @@ func (b *CommandBot) handleQuery(ctx context.Context, ips []string) string {
 
 		output.WriteString(formatLookupDetailsHTML(result.details))
 		if result.lookupAction != "" || result.cacheSource != "" {
-			output.WriteString(fmt.Sprintf("• Cache（缓存来源）: %s\n", html.EscapeString(result.cacheSource)))
-			output.WriteString(fmt.Sprintf("• Lookup（查询动作）: %s\n", html.EscapeString(result.lookupAction)))
-			output.WriteString(fmt.Sprintf("• Data Source Mode（数据源模式）: %s\n", html.EscapeString(result.dataSourceMode)))
+			output.WriteString(formatLookupSummaryHTML(result.cacheSource, result.lookupAction, result.dataSourceMode, result.queryOrdinal))
 		}
 		output.WriteString("\n")
 	}
 
 	return strings.TrimSpace(output.String())
+}
+
+func newQueryOrdinalTracker() *queryOrdinalTracker {
+	return &queryOrdinalTracker{}
+}
+
+func (t *queryOrdinalTracker) Next(ip string) uint64 {
+	if t == nil {
+		return 0
+	}
+	ip = strings.TrimSpace(ip)
+	if ip == "" {
+		return 0
+	}
+	value, _ := t.values.LoadOrStore(ip, &queryOrdinalValue{})
+	counter := value.(*queryOrdinalValue)
+	return atomic.AddUint64(&counter.value, 1)
+}
+
+func formatLookupSummaryHTML(cacheSource, lookupAction, dataSourceMode string, ordinal uint64) string {
+	zhSource, enSource, zhAction, enAction := classifyLookupSummary(cacheSource, lookupAction)
+	zhMode, enMode := describeLookupMode(dataSourceMode)
+	zhOrdinal, enOrdinal := formatQueryOrdinal(ordinal)
+
+	zhLine := fmt.Sprintf("数据来源 %s，%s，%s%s", zhSource, zhOrdinal, zhMode, zhAction)
+	enLine := fmt.Sprintf("Source: %s, %s, %s%s", enSource, enOrdinal, enMode, enAction)
+
+	return fmt.Sprintf(
+		"<b>%s</b>\n%s\n%s\n",
+		html.EscapeString("查询摘要 / Lookup Summary"),
+		html.EscapeString(zhLine),
+		html.EscapeString(enLine),
+	)
+}
+
+func classifyLookupSummary(cacheSource, lookupAction string) (string, string, string, string) {
+	action := strings.TrimSpace(strings.ToLower(lookupAction))
+	source := strings.TrimSpace(strings.ToLower(cacheSource))
+
+	switch {
+	case action == "cache_hit_l1" || source == "l1":
+		return "L1 缓存", "L1 cache", "缓存命中", "cache hit"
+	case action == "cache_hit_mongo" || action == "cache_hit_localdisk" || source == "mongo" || source == "localdisk":
+		return "DB 缓存", "DB cache", "数据库命中", "database hit"
+	case action == "remote_success" || action == "remote_error" || source == "ipinfo":
+		return "IPinfo", "IPinfo", "API", "API"
+	default:
+		return "DB 缓存", "DB cache", "缓存命中", "cache hit"
+	}
+}
+
+func describeLookupMode(mode string) (string, string) {
+	switch strings.TrimSpace(strings.ToLower(mode)) {
+	case "localdisk":
+		return "本地模式", "Local mode"
+	case "mongo":
+		return "DB 模式", "DB mode"
+	default:
+		return "混合模式", "Hybrid mode"
+	}
+}
+
+func formatQueryOrdinal(n uint64) (string, string) {
+	if n <= 1 {
+		return "首次查询", "First query"
+	}
+	return fmt.Sprintf("第 %d 次查询", n), fmt.Sprintf("%s query", englishOrdinal(n))
+}
+
+func englishOrdinal(n uint64) string {
+	if n%100 >= 11 && n%100 <= 13 {
+		return fmt.Sprintf("%dth", n)
+	}
+	switch n % 10 {
+	case 1:
+		return fmt.Sprintf("%dst", n)
+	case 2:
+		return fmt.Sprintf("%dnd", n)
+	case 3:
+		return fmt.Sprintf("%drd", n)
+	default:
+		return fmt.Sprintf("%dth", n)
+	}
 }
 
 func formatLookupDetailsHTML(details ipinfo.LookupDetails) string {
