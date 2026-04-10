@@ -150,6 +150,51 @@ alerts:
       heartbeat_enabled: false
       heartbeat_interval: 30m
       notify_mode: "notify"
+    command_bot:
+      # 启用后，机器人会在指定群内轮询命令并查询 IPinfo /lookup
+      # 默认会复用主程序的 IPinfo 缓存命中链和查询去重逻辑；
+      # 只有当这里配置了与全局不同的 ipinfo_token 时，才会使用独立查询客户端。
+      enabled: false
+      # 独立机器人配置；留空时自动回落到上面的 telegram 默认配置
+      bot_token: ""
+      chat_id: ""
+      # 允许交互的 Telegram 用户 ID 白名单。
+      # 留空表示允许所有用户；一旦配置则只有白名单用户能触发命令。
+      allowed_user_ids: []
+      api_base_url: ""
+      # 单次命令处理超时
+      timeout: 60s
+      # Telegram 长轮询超时
+      poll_timeout: 25s
+      # 拉取 updates 失败后的退避时间
+      error_backoff: 2s
+      # 多进程 / 多副本场景下的共享租约名；同一个 bot token 建议保持唯一
+      lease_name: "telegram-command-bot"
+      # 命令机器人租约 TTL；只有持有租约的实例会真正轮询 Telegram
+      lease_ttl: 45s
+      # 租约续期间隔，必须小于 lease_ttl
+      renew_interval: 15s
+      # 触发指令，支持 /q 或自定义成 /ipq 之类
+      command: "/q"
+      parse_mode: "HTML"
+      # 机器人查询所使用的 IPinfo token；留空时回落到全局 ipinfo.token
+      ipinfo_token: ""
+      # 默认不处理私聊，只允许指定群内使用
+      disable_private_chat: true
+      # 收到非授权群请求时，是否回复提示
+      reply_unauthorized_chat: true
+      # 单条命令最多查询多少个 IP
+      max_ips_per_request: 10
+      # 单条命令内并发查询 IPinfo 的数量
+      max_concurrent_lookups: 5
+      # 单条 Telegram 消息最大切片长度，超出会自动分段
+      message_chunk_size: 3500
+      templates:
+        unauthorized_chat: "此机器人仅允许在指定群内使用。"
+        unauthorized_user: "你没有权限使用此机器人命令。"
+        usage: "用法：%s <IP1> <IP2> ...\n例如：%s 114.114.114.114 8.8.8.8\n支持 IPv6：%s 2001:4860:4860::8888"
+        too_many_ips: "本次最多查询 %d 个 IP，已自动截断超出部分。"
+        empty_result: "没有可展示的查询结果。"
   delivery:
     worker_enabled: false
     poll_interval: 2s

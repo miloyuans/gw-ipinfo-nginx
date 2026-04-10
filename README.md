@@ -217,8 +217,33 @@ docker compose up --build -d
 - `storage.local_path`
 - `storage.mongo_probe_interval`
 - `alerts.delivery.*`
+- `alerts.telegram.command_bot.*`
 - `reports.*`
 - `performance.*`
+
+## Telegram 指令查询
+
+主线已内置一个可选的 Telegram 群交互查询机器人，配置入口在：
+
+- `alerts.telegram.command_bot`
+
+用途：
+
+- 在指定群内通过命令查询一个或多个 IP 的 IPinfo `/lookup` 结果
+- 保留中文交互提示和格式化输出
+- 支持命令名自定义，默认是 `/q`
+- 支持独立机器人配置；留空时自动回落到 `alerts.telegram` 的默认机器人配置
+- 支持独立 `ipinfo_token`；留空时自动回落到全局 `ipinfo.token`
+- 默认复用主程序相同的 IPinfo 缓存命中链、singleflight 去重和持久化缓存；只有独立 token 不同时才会拆出独立查询客户端
+- 支持 `allowed_user_ids` 用户白名单；留空表示允许所有用户
+- 支持多进程 / 多副本共享租约，只有持有租约的实例会真正轮询 Telegram，避免冲突
+
+典型命令：
+
+```text
+/q 114.114.114.114 8.8.8.8
+/q 2001:4860:4860::8888
+```
 
 ## Kubernetes 与 Mongo 副本集
 

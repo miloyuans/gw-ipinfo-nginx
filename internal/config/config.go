@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -252,6 +253,7 @@ type TelegramConfig struct {
 	MaskQuery        bool   `yaml:"mask_query"`
 	IncludeUserAgent bool   `yaml:"include_user_agent"`
 	Lifecycle        TelegramLifecycleConfig `yaml:"lifecycle"`
+	CommandBot       TelegramCommandBotConfig `yaml:"command_bot"`
 }
 
 type TelegramLifecycleConfig struct {
@@ -262,6 +264,37 @@ type TelegramLifecycleConfig struct {
 	HeartbeatEnabled bool          `yaml:"heartbeat_enabled"`
 	HeartbeatInterval time.Duration `yaml:"heartbeat_interval"`
 	NotifyMode       string        `yaml:"notify_mode"`
+}
+
+type TelegramCommandBotConfig struct {
+	Enabled               bool                            `yaml:"enabled"`
+	BotToken              string                          `yaml:"bot_token"`
+	ChatID                string                          `yaml:"chat_id"`
+	AllowedUserIDs        []int64                         `yaml:"allowed_user_ids"`
+	APIBaseURL            string                          `yaml:"api_base_url"`
+	Timeout               time.Duration                   `yaml:"timeout"`
+	PollTimeout           time.Duration                   `yaml:"poll_timeout"`
+	ErrorBackoff          time.Duration                   `yaml:"error_backoff"`
+	LeaseName             string                          `yaml:"lease_name"`
+	LeaseTTL              time.Duration                   `yaml:"lease_ttl"`
+	RenewInterval         time.Duration                   `yaml:"renew_interval"`
+	Command               string                          `yaml:"command"`
+	ParseMode             string                          `yaml:"parse_mode"`
+	IPInfoToken           string                          `yaml:"ipinfo_token"`
+	DisablePrivateChat    bool                            `yaml:"disable_private_chat"`
+	ReplyUnauthorizedChat bool                            `yaml:"reply_unauthorized_chat"`
+	MaxIPsPerRequest      int                             `yaml:"max_ips_per_request"`
+	MaxConcurrentLookups  int                             `yaml:"max_concurrent_lookups"`
+	MessageChunkSize      int                             `yaml:"message_chunk_size"`
+	Templates             TelegramCommandTemplateConfig   `yaml:"templates"`
+}
+
+type TelegramCommandTemplateConfig struct {
+	Usage            string `yaml:"usage"`
+	UnauthorizedChat string `yaml:"unauthorized_chat"`
+	UnauthorizedUser string `yaml:"unauthorized_user"`
+	TooManyIPs       string `yaml:"too_many_ips"`
+	EmptyResult      string `yaml:"empty_result"`
 }
 
 type ReportsOutputConfig struct {
@@ -498,6 +531,70 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Alerts.Telegram.Lifecycle.NotifyMode == "" {
 		c.Alerts.Telegram.Lifecycle.NotifyMode = "notify"
+	}
+	if c.Alerts.Telegram.CommandBot.APIBaseURL == "" {
+		c.Alerts.Telegram.CommandBot.APIBaseURL = c.Alerts.Telegram.APIBaseURL
+	}
+	if c.Alerts.Telegram.CommandBot.BotToken == "" {
+		c.Alerts.Telegram.CommandBot.BotToken = c.Alerts.Telegram.BotToken
+	}
+	if c.Alerts.Telegram.CommandBot.ChatID == "" {
+		c.Alerts.Telegram.CommandBot.ChatID = c.Alerts.Telegram.ChatID
+	}
+	if c.Alerts.Telegram.CommandBot.Timeout == 0 {
+		if c.Alerts.Telegram.Timeout > 0 {
+			c.Alerts.Telegram.CommandBot.Timeout = c.Alerts.Telegram.Timeout
+		} else {
+			c.Alerts.Telegram.CommandBot.Timeout = 60 * time.Second
+		}
+	}
+	if c.Alerts.Telegram.CommandBot.PollTimeout == 0 {
+		c.Alerts.Telegram.CommandBot.PollTimeout = 25 * time.Second
+	}
+	if c.Alerts.Telegram.CommandBot.ErrorBackoff == 0 {
+		c.Alerts.Telegram.CommandBot.ErrorBackoff = 2 * time.Second
+	}
+	if c.Alerts.Telegram.CommandBot.LeaseName == "" {
+		c.Alerts.Telegram.CommandBot.LeaseName = "telegram-command-bot"
+	}
+	if c.Alerts.Telegram.CommandBot.LeaseTTL == 0 {
+		c.Alerts.Telegram.CommandBot.LeaseTTL = 45 * time.Second
+	}
+	if c.Alerts.Telegram.CommandBot.RenewInterval == 0 {
+		c.Alerts.Telegram.CommandBot.RenewInterval = 15 * time.Second
+	}
+	if c.Alerts.Telegram.CommandBot.Command == "" {
+		c.Alerts.Telegram.CommandBot.Command = "/q"
+	}
+	if c.Alerts.Telegram.CommandBot.ParseMode == "" {
+		c.Alerts.Telegram.CommandBot.ParseMode = "HTML"
+	}
+	if c.Alerts.Telegram.CommandBot.IPInfoToken == "" {
+		c.Alerts.Telegram.CommandBot.IPInfoToken = c.IPInfo.Token
+	}
+	if c.Alerts.Telegram.CommandBot.MaxIPsPerRequest == 0 {
+		c.Alerts.Telegram.CommandBot.MaxIPsPerRequest = 10
+	}
+	if c.Alerts.Telegram.CommandBot.MaxConcurrentLookups == 0 {
+		c.Alerts.Telegram.CommandBot.MaxConcurrentLookups = 5
+	}
+	if c.Alerts.Telegram.CommandBot.MessageChunkSize == 0 {
+		c.Alerts.Telegram.CommandBot.MessageChunkSize = 3500
+	}
+	if c.Alerts.Telegram.CommandBot.Templates.Usage == "" {
+		c.Alerts.Telegram.CommandBot.Templates.Usage = "用法：%s <IP1> <IP2> ...\n例如：%s 114.114.114.114 8.8.8.8\n支持 IPv6：%s 2001:4860:4860::8888"
+	}
+	if c.Alerts.Telegram.CommandBot.Templates.UnauthorizedChat == "" {
+		c.Alerts.Telegram.CommandBot.Templates.UnauthorizedChat = "此机器人仅允许在指定群内使用。"
+	}
+	if c.Alerts.Telegram.CommandBot.Templates.UnauthorizedUser == "" {
+		c.Alerts.Telegram.CommandBot.Templates.UnauthorizedUser = "你没有权限使用此机器人命令。"
+	}
+	if c.Alerts.Telegram.CommandBot.Templates.TooManyIPs == "" {
+		c.Alerts.Telegram.CommandBot.Templates.TooManyIPs = "本次最多查询 %d 个 IP，已自动截断超出部分。"
+	}
+	if c.Alerts.Telegram.CommandBot.Templates.EmptyResult == "" {
+		c.Alerts.Telegram.CommandBot.Templates.EmptyResult = "没有可展示的查询结果。"
 	}
 	if c.Alerts.Delivery.PollInterval == 0 {
 		c.Alerts.Delivery.PollInterval = 2 * time.Second
@@ -790,6 +887,56 @@ func (c *Config) Validate() error {
 	}
 	if c.Alerts.Delivery.WorkerEnabled && !c.Alerts.Telegram.Enabled {
 		errs = append(errs, errors.New("alerts.delivery.worker_enabled requires alerts.telegram.enabled to be true"))
+	}
+	if c.Alerts.Telegram.CommandBot.Enabled {
+		if strings.TrimSpace(c.Alerts.Telegram.CommandBot.BotToken) == "" {
+			errs = append(errs, errors.New("alerts.telegram.command_bot.bot_token is required when alerts.telegram.command_bot.enabled is true"))
+		}
+		if strings.TrimSpace(c.Alerts.Telegram.CommandBot.ChatID) == "" {
+			errs = append(errs, errors.New("alerts.telegram.command_bot.chat_id is required when alerts.telegram.command_bot.enabled is true"))
+		}
+		if _, err := strconv.ParseInt(strings.TrimSpace(c.Alerts.Telegram.CommandBot.ChatID), 10, 64); err != nil {
+			errs = append(errs, fmt.Errorf("alerts.telegram.command_bot.chat_id must be a valid int64: %w", err))
+		}
+		if strings.TrimSpace(c.Alerts.Telegram.CommandBot.APIBaseURL) == "" {
+			errs = append(errs, errors.New("alerts.telegram.command_bot.api_base_url is required when alerts.telegram.command_bot.enabled is true"))
+		}
+		if strings.TrimSpace(c.Alerts.Telegram.CommandBot.IPInfoToken) == "" {
+			errs = append(errs, errors.New("alerts.telegram.command_bot.ipinfo_token is required when alerts.telegram.command_bot.enabled is true"))
+		}
+		if c.Alerts.Telegram.CommandBot.Timeout <= 0 {
+			errs = append(errs, errors.New("alerts.telegram.command_bot.timeout must be > 0"))
+		}
+		if c.Alerts.Telegram.CommandBot.PollTimeout <= 0 {
+			errs = append(errs, errors.New("alerts.telegram.command_bot.poll_timeout must be > 0"))
+		}
+		if c.Alerts.Telegram.CommandBot.ErrorBackoff <= 0 {
+			errs = append(errs, errors.New("alerts.telegram.command_bot.error_backoff must be > 0"))
+		}
+		if strings.TrimSpace(c.Alerts.Telegram.CommandBot.LeaseName) == "" {
+			errs = append(errs, errors.New("alerts.telegram.command_bot.lease_name is required when alerts.telegram.command_bot.enabled is true"))
+		}
+		if c.Alerts.Telegram.CommandBot.LeaseTTL <= 0 {
+			errs = append(errs, errors.New("alerts.telegram.command_bot.lease_ttl must be > 0"))
+		}
+		if c.Alerts.Telegram.CommandBot.RenewInterval <= 0 {
+			errs = append(errs, errors.New("alerts.telegram.command_bot.renew_interval must be > 0"))
+		}
+		if c.Alerts.Telegram.CommandBot.RenewInterval >= c.Alerts.Telegram.CommandBot.LeaseTTL {
+			errs = append(errs, errors.New("alerts.telegram.command_bot.renew_interval must be less than lease_ttl"))
+		}
+		if c.Alerts.Telegram.CommandBot.MaxIPsPerRequest <= 0 {
+			errs = append(errs, errors.New("alerts.telegram.command_bot.max_ips_per_request must be > 0"))
+		}
+		if c.Alerts.Telegram.CommandBot.MaxConcurrentLookups <= 0 {
+			errs = append(errs, errors.New("alerts.telegram.command_bot.max_concurrent_lookups must be > 0"))
+		}
+		if c.Alerts.Telegram.CommandBot.MessageChunkSize <= 0 {
+			errs = append(errs, errors.New("alerts.telegram.command_bot.message_chunk_size must be > 0"))
+		}
+		if !strings.HasPrefix(strings.TrimSpace(c.Alerts.Telegram.CommandBot.Command), "/") {
+			errs = append(errs, errors.New("alerts.telegram.command_bot.command must start with '/'"))
+		}
 	}
 	if !slices.Contains([]string{"config", "system"}, c.Reports.TimeZoneMode) {
 		errs = append(errs, errors.New("reports.timezone_mode must be config or system"))

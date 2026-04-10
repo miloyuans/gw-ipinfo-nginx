@@ -137,9 +137,110 @@ func (s *LookupService) Lookup(ctx context.Context, ip string) (ipctx.Context, i
 	return result.value, result.source, actionForCacheSource(result.source), result.err
 }
 
+func (s *LookupService) LookupDetails(ctx context.Context, ip string) (LookupDetails, ipctx.CacheSource, string, error) {
+	if !s.enabled || s.client == nil {
+		return LookupDetails{}, ipctx.CacheSourceNone, "disabled", nil
+	}
+
+	now := time.Now().UTC()
+	if entry, ok := s.l1.Get(ip, now, s.enableResidentialProxy); ok {
+		s.recordLookup(ipctx.CacheSourceL1, entry.Failure == "")
+		if entry.Failure != "" {
+			return LookupDetails{}, ipctx.CacheSourceL1, "cache_hit_l1", errors.New(entry.Failure)
+		}
+		return DetailsFromContext(entry.IPContext), ipctx.CacheSourceL1, "cache_hit_l1", nil
+	}
+
+	if s.repo != nil {
+		repoStart := time.Now()
+		entry, source, found, err := s.repo.Get(ctx, ip)
+		s.recordMongoLatency(time.Since(repoStart))
+		if err == nil && found && entry.Fresh(now, s.enableResidentialProxy) {
+			s.l1.Set(ip, entry)
+			s.recordLookup(source, entry.Failure == "")
+			if entry.Failure != "" {
+				return LookupDetails{}, source, actionForCacheSource(source), errors.New(entry.Failure)
+			}
+			return DetailsFromContext(entry.IPContext), source, actionForCacheSource(source), nil
+		}
+		if err != nil {
+			s.recordLookup(source, false)
+		}
+	}
+
+	value, _, _ := s.group.Do("details:"+ip, func() (any, error) {
+		now := time.Now().UTC()
+		if entry, ok := s.l1.Get(ip, now, s.enableResidentialProxy); ok {
+			if entry.Failure != "" {
+				return lookupDetailsResult{source: ipctx.CacheSourceL1, err: errors.New(entry.Failure)}, nil
+			}
+			return lookupDetailsResult{source: ipctx.CacheSourceL1, value: DetailsFromContext(entry.IPContext)}, nil
+		}
+		if s.repo != nil {
+			repoStart := time.Now()
+			entry, source, found, err := s.repo.Get(ctx, ip)
+			s.recordMongoLatency(time.Since(repoStart))
+			if err == nil && found && entry.Fresh(now, s.enableResidentialProxy) {
+				s.l1.Set(ip, entry)
+				if entry.Failure != "" {
+					return lookupDetailsResult{source: source, err: errors.New(entry.Failure)}, nil
+				}
+				return lookupDetailsResult{source: source, value: DetailsFromContext(entry.IPContext)}, nil
+			}
+		}
+
+		ipinfoStart := time.Now()
+		details, err := s.client.LookupDetails(ctx, ip)
+		s.recordIPInfoRequest(time.Since(ipinfoStart), err)
+		if err != nil {
+			entry := cache.Entry{
+				Failure:          err.Error(),
+				FailureExpiresAt: now.Add(s.failureTTL),
+				ExpiresAt:        now.Add(s.failureTTL),
+				UpdatedAt:        now,
+			}
+			s.l1.Set(ip, entry)
+			if s.repo != nil {
+				_ = s.repo.Upsert(ctx, ip, entry)
+			}
+			return lookupDetailsResult{source: ipctx.CacheSourceIPInfo, err: err}, nil
+		}
+
+		entry := cache.Entry{
+			IPContext:         details.ToContext(),
+			GeoExpiresAt:      now.Add(s.ttls.Geo),
+			PrivacyExpiresAt:  now.Add(s.ttls.Privacy),
+			ResProxyExpiresAt: now.Add(s.ttls.ResidentialProxy),
+			ExpiresAt:         maxTime(now.Add(s.ttls.Geo), now.Add(s.ttls.Privacy), now.Add(s.ttls.ResidentialProxy)),
+			UpdatedAt:         now,
+		}
+		s.l1.Set(ip, entry)
+		if s.repo != nil {
+			_ = s.repo.Upsert(ctx, ip, entry)
+		}
+		return lookupDetailsResult{source: ipctx.CacheSourceIPInfo, value: details}, nil
+	})
+
+	result := value.(lookupDetailsResult)
+	s.recordLookup(result.source, result.err == nil)
+	if result.source == ipctx.CacheSourceIPInfo {
+		if result.err != nil {
+			return result.value, result.source, "remote_error", result.err
+		}
+		return result.value, result.source, "remote_success", nil
+	}
+	return result.value, result.source, actionForCacheSource(result.source), result.err
+}
+
 type lookupResult struct {
 	source ipctx.CacheSource
 	value  ipctx.Context
+	err    error
+}
+
+type lookupDetailsResult struct {
+	source ipctx.CacheSource
+	value  LookupDetails
 	err    error
 }
 

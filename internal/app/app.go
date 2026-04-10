@@ -46,6 +46,7 @@ type Application struct {
 	storageControl   *storage.Controller
 	shortCircuit     *shortcircuit.Service
 	alertWorkers     []*alerts.Worker
+	commandBot       *alerts.CommandBot
 	lifecycleManager *alerts.LifecycleManager
 	reportingService *reporting.Service
 	startReplayLoop  bool
@@ -61,6 +62,7 @@ func New(configPath string) (*Application, error) {
 	metricsRegistry := metrics.NewRegistry()
 	metricSet := metrics.NewGatewayMetrics(metricsRegistry)
 
+	sharedStoragePath := cfg.Storage.LocalPath
 	cfg.Storage.LocalPath = resolveLocalStoragePath(cfg.Storage.LocalPath)
 	logger.Info("local_storage_path_resolved",
 		"event", "local_storage_path_resolved",
@@ -165,6 +167,33 @@ func New(configPath string) (*Application, error) {
 		}
 	}
 
+	var commandBot *alerts.CommandBot
+	if cfg.Alerts.Telegram.CommandBot.Enabled {
+		commandLookupService := lookupService
+		commandToken := strings.TrimSpace(cfg.Alerts.Telegram.CommandBot.IPInfoToken)
+		sharedLookupEligible := commandLookupService != nil &&
+			cfg.IPInfo.Enabled &&
+			commandToken != "" &&
+			commandToken == strings.TrimSpace(cfg.IPInfo.Token)
+		if !sharedLookupEligible {
+			commandIPInfoCfg := cfg.IPInfo
+			commandIPInfoCfg.Enabled = true
+			commandIPInfoCfg.Token = cfg.Alerts.Telegram.CommandBot.IPInfoToken
+			commandIPInfoClient, commandClientErr := ipinfo.NewClient(commandIPInfoCfg)
+			if commandClientErr != nil {
+				return nil, commandClientErr
+			}
+			commandLookupCfg := *cfg
+			commandLookupCfg.IPInfo = commandIPInfoCfg
+			commandLookupService = ipinfo.NewLookupService(&commandLookupCfg, l1, cacheRepo, commandIPInfoClient, metricSet)
+		}
+		commandBotStatePath := filepath.Join(filepath.Dir(filepath.Clean(sharedStoragePath)), "telegram-command-bot-state.json")
+		commandBot, err = alerts.NewCommandBot(cfg.Alerts.Telegram.CommandBot, logger, commandLookupService, storageControl, commandBotStatePath, workerID())
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	var reportingService *reporting.Service
 	if sender != nil || cfg.Reports.Enabled {
 		reportingService, err = reporting.NewService(cfg, storageControl, logger, sender, metricSet, workerID())
@@ -215,6 +244,7 @@ func New(configPath string) (*Application, error) {
 		storageControl:   storageControl,
 		shortCircuit:     shortCircuitService,
 		alertWorkers:     alertWorkers,
+		commandBot:       commandBot,
 		lifecycleManager: lifecycleManager,
 		reportingService: reportingService,
 		startReplayLoop:  mongoConfigured,
@@ -248,6 +278,16 @@ func (a *Application) run(ctx context.Context, listener net.Listener) error {
 		current := worker
 		go func() {
 			errCh <- current.Run(ctx)
+		}()
+	}
+	if a.commandBot != nil && runtimex.IsPrimaryProcess() {
+		go func() {
+			if err := a.commandBot.Run(ctx); err != nil && a.logger != nil {
+				a.logger.Warn("telegram_command_bot_stopped",
+					"event", "telegram_command_bot_stopped",
+					"error", err,
+				)
+			}
 		}()
 	}
 	go func() {
