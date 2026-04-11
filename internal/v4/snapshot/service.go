@@ -11,28 +11,56 @@ import (
 	"time"
 
 	"gw-ipinfo-nginx/internal/config"
+	"gw-ipinfo-nginx/internal/storage"
 	"gw-ipinfo-nginx/internal/v4/events"
+	v4model "gw-ipinfo-nginx/internal/v4/model"
 	"gw-ipinfo-nginx/internal/v4/nginxconf"
 	"gw-ipinfo-nginx/internal/v4/repository"
-	v4model "gw-ipinfo-nginx/internal/v4/model"
 )
 
 type Service struct {
-	cfg       config.V4Config
-	parser    *nginxconf.Parser
-	repo      *repository.SnapshotRepository
-	events    *events.Service
-	logger    *slog.Logger
-	onUpdated func(v4model.Snapshot, []v4model.SnapshotHost)
+	cfg                 config.V4Config
+	routeFile           config.RouteSetFileConfig
+	baseConfigPath      string
+	parser              *nginxconf.Parser
+	repo                *repository.SnapshotRepository
+	events              *events.Service
+	logger              *slog.Logger
+	lease               *syncLeaseStore
+	instanceID          string
+	serviceNames        map[string]struct{}
+	legacyWarned        bool
+	onUpdated           func(v4model.Snapshot, []v4model.SnapshotHost)
 }
 
-func NewService(cfg config.V4Config, repo *repository.SnapshotRepository, eventSvc *events.Service, logger *slog.Logger) *Service {
+func NewService(
+	cfg config.V4Config,
+	routeFile config.RouteSetFileConfig,
+	baseConfigPath string,
+	repo *repository.SnapshotRepository,
+	eventSvc *events.Service,
+	controller *storage.Controller,
+	sharedStatePath string,
+	instanceID string,
+	serviceNames []string,
+	logger *slog.Logger,
+) *Service {
+	names := make(map[string]struct{}, len(serviceNames))
+	for _, name := range serviceNames {
+		names[strings.TrimSpace(name)] = struct{}{}
+	}
+
 	return &Service{
-		cfg:    cfg,
-		parser: nginxconf.NewParser(),
-		repo:   repo,
-		events: eventSvc,
-		logger: logger,
+		cfg:            cfg,
+		routeFile:      routeFile,
+		baseConfigPath: baseConfigPath,
+		parser:         nginxconf.NewParser(),
+		repo:           repo,
+		events:         eventSvc,
+		logger:         logger,
+		lease:          newSyncLeaseStore(controller, sharedStatePath, cfg.Sync.LeaseName),
+		instanceID:     instanceID,
+		serviceNames:   names,
 	}
 }
 
@@ -44,44 +72,145 @@ func (s *Service) Run(ctx context.Context) {
 	if s == nil || !s.cfg.Enabled || !s.cfg.Sync.Enabled {
 		return
 	}
-	_ = s.SyncOnce(ctx)
-	ticker := time.NewTicker(s.cfg.Sync.Interval)
-	defer ticker.Stop()
+
+	syncTicker := time.NewTicker(s.cfg.Sync.Interval)
+	renewTicker := time.NewTicker(s.cfg.Sync.RenewInterval)
+	defer syncTicker.Stop()
+	defer renewTicker.Stop()
+
+	isLeader := false
+	if s.acquireLeader(ctx) {
+		isLeader = true
+		_ = s.SyncOnce(ctx)
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
+			if isLeader {
+				_ = s.lease.Release(context.Background(), s.instanceID)
+			}
 			return
-		case <-ticker.C:
+		case <-renewTicker.C:
+			if isLeader {
+				ok, err := s.lease.Refresh(ctx, s.instanceID, time.Now().UTC(), s.cfg.Sync.LeaseTTL)
+				if err != nil || !ok {
+					isLeader = false
+					if s.logger != nil {
+						s.logger.Warn("v4_snapshot_leader_lost",
+							"event", "v4_snapshot_leader_lost",
+							"instance_id", s.instanceID,
+							"error", err,
+						)
+					}
+				}
+				continue
+			}
+			isLeader = s.acquireLeader(ctx)
+		case <-syncTicker.C:
+			if !isLeader {
+				continue
+			}
 			_ = s.SyncOnce(ctx)
 		}
 	}
 }
 
-func (s *Service) SyncOnce(ctx context.Context) error {
-	hosts, err := s.parser.ParseHosts(ctx, s.cfg.Ingress.ConfigPaths)
+func (s *Service) acquireLeader(ctx context.Context) bool {
+	state, acquired, err := s.lease.TryAcquire(ctx, s.instanceID, time.Now().UTC(), s.cfg.Sync.LeaseTTL)
 	if err != nil {
-		if s.events != nil {
-			_ = s.events.Emit(ctx, v4model.Event{
-				Type:      v4model.EventSnapshotSyncFailed,
-				Host:      "",
-				Fingerprint: "snapshot_sync_failed:" + strings.TrimSpace(err.Error()),
-				Level:     "error",
-				Title:     "V4 snapshot sync failed",
-				Message:   err.Error(),
-				Metadata:  map[string]any{"config_paths": s.cfg.Ingress.ConfigPaths},
-			})
+		if s.logger != nil {
+			s.logger.Warn("v4_snapshot_leader_acquire_error",
+				"event", "v4_snapshot_leader_acquire_error",
+				"lease_name", s.cfg.Sync.LeaseName,
+				"instance_id", s.instanceID,
+				"error", err,
+			)
 		}
+		return false
+	}
+	if !acquired {
+		return false
+	}
+	if s.logger != nil {
+		s.logger.Info("v4_snapshot_leader_acquired",
+			"event", "v4_snapshot_leader_acquired",
+			"lease_name", s.cfg.Sync.LeaseName,
+			"instance_id", s.instanceID,
+			"previous_owner", state.LeaseOwner,
+		)
+	}
+	return true
+}
+
+func (s *Service) SyncOnce(ctx context.Context) error {
+	now := time.Now().UTC()
+	if s.logger != nil {
+		s.logger.Info("v4_snapshot_sync_started",
+			"event", "v4_snapshot_sync_started",
+			"instance_id", s.instanceID,
+			"config_paths", s.cfg.Ingress.ConfigPaths,
+			"route_file_enabled", s.routeFile.Enabled,
+			"route_file_path", s.routeFile.ConfigPath,
+		)
+	}
+
+	autoHosts, err := s.parser.ParseHosts(ctx, s.cfg.Ingress.ConfigPaths)
+	if err != nil {
+		s.recordSyncFailure(ctx, now, err, map[string]any{"config_paths": s.cfg.Ingress.ConfigPaths})
 		return err
 	}
 
-	snapshotHosts := s.compileHosts(hosts)
+	fileEntries, err := s.loadExplicitRoutes()
+	if err != nil {
+		s.recordSyncFailure(ctx, now, err, map[string]any{"route_file_path": s.routeFile.ConfigPath})
+		return err
+	}
+
+	snapshotHosts, err := s.compileHosts(autoHosts, fileEntries)
+	if err != nil {
+		s.recordSyncFailure(ctx, now, err, map[string]any{"route_file_path": s.routeFile.ConfigPath})
+		return err
+	}
+
+	if s.logger != nil {
+		s.logger.Info("v4_snapshot_sync_compiled",
+			"event", "v4_snapshot_sync_compiled",
+			"instance_id", s.instanceID,
+			"auto_hosts_count", len(autoHosts),
+			"explicit_routes_count", len(fileEntries),
+			"snapshot_hosts_count", len(snapshotHosts),
+		)
+	}
+
 	fingerprint := snapshotFingerprint(snapshotHosts)
 	current, _, found, _ := s.repo.LoadLatest(ctx)
 	if found && current.Fingerprint == fingerprint {
+		_ = s.repo.UpsertSyncState(ctx, v4model.SyncState{
+			ID:                  v4model.SyncStateID,
+			LeaseName:           s.cfg.Sync.LeaseName,
+			LeaseOwner:          s.instanceID,
+			LeaseExpiresAt:      now.Add(s.cfg.Sync.LeaseTTL),
+			LastSyncAt:          now,
+			LastSuccessAt:       now,
+			LastStatus:          "success_no_change",
+			LastError:           "",
+			LastSnapshotVersion: current.Version,
+			LastFingerprint:     current.Fingerprint,
+			LastHostCount:       current.HostCount,
+			UpdatedAt:           now,
+		})
+		if s.logger != nil {
+			s.logger.Info("v4_snapshot_sync_no_change",
+				"event", "v4_snapshot_sync_no_change",
+				"instance_id", s.instanceID,
+				"fingerprint", fingerprint,
+				"host_count", len(snapshotHosts),
+			)
+		}
 		return nil
 	}
 
-	now := time.Now().UTC()
 	snapshot := v4model.Snapshot{
 		ID:          "last_good",
 		Version:     now.Format(time.RFC3339Nano),
@@ -90,20 +219,28 @@ func (s *Service) SyncOnce(ctx context.Context) error {
 		CreatedAt:   now,
 		UpdatedAt:   now,
 		LastGood:    true,
-		Source:      "nginx_conf",
+		Source:      "nginx_conf+v4_routes",
 	}
 	if err := s.repo.ReplaceLastGood(ctx, snapshot, snapshotHosts); err != nil {
-		if s.events != nil {
-			_ = s.events.Emit(ctx, v4model.Event{
-				Type:        v4model.EventSnapshotSyncFailed,
-				Fingerprint: "snapshot_persist_failed:" + strings.TrimSpace(err.Error()),
-				Level:       "error",
-				Title:       "V4 snapshot persist failed",
-				Message:     err.Error(),
-			})
-		}
+		s.recordSyncFailure(ctx, now, err, map[string]any{"host_count": len(snapshotHosts), "fingerprint": fingerprint})
 		return err
 	}
+
+	_ = s.repo.UpsertSyncState(ctx, v4model.SyncState{
+		ID:                  v4model.SyncStateID,
+		LeaseName:           s.cfg.Sync.LeaseName,
+		LeaseOwner:          s.instanceID,
+		LeaseExpiresAt:      now.Add(s.cfg.Sync.LeaseTTL),
+		LastSyncAt:          now,
+		LastSuccessAt:       now,
+		LastStatus:          "success",
+		LastError:           "",
+		LastSnapshotVersion: snapshot.Version,
+		LastFingerprint:     snapshot.Fingerprint,
+		LastHostCount:       snapshot.HostCount,
+		UpdatedAt:           now,
+	})
+
 	if s.events != nil {
 		_ = s.events.Emit(ctx, v4model.Event{
 			Type:        v4model.EventSnapshotUpdated,
@@ -111,8 +248,20 @@ func (s *Service) SyncOnce(ctx context.Context) error {
 			Level:       "info",
 			Title:       "V4 snapshot updated",
 			Message:     fmt.Sprintf("updated v4 snapshot with %d hosts", len(snapshotHosts)),
-			Metadata:    map[string]any{"host_count": len(snapshotHosts), "fingerprint": fingerprint},
+			Metadata: map[string]any{
+				"host_count":   len(snapshotHosts),
+				"fingerprint":  fingerprint,
+				"route_source": s.routeFile.ConfigPath,
+			},
 		})
+	}
+	if s.logger != nil {
+		s.logger.Info("v4_snapshot_sync_persisted",
+			"event", "v4_snapshot_sync_persisted",
+			"instance_id", s.instanceID,
+			"fingerprint", fingerprint,
+			"host_count", len(snapshotHosts),
+		)
 	}
 	if s.onUpdated != nil {
 		s.onUpdated(snapshot, snapshotHosts)
@@ -120,9 +269,37 @@ func (s *Service) SyncOnce(ctx context.Context) error {
 	return nil
 }
 
-func (s *Service) compileHosts(autoHosts []string) []v4model.SnapshotHost {
+func (s *Service) loadExplicitRoutes() ([]config.V4OverrideConfig, error) {
+	routes := make([]config.V4OverrideConfig, 0)
+
+	if len(s.cfg.Overrides) > 0 {
+		if !s.legacyWarned && s.logger != nil {
+			s.logger.Warn("v4_overrides_deprecated",
+				"event", "v4_overrides_deprecated",
+				"count", len(s.cfg.Overrides),
+				"message", "v4.overrides is deprecated; move host-level entries to route_sets.v4.config_path",
+			)
+		}
+		s.legacyWarned = true
+		routes = append(routes, s.cfg.Overrides...)
+	}
+
+	if !s.routeFile.Enabled {
+		return routes, nil
+	}
+
+	fileEntries, err := loadRouteFile(s.baseConfigPath, s.routeFile.ConfigPath)
+	if err != nil {
+		return nil, err
+	}
+	routes = append(routes, fileEntries...)
+	return routes, nil
+}
+
+func (s *Service) compileHosts(autoHosts []string, overrides []config.V4OverrideConfig) ([]v4model.SnapshotHost, error) {
 	byHost := make(map[string]v4model.SnapshotHost)
 	now := time.Now().UTC()
+
 	for _, host := range autoHosts {
 		byHost[host] = v4model.SnapshotHost{
 			ID:                    host,
@@ -136,42 +313,89 @@ func (s *Service) compileHosts(autoHosts []string) []v4model.SnapshotHost {
 			UpdatedAt:             now,
 		}
 	}
-	for _, override := range s.cfg.Overrides {
-		host := strings.TrimSpace(strings.ToLower(override.Host))
-		if host == "" {
-			continue
+
+	for _, override := range overrides {
+		host, err := normalizeV4Host(override.Host)
+		if err != nil {
+			return nil, err
 		}
 		if !override.Enabled {
 			delete(byHost, host)
 			continue
 		}
+
 		entry, ok := byHost[host]
 		if !ok {
 			entry = v4model.SnapshotHost{
 				ID:         host,
 				SnapshotID: "last_good",
 				Host:       host,
-				Source:     "override",
+				Source:     "route_file",
 				UpdatedAt:  now,
 			}
 		}
-		entry.BackendService = firstNonEmpty(override.BackendService, entry.BackendService, s.cfg.Passthrough.Service)
-		entry.BackendHost = firstNonEmpty(strings.ToLower(strings.TrimSpace(override.BackendHost)), entry.BackendHost, host)
+
+		backendService := firstNonEmpty(strings.TrimSpace(override.BackendService), entry.BackendService, s.cfg.Passthrough.Service)
+		if _, ok := s.serviceNames[backendService]; !ok {
+			return nil, fmt.Errorf("v4 backend service %q for host %q is not present in routing.services", backendService, host)
+		}
+		entry.BackendService = backendService
+
+		backendHost := firstNonEmpty(strings.ToLower(strings.TrimSpace(override.BackendHost)), entry.BackendHost, host)
+		normalizedBackendHost, err := normalizeV4Host(backendHost)
+		if err != nil {
+			return nil, fmt.Errorf("invalid v4 backend host for %q: %w", host, err)
+		}
+		entry.BackendHost = normalizedBackendHost
+
 		if override.SecurityChecksEnabled != nil {
 			entry.SecurityChecksEnabled = *override.SecurityChecksEnabled
 		}
 		entry.IPEnrichmentMode = firstNonEmpty(override.IPEnrichmentMode, entry.IPEnrichmentMode, s.cfg.IPEnrichment.Mode)
 		entry.Probe = mergeProbe(s.cfg.ProbeDefaults, override.Probe)
-		entry.Source = "override"
+		entry.Source = "route_file"
 		entry.UpdatedAt = now
 		byHost[host] = entry
 	}
+
 	hosts := make([]v4model.SnapshotHost, 0, len(byHost))
 	for _, host := range byHost {
 		hosts = append(hosts, host)
 	}
 	sort.Slice(hosts, func(i, j int) bool { return hosts[i].Host < hosts[j].Host })
-	return hosts
+	return hosts, nil
+}
+
+func (s *Service) recordSyncFailure(ctx context.Context, now time.Time, err error, metadata map[string]any) {
+	_ = s.repo.UpsertSyncState(ctx, v4model.SyncState{
+		ID:             v4model.SyncStateID,
+		LeaseName:      s.cfg.Sync.LeaseName,
+		LeaseOwner:     s.instanceID,
+		LeaseExpiresAt: now.Add(s.cfg.Sync.LeaseTTL),
+		LastSyncAt:     now,
+		LastStatus:     "failed",
+		LastError:      strings.TrimSpace(err.Error()),
+		UpdatedAt:      now,
+	})
+	if s.events != nil {
+		_ = s.events.Emit(ctx, v4model.Event{
+			Type:        v4model.EventSnapshotSyncFailed,
+			Host:        "",
+			Fingerprint: "snapshot_sync_failed:" + strings.TrimSpace(err.Error()),
+			Level:       "error",
+			Title:       "V4 snapshot sync failed",
+			Message:     err.Error(),
+			Metadata:    metadata,
+		})
+	}
+	if s.logger != nil {
+		s.logger.Error("v4_snapshot_sync_failed",
+			"event", "v4_snapshot_sync_failed",
+			"instance_id", s.instanceID,
+			"error", err,
+			"metadata", metadata,
+		)
+	}
 }
 
 func mergeProbe(defaults config.V4ProbeDefaultsConfig, probe config.V4ProbeConfig) v4model.ProbeSpec {

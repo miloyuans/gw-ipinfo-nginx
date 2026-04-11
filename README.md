@@ -366,7 +366,7 @@ The gateway can now compile five route-set files in parallel:
 - `configs/passroute_v3.yaml`
 
 Main config lives in `configs/config.yaml` under `route_sets`.
-V4 fallback runtime lives under the top-level `v4` config block and is not compiled into `route_sets`.
+V4 fallback runtime lives under the top-level `v4` config block. Its host-level overlay file is `configs/passroute_v4.yaml`, but it is not compiled into the `bypass/default/v1/v2/v3` route-set compiler.
 
 Behavior:
 
@@ -375,7 +375,77 @@ Behavior:
 - `v1`: source host/path runs the full detection flow, then issues a signed grant and redirects to `target.public_url`.
 - `v2`: source host/path runs the full detection flow, then redirects to `target.public_url` without grant lifecycle.
 - `v3`: source host/path can choose a healthy target from a pool and redirect to that target URL. It supports `random`, `round_robin`, and `weighted_round_robin`, per-target health checks, and temporary client-IP binding.
-- `v4`: only runs after `route_sets` did not match. It uses a last-good snapshot compiled from nginx conf plus explicit overrides, and then chooses `passthrough` or `degraded_redirect` from runtime state.
+- `v4`: only runs after `route_sets` did not match. It uses a last-good snapshot compiled from nginx `server_name` plus `configs/passroute_v4.yaml` host entries, and then chooses `passthrough` or `degraded_redirect` from runtime state. Legacy `v4.overrides` is still read during the compatibility window, but is deprecated.
+
+### Functional Modes
+
+- `default`
+  - Used when you want an explicit `host + path_prefix` to keep using the existing full gateway chain.
+  - No redirect and no grant lifecycle.
+  - If every `route_sets.*.enabled=false`, the whole gateway also falls back to the legacy default flow.
+
+- `bypass`
+  - Used for lightweight direct pass scenarios.
+  - Still keeps request-level UA / crawler / `Accept-Language` checks and optional IPinfo lookup.
+  - Skips later Geo / Privacy deny logic and proxies directly to the selected backend service.
+
+- `v1`
+  - Source host/path runs the full detection flow.
+  - After allow, gateway issues a signed grant and redirects to `target.public_url`.
+  - Target host later validates query/cookie grant and short-circuits to backend.
+
+- `v2`
+  - Source host/path runs the full detection flow.
+  - After allow, gateway redirects directly to `target.public_url`.
+  - Target host is allowed to re-enter the gateway and continue the full chain.
+
+- `v3`
+  - Source host/path selects a healthy target from a pool.
+  - Supports `random`, `round_robin`, `weighted_round_robin`, per-target health checks, and temporary client-IP binding reuse.
+  - Can run in lightweight redirect mode or full security-filter mode before redirect.
+
+- `v4`
+  - Not part of the strong route-set compiler.
+  - Only runs after `route_sets` did not match.
+  - Builds a shared last-good snapshot from nginx `server_name` plus `configs/passroute_v4.yaml`.
+  - Default behavior is passthrough, default security checks are off, and enrichment defaults to `disabled`.
+  - Probe is opt-in per host. Only hosts with `probe.enabled=true` are actively probed.
+
+### Default And Deny Behavior
+
+- Legacy default mode
+  - When all `route_sets.*.enabled=false`, requests use the original full gateway chain and proxy to `routing.default_service`.
+
+- Blacklist / deny mode
+  - Any request denied by UA / Accept-Language / Geo / Privacy / route miss / v1 grant validation enters the existing global deny path.
+  - The deny path can either render the built-in block page or reverse-proxy to `deny_page.target_url`.
+
+### V4 Runtime Notes
+
+- `route_sets.v4`
+  - Only provides the file path for `configs/passroute_v4.yaml`.
+  - It does not make v4 part of the strong route compiler.
+
+- `v4.ingress.config_paths`
+  - Supports files, directories, and glob paths.
+  - Directories are scanned recursively for `*.conf`.
+
+- `v4` snapshot leader
+  - Only one leader instance periodically parses nginx conf and writes the shared snapshot.
+  - Other replicas only refresh and read the last-good snapshot from shared storage.
+
+- `v4` storage model
+  - Mongo is the source of truth for snapshot, runtime state, and recent events.
+  - Localdisk remains fallback and replay buffer.
+
+- `v4` last-good behavior
+  - Parse or sync failure emits an event and log, but does not clear the previous last-good snapshot.
+  - If no snapshot is available, the gateway logs `v4_fallback_to_legacy=true` and falls back to legacy routing where applicable.
+
+- `v4` Telegram `/routes`
+  - Only reads persisted snapshot / sync state / runtime state / recent events.
+  - It does not parse nginx conf live.
+  - The message body is intentionally short. Full route details are sent as an HTML attachment.
 
 Compiler rules:
 

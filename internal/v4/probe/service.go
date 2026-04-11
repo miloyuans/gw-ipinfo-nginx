@@ -212,11 +212,7 @@ func extractRedirectURL(baseURL string, body string, probe v4model.ProbeSpec) (s
 			continue
 		}
 		for _, pattern := range probe.Patterns {
-			re, err := regexp.Compile(pattern)
-			if err != nil {
-				continue
-			}
-			if re.MatchString(value) {
+			if matchProbePattern(value, pattern) {
 				if err := validateRemoteURL(context.Background(), value); err != nil {
 					return "", false, err
 				}
@@ -225,6 +221,21 @@ func extractRedirectURL(baseURL string, body string, probe v4model.ProbeSpec) (s
 		}
 	}
 	return "", false, nil
+}
+
+func matchProbePattern(value, pattern string) bool {
+	pattern = strings.TrimSpace(pattern)
+	if pattern == "" {
+		return false
+	}
+	if strings.Contains(value, pattern) {
+		return true
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return false
+	}
+	return re.MatchString(value)
 }
 
 func collectCandidates(body, mode string) []string {

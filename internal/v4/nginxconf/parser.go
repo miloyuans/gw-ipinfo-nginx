@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -20,7 +22,11 @@ func NewParser() *Parser {
 
 func (p *Parser) ParseHosts(ctx context.Context, paths []string) ([]string, error) {
 	seen := make(map[string]struct{})
-	for _, path := range paths {
+	expanded, err := p.expandInputs(paths)
+	if err != nil {
+		return nil, err
+	}
+	for _, path := range expanded {
 		if err := p.parseFile(ctx, filepath.Clean(path), seen, map[string]struct{}{}); err != nil {
 			return nil, err
 		}
@@ -29,7 +35,71 @@ func (p *Parser) ParseHosts(ctx context.Context, paths []string) ([]string, erro
 	for host := range seen {
 		hosts = append(hosts, host)
 	}
+	sort.Strings(hosts)
 	return hosts, nil
+}
+
+func (p *Parser) expandInputs(paths []string) ([]string, error) {
+	seen := make(map[string]struct{})
+	files := make([]string, 0)
+	for _, raw := range paths {
+		value := filepath.Clean(strings.TrimSpace(raw))
+		if value == "" {
+			continue
+		}
+		matches, err := p.expandInput(value)
+		if err != nil {
+			return nil, err
+		}
+		for _, match := range matches {
+			clean := filepath.Clean(match)
+			if _, ok := seen[clean]; ok {
+				continue
+			}
+			seen[clean] = struct{}{}
+			files = append(files, clean)
+		}
+	}
+	sort.Strings(files)
+	return files, nil
+}
+
+func (p *Parser) expandInput(value string) ([]string, error) {
+	if strings.ContainsAny(value, "*?[") {
+		matches, err := filepath.Glob(value)
+		if err != nil {
+			return nil, fmt.Errorf("expand nginx glob %s: %w", value, err)
+		}
+		return matches, nil
+	}
+
+	info, err := os.Stat(value)
+	if err != nil {
+		return nil, fmt.Errorf("stat nginx path %s: %w", value, err)
+	}
+	if !info.IsDir() {
+		return []string{value}, nil
+	}
+
+	files := make([]string, 0)
+	err = filepath.WalkDir(value, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if !strings.HasSuffix(strings.ToLower(d.Name()), ".conf") {
+			return nil
+		}
+		files = append(files, path)
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("walk nginx conf dir %s: %w", value, err)
+	}
+	sort.Strings(files)
+	return files, nil
 }
 
 func (p *Parser) parseFile(ctx context.Context, path string, seen map[string]struct{}, visiting map[string]struct{}) error {
@@ -59,9 +129,9 @@ func (p *Parser) parseFile(ctx context.Context, path string, seen map[string]str
 			continue
 		}
 		if includePath, ok := parseInclude(line); ok {
-			includeMatches, err := filepath.Glob(filepath.Join(dir, includePath))
+			includeMatches, err := p.expandInput(filepath.Join(dir, includePath))
 			if err != nil {
-				return fmt.Errorf("glob include %s in %s: %w", includePath, path, err)
+				return fmt.Errorf("expand include %s in %s: %w", includePath, path, err)
 			}
 			for _, includeMatch := range includeMatches {
 				if err := p.parseFile(ctx, filepath.Clean(includeMatch), seen, visiting); err != nil {

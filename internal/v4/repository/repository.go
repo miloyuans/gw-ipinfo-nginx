@@ -81,6 +81,17 @@ func (r *SnapshotRepository) LoadLatest(ctx context.Context) (v4model.Snapshot, 
 	return r.loadLatestLocal(ctx)
 }
 
+func (r *SnapshotRepository) LoadSyncState(ctx context.Context) (v4model.SyncState, bool, error) {
+	if client := r.controller.Client(); client != nil && r.controller.Mode() != storage.ModeLocal {
+		state, found, err := r.loadSyncStateMongo(ctx, client)
+		if err == nil {
+			return state, found, nil
+		}
+		r.controller.HandleMongoError(err)
+	}
+	return r.loadSyncStateLocal(ctx)
+}
+
 func (r *SnapshotRepository) ReplaceLastGood(ctx context.Context, snapshot v4model.Snapshot, hosts []v4model.SnapshotHost) error {
 	snapshot.ID = lastGoodSnapshotID
 	if err := r.replaceLocal(ctx, snapshot, hosts); err != nil {
@@ -92,6 +103,21 @@ func (r *SnapshotRepository) ReplaceLastGood(ctx context.Context, snapshot v4mod
 			for _, host := range hosts {
 				_ = r.controller.Local().ClearDirty(ctx, localdisk.BucketV4SnapshotHostsDirty, host.Host)
 			}
+			return nil
+		} else {
+			r.controller.HandleMongoError(err)
+		}
+	}
+	return nil
+}
+
+func (r *SnapshotRepository) UpsertSyncState(ctx context.Context, state v4model.SyncState) error {
+	state.ID = v4model.SyncStateID
+	if err := r.controller.Local().PutJSON(ctx, localdisk.BucketMetadata, "v4_sync_state", state); err != nil {
+		return err
+	}
+	if client := r.controller.Client(); client != nil && r.controller.Mode() != storage.ModeLocal {
+		if err := r.upsertSyncStateMongo(ctx, client, state); err == nil {
 			return nil
 		} else {
 			r.controller.HandleMongoError(err)
@@ -278,6 +304,17 @@ func (r *SnapshotRepository) loadLatestLocal(ctx context.Context) (v4model.Snaps
 	return snapshot, hosts, true, nil
 }
 
+func (r *SnapshotRepository) loadSyncStateLocal(ctx context.Context) (v4model.SyncState, bool, error) {
+	var state v4model.SyncState
+	if err := r.controller.Local().GetJSON(ctx, localdisk.BucketMetadata, "v4_sync_state", &state); err != nil {
+		if errors.Is(err, localdisk.ErrNotFound) {
+			return v4model.SyncState{}, false, nil
+		}
+		return v4model.SyncState{}, false, err
+	}
+	return state, true, nil
+}
+
 func (r *SnapshotRepository) replaceLocal(ctx context.Context, snapshot v4model.Snapshot, hosts []v4model.SnapshotHost) error {
 	return r.controller.Local().Update(ctx, func(tx *bolt.Tx) error {
 		snapshots := tx.Bucket([]byte(localdisk.BucketV4Snapshots))
@@ -353,6 +390,21 @@ func (r *SnapshotRepository) loadLatestMongo(ctx context.Context, client *mongos
 	return snapshot, hosts, true, cursor.Err()
 }
 
+func (r *SnapshotRepository) loadSyncStateMongo(ctx context.Context, client *mongostore.Client) (v4model.SyncState, bool, error) {
+	child, cancel := client.WithTimeout(ctx)
+	defer cancel()
+
+	var state v4model.SyncState
+	err := client.Database().Collection(v4model.CollectionSnapshots).FindOne(child, bson.M{"_id": v4model.SyncStateID}).Decode(&state)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return v4model.SyncState{}, false, nil
+		}
+		return v4model.SyncState{}, false, err
+	}
+	return state, true, nil
+}
+
 func (r *SnapshotRepository) replaceMongo(ctx context.Context, client *mongostore.Client, snapshot v4model.Snapshot, hosts []v4model.SnapshotHost) error {
 	child, cancel := client.WithTimeout(ctx)
 	defer cancel()
@@ -371,6 +423,18 @@ func (r *SnapshotRepository) replaceMongo(ctx context.Context, client *mongostor
 		docs = append(docs, host)
 	}
 	_, err := db.Collection(v4model.CollectionSnapshotHosts).InsertMany(child, docs)
+	return err
+}
+
+func (r *SnapshotRepository) upsertSyncStateMongo(ctx context.Context, client *mongostore.Client, state v4model.SyncState) error {
+	child, cancel := client.WithTimeout(ctx)
+	defer cancel()
+	_, err := client.Database().Collection(v4model.CollectionSnapshots).UpdateByID(
+		child,
+		v4model.SyncStateID,
+		bson.M{"$set": state},
+		options.Update().SetUpsert(true),
+	)
 	return err
 }
 

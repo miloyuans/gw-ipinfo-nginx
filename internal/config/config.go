@@ -164,6 +164,7 @@ type RouteSetsConfig struct {
 	V1                 RouteSetFileConfig `yaml:"v1"`
 	V2                 RouteSetFileConfig `yaml:"v2"`
 	V3                 RouteSetFileConfig `yaml:"v3"`
+	V4                 RouteSetFileConfig `yaml:"v4"`
 	StrictHostControl  bool               `yaml:"strict_host_control"`
 	FailFastOnConflict bool               `yaml:"fail_fast_on_conflict"`
 	RedirectStatusCode int                `yaml:"redirect_status_code"`
@@ -373,8 +374,11 @@ type V4Config struct {
 }
 
 type V4SyncConfig struct {
-	Enabled  bool          `yaml:"enabled"`
-	Interval time.Duration `yaml:"interval"`
+	Enabled       bool          `yaml:"enabled"`
+	Interval      time.Duration `yaml:"interval"`
+	LeaseName     string        `yaml:"lease_name"`
+	LeaseTTL      time.Duration `yaml:"lease_ttl"`
+	RenewInterval time.Duration `yaml:"renew_interval"`
 }
 
 type V4IngressConfig struct {
@@ -602,6 +606,9 @@ func (c *Config) applyDefaults() {
 	if c.RouteSets.V3.ConfigPath == "" {
 		c.RouteSets.V3.ConfigPath = "passroute_v3.yaml"
 	}
+	if c.RouteSets.V4.ConfigPath == "" {
+		c.RouteSets.V4.ConfigPath = "passroute_v4.yaml"
+	}
 	if c.RouteSets.RedirectStatusCode == 0 {
 		c.RouteSets.RedirectStatusCode = 302
 	}
@@ -794,6 +801,15 @@ func (c *Config) applyDefaults() {
 	}
 	if c.V4.Sync.Interval == 0 {
 		c.V4.Sync.Interval = time.Minute
+	}
+	if c.V4.Sync.LeaseName == "" {
+		c.V4.Sync.LeaseName = "v4-snapshot-sync"
+	}
+	if c.V4.Sync.LeaseTTL == 0 {
+		c.V4.Sync.LeaseTTL = 45 * time.Second
+	}
+	if c.V4.Sync.RenewInterval == 0 {
+		c.V4.Sync.RenewInterval = 15 * time.Second
 	}
 	if c.V4.Passthrough.Service == "" {
 		c.V4.Passthrough.Service = c.Routing.DefaultService
@@ -1162,8 +1178,23 @@ func (c *Config) Validate() error {
 		if c.V4.Sync.Interval <= 0 {
 			errs = append(errs, errors.New("v4.sync.interval must be > 0"))
 		}
+		if strings.TrimSpace(c.V4.Sync.LeaseName) == "" {
+			errs = append(errs, errors.New("v4.sync.lease_name is required when v4.enabled is true"))
+		}
+		if c.V4.Sync.LeaseTTL <= 0 {
+			errs = append(errs, errors.New("v4.sync.lease_ttl must be > 0"))
+		}
+		if c.V4.Sync.RenewInterval <= 0 {
+			errs = append(errs, errors.New("v4.sync.renew_interval must be > 0"))
+		}
+		if c.V4.Sync.RenewInterval >= c.V4.Sync.LeaseTTL {
+			errs = append(errs, errors.New("v4.sync.renew_interval must be less than lease_ttl"))
+		}
 		if len(c.V4.Ingress.ConfigPaths) == 0 {
 			errs = append(errs, errors.New("v4.ingress.config_paths must contain at least one file when v4.enabled is true"))
+		}
+		if c.RouteSets.V4.Enabled && strings.TrimSpace(c.RouteSets.V4.ConfigPath) == "" {
+			errs = append(errs, errors.New("route_sets.v4.config_path is required when route_sets.v4.enabled is true"))
 		}
 		if strings.TrimSpace(c.V4.Passthrough.Service) == "" {
 			errs = append(errs, errors.New("v4.passthrough.service is required when v4.enabled is true"))

@@ -10,6 +10,7 @@ const (
 )
 
 const (
+	SyncStateID         = "sync_state"
 	ModePassthrough    = "passthrough"
 	ModeDegradedRedirect = "degraded_redirect"
 	ModeRecovering     = "recovering"
@@ -33,6 +34,21 @@ type Snapshot struct {
 	UpdatedAt   time.Time `json:"updated_at" bson:"updated_at"`
 	LastGood    bool      `json:"last_good" bson:"last_good"`
 	Source      string    `json:"source" bson:"source"`
+}
+
+type SyncState struct {
+	ID                   string    `json:"id" bson:"_id"`
+	LeaseName            string    `json:"lease_name" bson:"lease_name"`
+	LeaseOwner           string    `json:"lease_owner" bson:"lease_owner"`
+	LeaseExpiresAt       time.Time `json:"lease_expires_at" bson:"lease_expires_at"`
+	LastSyncAt           time.Time `json:"last_sync_at" bson:"last_sync_at"`
+	LastSuccessAt        time.Time `json:"last_success_at" bson:"last_success_at"`
+	LastStatus           string    `json:"last_status" bson:"last_status"`
+	LastError            string    `json:"last_error" bson:"last_error"`
+	LastSnapshotVersion  string    `json:"last_snapshot_version" bson:"last_snapshot_version"`
+	LastFingerprint      string    `json:"last_fingerprint" bson:"last_fingerprint"`
+	LastHostCount        int       `json:"last_host_count" bson:"last_host_count"`
+	UpdatedAt            time.Time `json:"updated_at" bson:"updated_at"`
 }
 
 type SnapshotHost struct {

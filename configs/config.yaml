@@ -122,6 +122,10 @@ route_sets:
   v3:
     enabled: false
     config_path: "passroute_v3.yaml"
+  v4:
+    # 仅作为 v4 独立 host 路由文件入口，不参与 bypass/default/v1/v2/v3 编译器。
+    enabled: false
+    config_path: "passroute_v4.yaml"
   strict_host_control: false
   fail_fast_on_conflict: true
   redirect_status_code: 302
@@ -149,8 +153,13 @@ v4:
     # conf 解析失败时不会覆盖历史快照。
     enabled: true
     interval: 1m
+    # 仅一个 leader 负责构建和写入 v4 snapshot。
+    lease_name: "v4-snapshot-sync"
+    lease_ttl: 45s
+    renew_interval: 15s
   ingress:
     # 这里只做后台解析；Telegram /routes 只查数据库 / 本地快照，不现场解析 conf。
+    # 支持文件、目录、glob 多路径混合输入；目录会递归扫描 *.conf。
     config_paths:
       - "/etc/nginx/nginx.conf"
   passthrough:
@@ -179,22 +188,9 @@ v4:
     max_hosts: 200
     dedupe_window: 15m
     silent_window: 1h
+  # 兼容期保留：老版本 v4.overrides 会继续读取，但已废弃。
+  # 新增 host 级配置请迁移到 route_sets.v4.config_path 指向的 passroute_v4.yaml。
   overrides: []
-  # 示例：
-  # overrides:
-  #   - host: "promo.example.com"
-  #     enabled: true
-  #     backend_service: "default"
-  #     backend_host: "promo.example.com"
-  #     security_checks_enabled: false
-  #     ip_enrichment_mode: "cache_only"
-  #     probe:
-  #       enabled: true
-  #       mode: "html_discovery"
-  #       url: "https://promo.example.com/"
-  #       link_url: "https://fallback.example.net/"
-  #       patterns:
-  #         - "^https://fallback\\.example\\.net/"
 
 alerts:
   telegram:

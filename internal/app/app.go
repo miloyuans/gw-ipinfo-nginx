@@ -194,7 +194,19 @@ func New(configPath string) (*Application, error) {
 		v4EventRepo = v4repo.NewEventRepository(storageControl, logger)
 		v4EventService = v4events.NewService(cfg.V4.Telegram, v4EventRepo, sender, logger)
 		v4RuntimeSvc = v4runtime.NewService(cfg.V4, v4SnapshotRepo, v4StateRepo, logger)
-		v4SnapshotSvc = v4snapshot.NewService(cfg.V4, v4SnapshotRepo, v4EventService, logger)
+		v4SyncStatePath := filepath.Join(filepath.Dir(filepath.Clean(sharedStoragePath)), "v4-sync-state.json")
+		v4SnapshotSvc = v4snapshot.NewService(
+			cfg.V4,
+			cfg.RouteSets.V4,
+			configPath,
+			v4SnapshotRepo,
+			v4EventService,
+			storageControl,
+			v4SyncStatePath,
+			workerID(),
+			resolver.ServiceNames(),
+			logger,
+		)
 		v4SnapshotSvc.SetOnUpdated(func(snapshot v4model.Snapshot, hosts []v4model.SnapshotHost) {
 			v4RuntimeSvc.ReplaceSnapshot(snapshot, hosts)
 		})
@@ -850,6 +862,9 @@ func (h *GatewayHandler) serveV4Fallback(w http.ResponseWriter, r *http.Request,
 	}
 	resolution := h.v4Runtime.Resolve(r.Context(), r)
 	if !resolution.Found {
+		if resolution.Reason == "no_snapshot" {
+			h.logV4FallbackToLegacy(requestID, r, resolution.Reason)
+		}
 		return false
 	}
 	service, ok := h.resolver.Service(resolution.Host.BackendService)
@@ -880,6 +895,20 @@ func (h *GatewayHandler) serveV4Fallback(w http.ResponseWriter, r *http.Request,
 	}
 	h.finish(w, r, requestID, service, outcome.clientIP, outcome.ipContext, outcome.decision, start, outcome.state, routeMeta, action)
 	return true
+}
+
+func (h *GatewayHandler) logV4FallbackToLegacy(requestID string, req *http.Request, reason string) {
+	if h.logger == nil || h.v4Runtime == nil || !h.v4Runtime.Enabled() {
+		return
+	}
+	h.logger.Info("v4_runtime_fallback_to_legacy",
+		"event", "v4_runtime_fallback_to_legacy",
+		"v4_fallback_to_legacy", true,
+		"v4_fallback_reason", strings.TrimSpace(reason),
+		"request_id", requestID,
+		"host", req.Host,
+		"path", req.URL.Path,
+	)
 }
 
 func (h *GatewayHandler) newFlowState() flowState {

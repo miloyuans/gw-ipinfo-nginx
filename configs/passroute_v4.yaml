@@ -1,0 +1,29 @@
+routes:
+  # v4 host 级规则文件。
+  # 这里只定义“某个 host 命中 v4 fallback 后应该如何透传 / 探测 / enrichment / 覆盖后端”。
+  # 它不参与 bypass/default/v1/v2/v3 的 source/target 强规则编译。
+  #
+  # 字段说明：
+  # - host: 必填，入口域名，按 host 精确匹配
+  # - enabled: 可选，默认 true；false 表示显式禁用该 host
+  # - backend.service: 可选；为空时回落到 v4.passthrough.service
+  # - backend.host: 可选；为空时默认等于当前 host
+  # - security_checks_enabled: 可选；为空时回落到 v4.security.security_checks_enabled
+  # - ip_enrichment_mode: 可选；disabled | cache_only | full
+  # - probe.patterns: 普通字符串优先匹配；若需要正则，再写 regex 风格表达式
+
+  - id: "promo-example"
+    host: "promo.example.com"
+    enabled: true
+    backend:
+      service: "default"
+      host: "promo.example.com"
+    security_checks_enabled: false
+    ip_enrichment_mode: "cache_only"
+    probe:
+      enabled: true
+      mode: "html_discovery"
+      url: "https://promo.example.com/"
+      link_url: "https://fallback.example.net/"
+      patterns:
+        - "fallback.example.net/"

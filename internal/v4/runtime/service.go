@@ -17,6 +17,7 @@ type Resolution struct {
 	Host  v4model.SnapshotHost
 	State v4model.HostRuntimeState
 	Found bool
+	Reason string
 }
 
 type ProbeUpdate struct {
@@ -35,6 +36,7 @@ type Service struct {
 	logger       *slog.Logger
 	mu           sync.RWMutex
 	hostsByName  map[string]v4model.SnapshotHost
+	fingerprint  string
 }
 
 func NewService(cfg config.V4Config, snapshots *repository.SnapshotRepository, states *repository.RuntimeStateRepository, logger *slog.Logger) *Service {
@@ -55,14 +57,24 @@ func (s *Service) Run(ctx context.Context) {
 	if !s.Enabled() || s.snapshots == nil {
 		return
 	}
-	_, hosts, found, err := s.snapshots.LoadLatest(ctx)
-	if err != nil || !found {
-		return
+	s.refreshSnapshot(ctx)
+	interval := s.cfg.Sync.Interval
+	if interval <= 0 {
+		interval = time.Minute
 	}
-	s.ReplaceSnapshot(v4model.Snapshot{}, hosts)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.refreshSnapshot(ctx)
+		}
+	}
 }
 
-func (s *Service) ReplaceSnapshot(_ v4model.Snapshot, hosts []v4model.SnapshotHost) {
+func (s *Service) ReplaceSnapshot(snapshot v4model.Snapshot, hosts []v4model.SnapshotHost) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	next := make(map[string]v4model.SnapshotHost, len(hosts))
@@ -70,22 +82,64 @@ func (s *Service) ReplaceSnapshot(_ v4model.Snapshot, hosts []v4model.SnapshotHo
 		next[host.Host] = host
 	}
 	s.hostsByName = next
+	s.fingerprint = snapshot.Fingerprint
+}
+
+func (s *Service) refreshSnapshot(ctx context.Context) {
+	snapshot, hosts, found, err := s.snapshots.LoadLatest(ctx)
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Warn("v4_runtime_snapshot_refresh_error",
+				"event", "v4_runtime_snapshot_refresh_error",
+				"error", err,
+			)
+		}
+		return
+	}
+	if !found {
+		if s.logger != nil {
+			s.logger.Info("v4_runtime_snapshot_missing",
+				"event", "v4_runtime_snapshot_missing",
+			)
+		}
+		return
+	}
+
+	s.mu.RLock()
+	currentFingerprint := s.fingerprint
+	s.mu.RUnlock()
+	if currentFingerprint == snapshot.Fingerprint && currentFingerprint != "" {
+		return
+	}
+
+	s.ReplaceSnapshot(snapshot, hosts)
+	if s.logger != nil {
+		s.logger.Info("v4_runtime_snapshot_refreshed",
+			"event", "v4_runtime_snapshot_refreshed",
+			"fingerprint", snapshot.Fingerprint,
+			"host_count", len(hosts),
+		)
+	}
 }
 
 func (s *Service) Resolve(ctx context.Context, req *http.Request) Resolution {
 	if !s.Enabled() {
-		return Resolution{}
+		return Resolution{Reason: "v4_disabled"}
 	}
 	host := normalizeRequestHost(req.Host)
 	if host == "" {
-		return Resolution{}
+		return Resolution{Reason: "empty_host"}
 	}
 
 	s.mu.RLock()
 	spec, ok := s.hostsByName[host]
+	hasSnapshot := len(s.hostsByName) > 0
 	s.mu.RUnlock()
+	if !hasSnapshot {
+		return Resolution{Reason: "no_snapshot"}
+	}
 	if !ok {
-		return Resolution{}
+		return Resolution{Reason: "host_not_found"}
 	}
 
 	state, found, err := s.states.Get(ctx, host)
@@ -102,7 +156,7 @@ func (s *Service) Resolve(ctx context.Context, req *http.Request) Resolution {
 			UpdatedAt: time.Now().UTC(),
 		}
 	}
-	return Resolution{Host: spec, State: state, Found: true}
+	return Resolution{Host: spec, State: state, Found: true, Reason: "matched"}
 }
 
 func (s *Service) ApplyProbeUpdate(ctx context.Context, update ProbeUpdate) (v4model.HostRuntimeState, bool, bool, error) {
