@@ -330,7 +330,7 @@ func (a *Application) run(ctx context.Context, listener net.Listener) error {
 		a.routeRuntime.Run(ctx)
 	}
 	if a.v4Runtime != nil {
-		a.v4Runtime.Run(ctx)
+		go a.v4Runtime.Run(ctx)
 	}
 	if a.v4Snapshot != nil {
 		go a.v4Snapshot.Run(ctx)
