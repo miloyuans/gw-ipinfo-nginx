@@ -90,7 +90,7 @@ func (s *Service) BuildRoutesSummary(ctx context.Context) (Result, error) {
 	}
 
 	summary.WriteString("\n<b>字段说明 / Field Guide</b>\n")
-	summary.WriteString(html.EscapeString("Host = 入口域名；Mode = 当前流量模式；Backend Service = 上游服务名；Backend Host = 反代时覆盖的 Host；Security = 是否开启安全检查；Enrichment = IP 丰富化模式；Probe = 是否启用探测；Redirect URL = 降级跳转地址。\n"))
+	summary.WriteString(html.EscapeString("Host = 入口域名；Mode = 当前流量模式；Backend Service = 上游服务名；Backend Host = 反代时覆盖的 Host；Security = 是否开启安全检查；Enrichment = IP 丰富化模式；Probe = 是否启用探测；Targets = 当前探测到的目标数；Last Reason = 最近异常原因；Redirect URL = 当前故障跳转地址。\n"))
 
 	summary.WriteString("\n<b>Top Hosts / 摘要域名</b>\n")
 	for _, host := range summaryHosts {
@@ -100,7 +100,7 @@ func (s *Service) BuildRoutesSummary(ctx context.Context) (Result, error) {
 			mode = v4model.ModePassthrough
 		}
 		summary.WriteString(html.EscapeString(fmt.Sprintf(
-			"• %s | mode=%s | backend=%s | backend_host=%s | security=%t | enrich=%s | probe=%t\n",
+			"• %s | mode=%s | backend=%s | backend_host=%s | security=%t | enrich=%s | probe=%t | targets=%d | reason=%s\n",
 			host.Host,
 			mode,
 			host.BackendService,
@@ -108,6 +108,8 @@ func (s *Service) BuildRoutesSummary(ctx context.Context) (Result, error) {
 			host.SecurityChecksEnabled,
 			host.IPEnrichmentMode,
 			host.Probe.Enabled,
+			len(state.LastProbeTargets),
+			trimForSummary(state.LastProbeError, 60),
 		)))
 	}
 
@@ -151,11 +153,13 @@ func buildHTMLDocument(snapshot v4model.Snapshot, syncView syncView, hosts []v4m
 	buffer.WriteString("<li><b>Security（安全检查）</b>: 是否启用完整安全检查 / Whether full security checks are enabled</li>")
 	buffer.WriteString("<li><b>Enrichment（IP 丰富化）</b>: IP 丰富化模式，disabled、cache_only、full / IP enrichment mode</li>")
 	buffer.WriteString("<li><b>Probe（探测）</b>: 是否为该 host 显式开启探测 / Whether probe is enabled for this host</li>")
-	buffer.WriteString("<li><b>Redirect URL（降级跳转）</b>: 降级跳转地址，仅在 degraded_redirect 时生效 / Redirect target when degraded redirect is active</li>")
+	buffer.WriteString("<li><b>Targets（目标数）</b>: 当前探测到的跳转目标数 / Current discovered target count</li>")
+	buffer.WriteString("<li><b>Last Reason（最近原因）</b>: 最近一次探测异常原因 / Most recent probe error</li>")
+	buffer.WriteString("<li><b>Redirect URL（降级跳转）</b>: 当前故障跳转地址，仅在 degraded_redirect 时生效 / Current failover target when degraded redirect is active</li>")
 	buffer.WriteString("</ul>")
 
 	buffer.WriteString("<table border=\"1\" cellspacing=\"0\" cellpadding=\"6\">")
-	buffer.WriteString("<tr><th>Host<br/>入口域名</th><th>Mode<br/>运行模式</th><th>Backend Service<br/>后端服务</th><th>Backend Host<br/>后端 Host</th><th>Security<br/>安全检查</th><th>Enrichment<br/>IP 丰富化</th><th>Probe<br/>探测</th><th>Redirect URL<br/>降级跳转</th></tr>")
+	buffer.WriteString("<tr><th>Host<br/>入口域名</th><th>Mode<br/>运行模式</th><th>Backend Service<br/>后端服务</th><th>Backend Host<br/>后端 Host</th><th>Security<br/>安全检查</th><th>Enrichment<br/>IP 丰富化</th><th>Probe<br/>探测</th><th>Targets<br/>目标数</th><th>Last Reason<br/>最近原因</th><th>Redirect URL<br/>降级跳转</th></tr>")
 	for _, host := range hosts {
 		state := stateByHost[host.Host]
 		mode := strings.TrimSpace(state.Mode)
@@ -170,6 +174,8 @@ func buildHTMLDocument(snapshot v4model.Snapshot, syncView syncView, hosts []v4m
 		buffer.WriteString("<td>" + html.EscapeString(fmt.Sprintf("%t", host.SecurityChecksEnabled)) + "</td>")
 		buffer.WriteString("<td>" + html.EscapeString(host.IPEnrichmentMode) + "</td>")
 		buffer.WriteString("<td>" + html.EscapeString(fmt.Sprintf("%t", host.Probe.Enabled)) + "</td>")
+		buffer.WriteString("<td>" + html.EscapeString(fmt.Sprintf("%d", len(state.LastProbeTargets))) + "</td>")
+		buffer.WriteString("<td>" + html.EscapeString(trimForSummary(state.LastProbeError, 120)) + "</td>")
 		buffer.WriteString("<td>" + html.EscapeString(state.RedirectURL) + "</td>")
 		buffer.WriteString("</tr>")
 	}

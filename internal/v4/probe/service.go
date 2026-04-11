@@ -2,6 +2,8 @@ package probe
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,15 +28,18 @@ import (
 )
 
 var (
+	jsVariablePatterns = []*regexp.Regexp{
+		regexp.MustCompile(`(?i)(?:var|let|const)\s+(?:linkUrl|iosUrl|androidUrl|jumpUrl|redirectUrl|downloadUrl|targetUrl)\s*=\s*['"]([^'"]+)['"]`),
+	}
 	jsRedirectPatterns = []*regexp.Regexp{
 		regexp.MustCompile(`(?i)location\.href\s*=\s*['"]([^'"]+)['"]`),
 		regexp.MustCompile(`(?i)window\.location\s*=\s*['"]([^'"]+)['"]`),
 		regexp.MustCompile(`(?i)window\.open\(\s*['"]([^'"]+)['"]`),
 	}
-	htmlRedirectPatterns = []*regexp.Regexp{
-		regexp.MustCompile(`(?i)<a[^>]+href=['"]([^'"]+)['"]`),
+	htmlMetaPatterns = []*regexp.Regexp{
 		regexp.MustCompile(`(?i)http-equiv=['"]refresh['"][^>]+content=['"][^'"]*url=([^'"]+)['"]`),
 	}
+	htmlScriptSrcPattern = regexp.MustCompile(`(?i)<script[^>]+src=['"]([^'"]+)['"]`)
 )
 
 type Service struct {
@@ -59,6 +64,8 @@ type probeWorkspaceRecord struct {
 	RedirectURLs  []string  `json:"redirect_urls"`
 	LastError     string    `json:"last_error"`
 }
+
+const maxProbeScriptSources = 12
 
 func NewService(cfg config.V4Config, runtime *v4runtime.Service, eventSvc *events.Service, logger *slog.Logger) *Service {
 	return &Service{
@@ -112,13 +119,16 @@ func (s *Service) runOnce(ctx context.Context) {
 				Host:        host.Host,
 				Fingerprint: "domain_unhealthy:" + host.Host,
 				Level:       "warning",
-				Title:       "V4 domain unhealthy",
-				Message:     fmt.Sprintf("%s switched to degraded redirect after %d consecutive unhealthy probes", host.Host, host.Probe.UnhealthyThreshold),
+				Title:       "V4 路由切换 / V4 Route Switch",
+				Message:     "切换到故障跳转 / Switched to failover",
 				Metadata: map[string]any{
-					"redirect_url":  state.RedirectURL,
-					"probe_url":     host.Probe.URL,
-					"failed_urls":   update.FailedTargets,
-					"probe_targets": update.ProbeTargets,
+					"action":       "switch_to_redirect",
+					"result":       "applied",
+					"source_url":   firstNonEmpty(strings.TrimSpace(update.SourceURL), defaultHostBaseURL(host.Host)),
+					"redirect_url": state.RedirectURL,
+					"target_urls":  append([]string(nil), update.ProbeTargets...),
+					"failed_urls":  append([]string(nil), update.FailedTargets...),
+					"reason":       compactProbeReason(update.Error),
 				},
 			})
 			_ = s.events.Emit(ctx, v4model.Event{
@@ -126,30 +136,52 @@ func (s *Service) runOnce(ctx context.Context) {
 				Host:        host.Host,
 				Fingerprint: "traffic_switched_to_redirect:" + host.Host + ":" + state.RedirectURL,
 				Level:       "warning",
-				Title:       "V4 traffic switched to redirect",
-				Message:     fmt.Sprintf("%s switched traffic to redirect %s", host.Host, state.RedirectURL),
+				Title:       "V4 路由切换 / V4 Route Switch",
+				Message:     "切换到故障跳转 / Switched to failover",
 				Metadata: map[string]any{
-					"redirect_url":  state.RedirectURL,
-					"probe_targets": update.ProbeTargets,
+					"action":       "switch_to_redirect",
+					"result":       "applied",
+					"source_url":   firstNonEmpty(strings.TrimSpace(update.SourceURL), defaultHostBaseURL(host.Host)),
+					"redirect_url": state.RedirectURL,
+					"target_urls":  append([]string(nil), update.ProbeTargets...),
+					"failed_urls":  append([]string(nil), update.FailedTargets...),
+					"reason":       compactProbeReason(update.Error),
 				},
 			})
 		}
 		if recovered {
+			lastRedirect := firstNonEmpty(state.RedirectURL, firstSliceValue(update.RedirectCandidates))
 			_ = s.events.Emit(ctx, v4model.Event{
 				Type:        v4model.EventDomainRecovered,
 				Host:        host.Host,
 				Fingerprint: "domain_recovered:" + host.Host,
 				Level:       "info",
-				Title:       "V4 domain recovered",
-				Message:     fmt.Sprintf("%s recovered to passthrough", host.Host),
+				Title:       "V4 路由恢复 / V4 Route Restore",
+				Message:     "恢复原始透传 / Restored passthrough",
+				Metadata: map[string]any{
+					"action":       "restore_to_passthrough",
+					"result":       "restored",
+					"source_url":   firstNonEmpty(strings.TrimSpace(update.SourceURL), defaultHostBaseURL(host.Host)),
+					"redirect_url": lastRedirect,
+					"target_urls":  append([]string(nil), update.ProbeTargets...),
+					"reason":       "探测恢复正常 / Health check recovered",
+				},
 			})
 			_ = s.events.Emit(ctx, v4model.Event{
 				Type:        v4model.EventTrafficRestoredPassthrough,
 				Host:        host.Host,
 				Fingerprint: "traffic_restored_to_passthrough:" + host.Host,
 				Level:       "info",
-				Title:       "V4 traffic restored",
-				Message:     fmt.Sprintf("%s restored to passthrough", host.Host),
+				Title:       "V4 路由恢复 / V4 Route Restore",
+				Message:     "恢复原始透传 / Restored passthrough",
+				Metadata: map[string]any{
+					"action":       "restore_to_passthrough",
+					"result":       "restored",
+					"source_url":   firstNonEmpty(strings.TrimSpace(update.SourceURL), defaultHostBaseURL(host.Host)),
+					"redirect_url": lastRedirect,
+					"target_urls":  append([]string(nil), update.ProbeTargets...),
+					"reason":       "探测恢复正常 / Health check recovered",
+				},
 			})
 		}
 	}
@@ -164,10 +196,12 @@ func (s *Service) probeHost(ctx context.Context, host v4model.SnapshotHost) v4ru
 	defer cancel()
 
 	update := v4runtime.ProbeUpdate{
-		Host:    host.Host,
-		ProbeAt: time.Now().UTC(),
-		Spec:    host.Probe,
-		Healthy: true,
+		Host:               host.Host,
+		ProbeAt:            time.Now().UTC(),
+		Spec:               host.Probe,
+		Healthy:            true,
+		SourceURL:          firstNonEmpty(strings.TrimSpace(host.Probe.URL), defaultHostBaseURL(host.Host)),
+		RedirectCandidates: dedupeSortedURLs(append([]string(nil), host.Probe.RedirectURLs...)),
 	}
 	discoveredURLs, workspacePath, discoveryErr := s.discoverProbeURLs(probeCtx, host)
 	update.ProbeTargets = discoveredURLs
@@ -186,7 +220,7 @@ func (s *Service) probeHost(ctx context.Context, host v4model.SnapshotHost) v4ru
 	update.FailedTargets = failedURLs
 	if len(failedURLs) > 0 || len(failureReasons) > 0 {
 		update.Healthy = false
-		update.RedirectURL = pickRedirectURL(host.Host, host.Probe)
+		update.RedirectURL = s.pickRedirectURL(probeCtx, host)
 		update.Error = strings.Join(failureReasons, " | ")
 	}
 	s.writeWorkspace(host, discoveredURLs, failedURLs, update.Error)
@@ -250,7 +284,17 @@ func (s *Service) discoverFromRemoteURL(ctx context.Context, probeURL string, pr
 	if err != nil {
 		return nil, err
 	}
-	return extractCandidateURLs(probeURL, string(body), probe.Mode), nil
+	discovered := extractCandidateURLs(probeURL, string(body), probe.Mode)
+	if strings.TrimSpace(probe.Mode) == "html_discovery" {
+		for _, scriptURL := range extractRemoteScriptURLs(probeURL, string(body)) {
+			targets, scriptErr := s.fetchRemoteJSURLs(ctx, scriptURL)
+			if scriptErr != nil {
+				continue
+			}
+			discovered = append(discovered, targets...)
+		}
+	}
+	return dedupeSortedURLs(discovered), nil
 }
 
 func (s *Service) discoverFromLocalFile(path, baseURL, mode string, htmlMode bool) ([]string, error) {
@@ -265,7 +309,17 @@ func (s *Service) discoverFromLocalFile(path, baseURL, mode string, htmlMode boo
 	if !htmlMode {
 		effectiveMode = "local_js"
 	}
-	return extractCandidateURLs(baseURL, string(raw), effectiveMode), nil
+	discovered := extractCandidateURLs(baseURL, string(raw), effectiveMode)
+	if htmlMode {
+		for _, jsPath := range extractLocalScriptPaths(path, string(raw)) {
+			jsRaw, readErr := os.ReadFile(filepath.Clean(jsPath))
+			if readErr != nil {
+				continue
+			}
+			discovered = append(discovered, extractCandidateURLs(baseURL, string(jsRaw), "local_js")...)
+		}
+	}
+	return dedupeSortedURLs(discovered), nil
 }
 
 func extractCandidateURLs(baseURL string, body string, mode string) []string {
@@ -282,6 +336,12 @@ func extractCandidateURLs(baseURL string, body string, mode string) []string {
 	for _, candidate := range candidates {
 		absolute, err := base.Parse(strings.TrimSpace(candidate))
 		if err != nil {
+			continue
+		}
+		if absolute.Scheme != "http" && absolute.Scheme != "https" {
+			continue
+		}
+		if absolute.Hostname() == "" {
 			continue
 		}
 		value := absolute.String()
@@ -329,6 +389,106 @@ func filterCandidateURLs(baseURL string, candidates []string, probe v4model.Prob
 		}
 	}
 	return dedupeSortedURLs(filtered)
+}
+
+func extractRemoteScriptURLs(baseURL string, body string) []string {
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		return nil
+	}
+	matches := htmlScriptSrcPattern.FindAllStringSubmatch(body, -1)
+	values := make([]string, 0, len(matches))
+	seen := make(map[string]struct{}, len(matches))
+	for _, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+		raw := strings.TrimSpace(match[1])
+		if raw == "" {
+			continue
+		}
+		target, err := base.Parse(raw)
+		if err != nil {
+			continue
+		}
+		if target.Host != "" && !strings.EqualFold(target.Hostname(), base.Hostname()) {
+			continue
+		}
+		if target.Scheme != "http" && target.Scheme != "https" {
+			continue
+		}
+		if !strings.HasSuffix(strings.ToLower(target.Path), ".js") {
+			continue
+		}
+		value := target.String()
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		values = append(values, value)
+		if len(values) >= maxProbeScriptSources {
+			break
+		}
+	}
+	return values
+}
+
+func extractLocalScriptPaths(htmlPath string, body string) []string {
+	baseDir := filepath.Dir(filepath.Clean(htmlPath))
+	matches := htmlScriptSrcPattern.FindAllStringSubmatch(body, -1)
+	values := make([]string, 0, len(matches))
+	seen := make(map[string]struct{}, len(matches))
+	for _, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+		raw := strings.TrimSpace(match[1])
+		if raw == "" {
+			continue
+		}
+		if strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://") || strings.HasPrefix(raw, "//") {
+			continue
+		}
+		var resolved string
+		if filepath.IsAbs(raw) {
+			resolved = filepath.Clean(raw)
+		} else {
+			resolved = filepath.Clean(filepath.Join(baseDir, raw))
+		}
+		if _, ok := seen[resolved]; ok {
+			continue
+		}
+		if !strings.HasSuffix(strings.ToLower(resolved), ".js") {
+			continue
+		}
+		seen[resolved] = struct{}{}
+		values = append(values, resolved)
+		if len(values) >= maxProbeScriptSources {
+			break
+		}
+	}
+	return values
+}
+
+func (s *Service) fetchRemoteJSURLs(ctx context.Context, scriptURL string) ([]string, error) {
+	if err := validateRemoteURL(ctx, scriptURL); err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, scriptURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", s.cfg.ProbeDefaults.UserAgent)
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, err
+	}
+	return extractCandidateURLs(scriptURL, string(body), "local_js"), nil
 }
 
 func (s *Service) checkProbeTargets(ctx context.Context, targets []string, probe v4model.ProbeSpec) ([]string, []string) {
@@ -382,9 +542,11 @@ func collectCandidates(body, mode string) []string {
 	var patterns []*regexp.Regexp
 	switch strings.TrimSpace(mode) {
 	case "local_js":
-		patterns = jsRedirectPatterns
+		patterns = append(patterns, jsVariablePatterns...)
+		patterns = append(patterns, jsRedirectPatterns...)
 	case "html_discovery":
-		patterns = append(patterns, htmlRedirectPatterns...)
+		patterns = append(patterns, htmlMetaPatterns...)
+		patterns = append(patterns, jsVariablePatterns...)
 		patterns = append(patterns, jsRedirectPatterns...)
 	default:
 		return nil
@@ -509,7 +671,8 @@ func (s *Service) shouldProbe(host v4model.SnapshotHost, now time.Time) bool {
 	return true
 }
 
-func pickRedirectURL(host string, probe v4model.ProbeSpec) string {
+func (s *Service) pickRedirectURL(ctx context.Context, host v4model.SnapshotHost) string {
+	probe := host.Probe
 	candidates := dedupeSortedURLs(append([]string(nil), probe.RedirectURLs...))
 	if len(candidates) == 0 && strings.TrimSpace(probe.LinkURL) != "" {
 		candidates = []string{strings.TrimSpace(probe.LinkURL)}
@@ -517,8 +680,47 @@ func pickRedirectURL(host string, probe v4model.ProbeSpec) string {
 	if len(candidates) == 0 {
 		return ""
 	}
+	healthy := make([]string, 0, len(candidates))
+	unhealthyCodes := unhealthyStatusCodeSet(probe.UnhealthyStatusCodes)
+	for _, candidate := range candidates {
+		if s.isHealthyRedirectTarget(ctx, candidate, unhealthyCodes) {
+			healthy = append(healthy, candidate)
+		}
+	}
+	if len(healthy) == 0 {
+		healthy = candidates
+	}
+	return randomURLForHost(host.Host, healthy)
+}
+
+func (s *Service) isHealthyRedirectTarget(ctx context.Context, target string, unhealthyCodes map[int]struct{}) bool {
+	if err := validateRemoteURL(ctx, target); err != nil {
+		return false
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("User-Agent", s.cfg.ProbeDefaults.UserAgent)
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return false
+	}
+	_ = resp.Body.Close()
+	_, bad := unhealthyCodes[resp.StatusCode]
+	return !bad
+}
+
+func randomURLForHost(host string, candidates []string) string {
+	if len(candidates) == 0 {
+		return ""
+	}
 	if len(candidates) == 1 {
 		return candidates[0]
+	}
+	var seedBytes [8]byte
+	if _, err := rand.Read(seedBytes[:]); err == nil {
+		return candidates[int(binary.LittleEndian.Uint64(seedBytes[:])%uint64(len(candidates)))]
 	}
 	hasher := fnv.New32a()
 	_, _ = hasher.Write([]byte(strings.TrimSpace(strings.ToLower(host))))
@@ -549,7 +751,7 @@ func (s *Service) writeWorkspace(host v4model.SnapshotHost, discoveredURLs, fail
 		Host:           host.Host,
 		UpdatedAt:      time.Now().UTC(),
 		Mode:           host.Probe.Mode,
-		SourceURL:      strings.TrimSpace(host.Probe.URL),
+		SourceURL:      firstNonEmpty(strings.TrimSpace(host.Probe.URL), defaultHostBaseURL(host.Host)),
 		HTMLPaths:      append([]string(nil), host.Probe.HTMLPaths...),
 		JSPaths:        append([]string(nil), host.Probe.JSPaths...),
 		DiscoveredURLs: append([]string(nil), discoveredURLs...),
@@ -613,6 +815,36 @@ func defaultHostBaseURL(host string) string {
 		return "https://invalid.local/"
 	}
 	return "https://" + host + "/"
+}
+
+func compactProbeReason(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	parts := strings.Split(value, " | ")
+	first := strings.TrimSpace(parts[0])
+	if first == "" {
+		return value
+	}
+	return first
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func firstSliceValue(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(values[0])
 }
 
 func sanitizeHostFileName(host string) string {

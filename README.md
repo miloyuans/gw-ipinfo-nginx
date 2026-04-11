@@ -446,14 +446,16 @@ Behavior:
   - If no snapshot is available, the gateway logs `v4_fallback_to_legacy=true` and falls back to legacy routing where applicable.
 
 - `v4` probe behavior
-  - `probe.url` fetches a remote HTML entry page and extracts candidate jump URLs from HTML and inline JS.
-  - `probe.html_paths` reads one or more local absolute HTML files and extracts candidate jump URLs with the current host as the default base URL.
+  - `probe.url` fetches a remote HTML entry page and only analyzes inline JS plus same-host `script src` JS assets.
+  - `probe.html_paths` reads one or more local absolute HTML files and extracts candidate jump URLs from inline JS plus referenced local JS files.
   - `probe.js_paths` reads one or more local absolute JS files and extracts candidate jump URLs directly.
   - `probe.link_url` is an explicit target matcher with higher priority than `probe.patterns`.
   - `probe.patterns` uses plain substring match first and regexp as fallback.
-  - `probe.redirect_urls` defines the fixed failover destinations that traffic actually switches to after the host becomes unhealthy.
+  - `probe.redirect_urls` defines the fixed failover destinations that traffic switches to after the host becomes unhealthy; when multiple destinations are configured, the runtime prefers a random healthy target.
   - `probe.unhealthy_status_codes` defines which HTTP statuses are considered unhealthy; default is `404`.
   - Probe discoveries and failures are written to `v4.probe_defaults.workspace_dir`.
+  - Default extraction is intentionally bounded to explicit redirect patterns such as `linkUrl`, `iosUrl`, `androidUrl`, `redirectUrl`, `window.location`, and `location.href`; generic page anchors are ignored.
+  - Telegram notifications only send the actual switch and restore actions; the lower-level `domain_unhealthy` and `domain_recovered` events are still persisted but not pushed as duplicate chat messages.
 
 - `v4` Telegram `/routes`
   - Only reads persisted snapshot / sync state / runtime state / recent events.
@@ -463,6 +465,7 @@ Behavior:
   - Full route details are sent as an HTML attachment.
   - The HTML attachment includes a bilingual field guide for each route column.
   - When a last-good snapshot is still available but the latest sync failed, `/routes` reports `degraded` instead of treating the whole runtime as unavailable.
+  - Route switch notifications use a compact bilingual template and only show host, source URL, failover URL, target URL, action, result, and reason.
 
 Compiler rules:
 

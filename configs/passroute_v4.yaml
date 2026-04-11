@@ -14,12 +14,12 @@ routes:
   # probe 字段说明：
   # - probe.enabled: 只有显式 true 的 host 才会做探测。
   # - probe.mode: html_discovery | local_js。
-  # - probe.url: 远程探测入口地址；如果配置了，会抓取这个页面内容并提取跳转 URL。
-  # - probe.html_paths: 本地 HTML 文件绝对路径列表；会从这些静态文件里提取跳转 URL。
+  # - probe.url: 远程探测入口地址；如果配置了，会抓取这个页面内容，并只分析内联 JS / 同 host 的 script src 对应 JS 文件。
+  # - probe.html_paths: 本地 HTML 文件绝对路径列表；会分析 HTML 内联 JS 和同目录引用的本地 JS 文件。
   # - probe.js_paths: 本地 JS 文件绝对路径列表；会直接从这些 JS 文件里提取跳转 URL。
   # - probe.link_url: 显式目标 URL；配置后优先用于精确匹配提取结果。
   # - probe.patterns: 候选 URL 过滤规则；普通字符串优先，正则兜底。
-  # - probe.redirect_urls: 发生故障切换后真正使用的跳转目标，可配多个，内部会稳定选一个。
+  # - probe.redirect_urls: 发生故障切换后真正使用的跳转目标，可配多个，系统会优先随机选择健康目标。
   # - probe.unhealthy_status_codes: 这些状态码会被判定为异常；默认使用全局 probe_defaults 的 404。
   # - probe.interval/timeout/healthy_threshold/unhealthy_threshold/min_switch_interval:
   #   都可以按 host 覆盖全局默认值。
@@ -28,6 +28,7 @@ routes:
   # - 只需要配置本地绝对路径；
   # - 基准域名默认使用当前 host，内部按 https://<host>/ 解析相对跳转链接；
   # - 提取出的 URL 会自动去重，并写入 v4 probe 工作区。
+  # - 默认只抓显式跳转写法，例如 linkUrl / iosUrl / androidUrl / redirectUrl / window.location / location.href。
 
   - id: "promo-example"
     host: "promo.example.com"

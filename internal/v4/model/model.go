@@ -85,7 +85,9 @@ type HostRuntimeState struct {
 	ID                string    `json:"id" bson:"_id"`
 	Host              string    `json:"host" bson:"host"`
 	Mode              string    `json:"mode" bson:"mode"`
+	SourceURL         string    `json:"source_url" bson:"source_url"`
 	RedirectURL       string    `json:"redirect_url" bson:"redirect_url"`
+	RedirectCandidates []string `json:"redirect_candidates" bson:"redirect_candidates"`
 	LastProbeTargets  []string  `json:"last_probe_targets" bson:"last_probe_targets"`
 	LastFailedTargets []string  `json:"last_failed_targets" bson:"last_failed_targets"`
 	WorkspaceFile     string    `json:"workspace_file" bson:"workspace_file"`
