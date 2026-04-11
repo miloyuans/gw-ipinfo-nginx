@@ -199,7 +199,7 @@ func New(configPath string) (*Application, error) {
 			v4RuntimeSvc.ReplaceSnapshot(snapshot, hosts)
 		})
 		v4ProbeSvc = v4probe.NewService(cfg.V4, v4RuntimeSvc, v4EventService, logger)
-		v4QuerySvc = v4query.NewService(cfg.V4.Telegram, v4SnapshotRepo, v4StateRepo, v4EventService)
+		v4QuerySvc = v4query.NewService(cfg.V4.Telegram, v4SnapshotRepo, v4StateRepo, v4EventRepo)
 	}
 
 	var commandBot *alerts.CommandBot

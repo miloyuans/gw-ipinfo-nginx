@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"gw-ipinfo-nginx/internal/config"
-	"gw-ipinfo-nginx/internal/v4/events"
 	v4model "gw-ipinfo-nginx/internal/v4/model"
 	"gw-ipinfo-nginx/internal/v4/repository"
 )
@@ -26,10 +25,10 @@ type Service struct {
 	cfg       config.V4TelegramConfig
 	snapshots *repository.SnapshotRepository
 	states    *repository.RuntimeStateRepository
-	events    *events.Service
+	events    *repository.EventRepository
 }
 
-func NewService(cfg config.V4TelegramConfig, snapshots *repository.SnapshotRepository, states *repository.RuntimeStateRepository, events *events.Service) *Service {
+func NewService(cfg config.V4TelegramConfig, snapshots *repository.SnapshotRepository, states *repository.RuntimeStateRepository, events *repository.EventRepository) *Service {
 	return &Service{cfg: cfg, snapshots: snapshots, states: states, events: events}
 }
 
