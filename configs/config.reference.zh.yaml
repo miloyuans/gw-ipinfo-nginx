@@ -176,6 +176,65 @@ v3_defaults:
     healthy_threshold: 2
     unhealthy_threshold: 2
 
+v4:
+  enabled: false
+  sync:
+    # 后台定时解析 nginx conf，生成 auto hosts 并写入 last-good snapshot。
+    # 解析失败时只记事件和日志，不会覆盖历史可用快照。
+    enabled: true
+    interval: 1m
+  ingress:
+    # 只在后台定时解析这些 nginx conf。
+    # Telegram 的 /routes 命令只查数据库 / 本地持久化快照，不会现场解析 conf。
+    config_paths:
+      - "/etc/nginx/nginx.conf"
+  passthrough:
+    # v4 命中后的默认透传后端 service，必须能在 routing.services 里找到。
+    service: "default"
+  security:
+    # false：默认关闭安全检查。
+    # 会跳过请求级风控、Geo/Privacy deny，仅保留 best-effort client IP、日志、统计、反代。
+    security_checks_enabled: false
+  ip_enrichment:
+    # disabled | cache_only | full
+    # disabled：默认关闭 enrichment，并优先只吃缓存；
+    # cache_only：只查缓存，不打远端；
+    # full：允许走完整 IP enrichment 链路。
+    mode: "disabled"
+  probe_defaults:
+    interval: 30s
+    timeout: 3s
+    healthy_threshold: 2
+    unhealthy_threshold: 2
+    min_switch_interval: 2m
+    user_agent: "gw-ipinfo-nginx-v4-probe/1.0"
+  telegram:
+    enabled: false
+    # 新增 Telegram 查询命令，默认 /routes。
+    # 只查已落库的快照 / runtime state / recent events。
+    command: "/routes"
+    send_html_file: true
+    max_hosts: 200
+    # 同一 fingerprint 在这个窗口内做去重，避免重复通知。
+    dedupe_window: 15m
+    # 静默窗口；在静默期内同 fingerprint 事件不重复发通知。
+    silent_window: 1h
+  overrides: []
+  # overrides:
+  #   - host: "promo.example.com"
+  #     enabled: true
+  #     backend_service: "default"
+  #     backend_host: "promo.example.com"
+  #     security_checks_enabled: false
+  #     ip_enrichment_mode: "cache_only"
+  #     probe:
+  #       enabled: true
+  #       mode: "html_discovery"
+  #       url: "https://promo.example.com/"
+  #       link_url: "https://fallback.example.net/"
+  #       patterns:
+  #         - "^https://fallback\\.example\\.net/"
+
 alerts:
   telegram:
     enabled: false

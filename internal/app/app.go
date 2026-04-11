@@ -35,6 +35,13 @@ import (
 	"gw-ipinfo-nginx/internal/server"
 	"gw-ipinfo-nginx/internal/shortcircuit"
 	"gw-ipinfo-nginx/internal/storage"
+	v4events "gw-ipinfo-nginx/internal/v4/events"
+	v4probe "gw-ipinfo-nginx/internal/v4/probe"
+	v4query "gw-ipinfo-nginx/internal/v4/query"
+	v4repo "gw-ipinfo-nginx/internal/v4/repository"
+	v4runtime "gw-ipinfo-nginx/internal/v4/runtime"
+	v4snapshot "gw-ipinfo-nginx/internal/v4/snapshot"
+	v4model "gw-ipinfo-nginx/internal/v4/model"
 )
 
 type Application struct {
@@ -50,6 +57,9 @@ type Application struct {
 	commandBot       *alerts.CommandBot
 	lifecycleManager *alerts.LifecycleManager
 	reportingService *reporting.Service
+	v4Runtime        *v4runtime.Service
+	v4Snapshot       *v4snapshot.Service
+	v4Probe          *v4probe.Service
 	startReplayLoop  bool
 }
 
@@ -168,6 +178,30 @@ func New(configPath string) (*Application, error) {
 		}
 	}
 
+	var (
+		v4SnapshotRepo  *v4repo.SnapshotRepository
+		v4StateRepo     *v4repo.RuntimeStateRepository
+		v4EventRepo     *v4repo.EventRepository
+		v4EventService  *v4events.Service
+		v4RuntimeSvc    *v4runtime.Service
+		v4SnapshotSvc   *v4snapshot.Service
+		v4ProbeSvc      *v4probe.Service
+		v4QuerySvc      *v4query.Service
+	)
+	if cfg.V4.Enabled {
+		v4SnapshotRepo = v4repo.NewSnapshotRepository(storageControl, logger)
+		v4StateRepo = v4repo.NewRuntimeStateRepository(storageControl)
+		v4EventRepo = v4repo.NewEventRepository(storageControl, logger)
+		v4EventService = v4events.NewService(cfg.V4.Telegram, v4EventRepo, sender, logger)
+		v4RuntimeSvc = v4runtime.NewService(cfg.V4, v4SnapshotRepo, v4StateRepo, logger)
+		v4SnapshotSvc = v4snapshot.NewService(cfg.V4, v4SnapshotRepo, v4EventService, logger)
+		v4SnapshotSvc.SetOnUpdated(func(snapshot v4model.Snapshot, hosts []v4model.SnapshotHost) {
+			v4RuntimeSvc.ReplaceSnapshot(snapshot, hosts)
+		})
+		v4ProbeSvc = v4probe.NewService(cfg.V4, v4RuntimeSvc, v4EventService, logger)
+		v4QuerySvc = v4query.NewService(cfg.V4.Telegram, v4SnapshotRepo, v4StateRepo, v4EventService)
+	}
+
 	var commandBot *alerts.CommandBot
 	if cfg.Alerts.Telegram.CommandBot.Enabled {
 		commandLookupService := lookupService
@@ -193,6 +227,9 @@ func New(configPath string) (*Application, error) {
 		if err != nil {
 			return nil, err
 		}
+		if v4QuerySvc != nil {
+			commandBot.AttachV4Query(cfg.V4.Telegram, v4QuerySvc)
+		}
 	}
 
 	var reportingService *reporting.Service
@@ -217,6 +254,7 @@ func New(configPath string) (*Application, error) {
 		realIPExtractor: realIPExtractor,
 		resolver:        resolver,
 		routeRuntime:    routeRuntime,
+		v4Runtime:       v4RuntimeSvc,
 		policyEngine:    policyEngine,
 		lookupService:   lookupService,
 		shortCircuit:    shortCircuitService,
@@ -249,6 +287,9 @@ func New(configPath string) (*Application, error) {
 		commandBot:       commandBot,
 		lifecycleManager: lifecycleManager,
 		reportingService: reportingService,
+		v4Runtime:        v4RuntimeSvc,
+		v4Snapshot:       v4SnapshotSvc,
+		v4Probe:          v4ProbeSvc,
 		startReplayLoop:  mongoConfigured,
 	}, nil
 }
@@ -275,6 +316,15 @@ func (a *Application) run(ctx context.Context, listener net.Listener) error {
 	}
 	if a.routeRuntime != nil {
 		a.routeRuntime.Run(ctx)
+	}
+	if a.v4Runtime != nil {
+		a.v4Runtime.Run(ctx)
+	}
+	if a.v4Snapshot != nil {
+		go a.v4Snapshot.Run(ctx)
+	}
+	if a.v4Probe != nil {
+		go a.v4Probe.Run(ctx)
 	}
 	if a.reportingService != nil {
 		a.reportingService.Run(ctx, a.cfg.Storage.ReplayWorkers)
@@ -345,6 +395,7 @@ type GatewayHandler struct {
 	realIPExtractor *realip.Extractor
 	resolver        *routing.Resolver
 	routeRuntime    *routesets.Runtime
+	v4Runtime       *v4runtime.Service
 	policyEngine    *policy.Engine
 	lookupService   *ipinfo.LookupService
 	shortCircuit    *shortcircuit.Service
@@ -387,6 +438,10 @@ type routeContext struct {
 	V3SelectedTargetHost    string
 	V3StrategyMode          string
 	V3BindingReused         bool
+	V4RuntimeMode           string
+	V4SecurityChecksEnabled bool
+	V4EnrichmentMode        string
+	V4ProbeEnabled          bool
 }
 
 type responseAction struct {
@@ -405,6 +460,9 @@ func (h *GatewayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveWithRouteSets(w, r, requestID, start, fallbackService)
 		return
 	}
+	if h.serveV4Fallback(w, r, requestID, start, fallbackService) {
+		return
+	}
 
 	outcome := h.evaluateFullChain(r, fallbackService)
 	h.finish(w, r, requestID, outcome.service, outcome.clientIP, outcome.ipContext, outcome.decision, start, outcome.state, routeContext{}, responseAction{})
@@ -413,6 +471,9 @@ func (h *GatewayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (h *GatewayHandler) serveWithRouteSets(w http.ResponseWriter, r *http.Request, requestID string, start time.Time, fallbackService config.ServiceConfig) {
 	resolution := h.routeRuntime.Resolve(r)
 	if resolution.DenyReason != "" {
+		if h.serveV4Fallback(w, r, requestID, start, fallbackService) {
+			return
+		}
 		h.finish(
 			w,
 			r,
@@ -435,6 +496,9 @@ func (h *GatewayHandler) serveWithRouteSets(w http.ResponseWriter, r *http.Reque
 	case routesets.MatchTarget:
 		h.serveTargetRoute(w, r, requestID, start, fallbackService, resolution)
 	default:
+		if h.serveV4Fallback(w, r, requestID, start, fallbackService) {
+			return
+		}
 		h.finish(
 			w,
 			r,
@@ -780,6 +844,44 @@ func (h *GatewayHandler) serveTargetRoute(w http.ResponseWriter, r *http.Request
 	}
 }
 
+func (h *GatewayHandler) serveV4Fallback(w http.ResponseWriter, r *http.Request, requestID string, start time.Time, fallbackService config.ServiceConfig) bool {
+	if h.v4Runtime == nil || !h.v4Runtime.Enabled() {
+		return false
+	}
+	resolution := h.v4Runtime.Resolve(r.Context(), r)
+	if !resolution.Found {
+		return false
+	}
+	service, ok := h.resolver.Service(resolution.Host.BackendService)
+	if !ok {
+		service = fallbackService
+	}
+	outcome := h.evaluateV4Chain(r, service, resolution)
+	runtimeMode := resolution.State.Mode
+	if strings.TrimSpace(runtimeMode) == "" {
+		runtimeMode = v4model.ModePassthrough
+	}
+	routeMeta := routeContext{
+		RouteSetKind:            "v4",
+		RouteID:                 resolution.Host.Host,
+		SourceHost:              resolution.Host.Host,
+		BackendService:          resolution.Host.BackendService,
+		BackendHost:             resolution.Host.BackendHost,
+		TargetPublicURL:         resolution.State.RedirectURL,
+		V4RuntimeMode:           runtimeMode,
+		V4SecurityChecksEnabled: resolution.Host.SecurityChecksEnabled,
+		V4EnrichmentMode:        resolution.Host.IPEnrichmentMode,
+		V4ProbeEnabled:          resolution.Host.Probe.Enabled,
+	}
+	action := responseAction{upstreamHost: resolution.Host.BackendHost}
+	if outcome.decision.Allowed && resolution.State.Mode == v4model.ModeDegradedRedirect && resolution.State.RedirectURL != "" {
+		action.redirectURL = resolution.State.RedirectURL
+		action.redirectCode = http.StatusFound
+	}
+	h.finish(w, r, requestID, service, outcome.clientIP, outcome.ipContext, outcome.decision, start, outcome.state, routeMeta, action)
+	return true
+}
+
 func (h *GatewayHandler) newFlowState() flowState {
 	mode := storage.ModeLocal
 	if h.controller != nil {
@@ -864,6 +966,68 @@ func (h *GatewayHandler) evaluateBypassChain(r *http.Request, service config.Ser
 		clientIP: clientIP,
 		decision: policy.Decision{Allowed: true, Result: "allow", Reason: "allow_bypass_route"},
 		state:    state,
+	}
+}
+
+func (h *GatewayHandler) evaluateV4Chain(r *http.Request, service config.ServiceConfig, resolution v4runtime.Resolution) evaluationResult {
+	if resolution.Host.SecurityChecksEnabled {
+		return h.evaluateFullChain(r, service)
+	}
+
+	state := h.newFlowState()
+	clientIP := ""
+	if extracted, err := h.realIPExtractor.Extract(r); err == nil {
+		clientIP = extracted
+	} else if h.logger != nil {
+		h.logger.Warn("v4_real_ip_extract_failed",
+			"event", "v4_real_ip_extract_failed",
+			"route_set_kind", "v4",
+			"host", r.Host,
+			"path", r.URL.Path,
+			"error", err,
+		)
+	}
+
+	ipContext := ipctx.Context{}
+	reason := "allow_v4_passthrough"
+	if resolution.State.Mode == v4model.ModeDegradedRedirect && resolution.State.RedirectURL != "" {
+		reason = "allow_v4_redirect"
+	}
+	if clientIP == "" {
+		if resolution.State.Mode == v4model.ModeDegradedRedirect && resolution.State.RedirectURL != "" {
+			reason = "allow_v4_redirect_no_real_ip"
+		} else {
+			reason = "allow_v4_passthrough_no_real_ip"
+		}
+		return evaluationResult{
+			service:  service,
+			clientIP: "",
+			decision: policy.Decision{Allowed: true, Result: "allow", Reason: reason},
+			state:    state,
+		}
+	}
+
+	if h.lookupService != nil && h.cfg.IPInfo.Enabled {
+		mode := strings.TrimSpace(strings.ToLower(resolution.Host.IPEnrichmentMode))
+		switch mode {
+		case "", "disabled", "cache_only":
+			cached := h.lookupService.LookupCached(r.Context(), clientIP)
+			state.cacheSource = cached.CacheSource
+			state.ipinfoLookupAction = cached.Action
+			if cached.Found && cached.Err == nil {
+				ipContext = cached.Context
+			}
+		case "full":
+			ipContext, state.cacheSource, state.ipinfoLookupAction, _ = h.lookupService.Lookup(r.Context(), clientIP)
+		}
+	}
+
+	return evaluationResult{
+		service:   service,
+		clientIP:  clientIP,
+		ipContext: ipContext,
+		decision:  policy.Decision{Allowed: true, Result: "allow", Reason: reason},
+		state:     state,
 	}
 }
 
@@ -1092,6 +1256,8 @@ func (h *GatewayHandler) trackReport(req *http.Request, record model.AuditRecord
 		RouteID:              record.RouteID,
 		SourceHost:           record.SourceHost,
 		TargetHost:           record.TargetHost,
+		BackendService:       record.BackendService,
+		BackendHost:          record.BackendHost,
 		Host:                 record.Host,
 		Path:                 record.Path,
 		RequestURL:           record.RequestURL,
@@ -1111,6 +1277,10 @@ func (h *GatewayHandler) trackReport(req *http.Request, record model.AuditRecord
 		V3SelectedTargetHost:    record.V3SelectedTargetHost,
 		V3StrategyMode:          record.V3StrategyMode,
 		V3BindingReused:         record.V3BindingReused,
+		V4RuntimeMode:           record.V4RuntimeMode,
+		V4SecurityChecksEnabled: record.V4SecurityChecksEnabled,
+		V4EnrichmentMode:        record.V4EnrichmentMode,
+		V4ProbeEnabled:          record.V4ProbeEnabled,
 		IPInfoLookupAction:      record.IPInfoLookupAction,
 		DataSourceMode:          record.DataSourceMode,
 	})
@@ -1218,6 +1388,10 @@ func (h *GatewayHandler) auditRecord(req *http.Request, requestID string, servic
 		V3SelectedTargetHost:    routeMeta.V3SelectedTargetHost,
 		V3StrategyMode:          routeMeta.V3StrategyMode,
 		V3BindingReused:         routeMeta.V3BindingReused,
+		V4RuntimeMode:           routeMeta.V4RuntimeMode,
+		V4SecurityChecksEnabled: routeMeta.V4SecurityChecksEnabled,
+		V4EnrichmentMode:        routeMeta.V4EnrichmentMode,
+		V4ProbeEnabled:          routeMeta.V4ProbeEnabled,
 		LatencyMS:              float64(latency.Milliseconds()),
 	}
 	if ipContext != nil {

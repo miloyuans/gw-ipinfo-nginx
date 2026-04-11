@@ -366,6 +366,7 @@ The gateway can now compile five route-set files in parallel:
 - `configs/passroute_v3.yaml`
 
 Main config lives in `configs/config.yaml` under `route_sets`.
+V4 fallback runtime lives under the top-level `v4` config block and is not compiled into `route_sets`.
 
 Behavior:
 
@@ -374,6 +375,7 @@ Behavior:
 - `v1`: source host/path runs the full detection flow, then issues a signed grant and redirects to `target.public_url`.
 - `v2`: source host/path runs the full detection flow, then redirects to `target.public_url` without grant lifecycle.
 - `v3`: source host/path can choose a healthy target from a pool and redirect to that target URL. It supports `random`, `round_robin`, and `weighted_round_robin`, per-target health checks, and temporary client-IP binding.
+- `v4`: only runs after `route_sets` did not match. It uses a last-good snapshot compiled from nginx conf plus explicit overrides, and then chooses `passthrough` or `degraded_redirect` from runtime state.
 
 Compiler rules:
 
@@ -391,6 +393,11 @@ Runtime rules:
 - `v1` target host validates query grant first, then cookie grant
 - `v2` target host can directly enter the full detection flow
 - `v3` source rules can run in lightweight redirect mode or full-security-filter mode before choosing a target
+- `v4` is a fallback overlay only; it does not change the semantics of `bypass / default / v1 / v2 / v3`
+- `v4` with `security_checks_enabled=false` skips request-level security checks and Geo / Privacy deny, keeps best-effort real IP extraction, logging, reporting, and direct proxying
+- `v4` IP enrichment modes are `disabled`, `cache_only`, and `full`
+- `v4` probes only run for hosts with explicit `probe.enabled=true`
+- Telegram `/routes` queries only read persisted snapshot / runtime state / events; they do not parse nginx conf live
 - when `route_sets.strict_host_control=true`, only compiled source/target hosts are accepted
 - unmatched requests are denied with `deny_route_not_found`
 

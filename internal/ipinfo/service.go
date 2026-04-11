@@ -29,6 +29,14 @@ type LookupService struct {
 	group                  syncx.Group
 }
 
+type CacheOnlyResult struct {
+	Context     ipctx.Context
+	CacheSource ipctx.CacheSource
+	Action      string
+	Found       bool
+	Err         error
+}
+
 func NewLookupService(cfg *config.Config, l1 *cache.L1, repo CacheRepository, client *Client, metricsSet *metrics.GatewayMetrics) *LookupService {
 	return &LookupService{
 		enabled:                cfg.IPInfo.Enabled,
@@ -241,6 +249,63 @@ func (s *LookupService) LookupDetails(ctx context.Context, ip string) (LookupDet
 	}
 
 	return result.value, result.source, actionForCacheSource(result.source), result.err
+}
+
+func (s *LookupService) LookupCached(ctx context.Context, ip string) CacheOnlyResult {
+	if !s.enabled || s.client == nil {
+		return CacheOnlyResult{Action: "disabled", Found: false}
+	}
+
+	now := time.Now().UTC()
+	if entry, ok := s.l1.Get(ip, now, s.enableResidentialProxy); ok {
+		s.recordLookup(ipctx.CacheSourceL1, entry.Failure == "")
+		if entry.Failure != "" {
+			return CacheOnlyResult{
+				CacheSource: ipctx.CacheSourceL1,
+				Action:      "cache_hit_l1",
+				Found:       true,
+				Err:         errors.New(entry.Failure),
+			}
+		}
+		return CacheOnlyResult{
+			Context:     entry.IPContext,
+			CacheSource: ipctx.CacheSourceL1,
+			Action:      "cache_hit_l1",
+			Found:       true,
+		}
+	}
+
+	if s.repo == nil {
+		return CacheOnlyResult{Action: "cache_miss", Found: false}
+	}
+
+	repoStart := time.Now()
+	entry, source, found, err := s.repo.Get(ctx, ip)
+	s.recordMongoLatency(time.Since(repoStart))
+	if err != nil {
+		s.recordLookup(source, false)
+		return CacheOnlyResult{CacheSource: source, Action: actionForCacheSource(source), Found: false, Err: err}
+	}
+	if !found || !entry.Fresh(now, s.enableResidentialProxy) {
+		return CacheOnlyResult{CacheSource: source, Action: "cache_miss", Found: false}
+	}
+
+	s.l1.Set(ip, entry)
+	s.recordLookup(source, entry.Failure == "")
+	if entry.Failure != "" {
+		return CacheOnlyResult{
+			CacheSource: source,
+			Action:      actionForCacheSource(source),
+			Found:       true,
+			Err:         errors.New(entry.Failure),
+		}
+	}
+	return CacheOnlyResult{
+		Context:     entry.IPContext,
+		CacheSource: source,
+		Action:      actionForCacheSource(source),
+		Found:       true,
+	}
 }
 
 type lookupResult struct {

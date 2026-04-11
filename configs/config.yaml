@@ -142,6 +142,60 @@ v3_defaults:
     healthy_threshold: 2
     unhealthy_threshold: 2
 
+v4:
+  enabled: false
+  sync:
+    # 后台定时解析 nginx conf，生成并落库 last-good snapshot。
+    # conf 解析失败时不会覆盖历史快照。
+    enabled: true
+    interval: 1m
+  ingress:
+    # 这里只做后台解析；Telegram /routes 只查数据库 / 本地快照，不现场解析 conf。
+    config_paths:
+      - "/etc/nginx/nginx.conf"
+  passthrough:
+    # v4 命中后默认透传到这个已存在的 routing.service。
+    service: "default"
+  security:
+    # 默认关闭安全检查。
+    # 为 false 时跳过请求级风控、Geo/Privacy deny，只做日志、统计、尽力提取 client IP、反代。
+    security_checks_enabled: false
+  ip_enrichment:
+    # disabled | cache_only | full
+    # 默认 disabled；关闭时优先只吃缓存，不主动打远端 IPinfo。
+    mode: "disabled"
+  probe_defaults:
+    interval: 30s
+    timeout: 3s
+    healthy_threshold: 2
+    unhealthy_threshold: 2
+    min_switch_interval: 2m
+    user_agent: "gw-ipinfo-nginx-v4-probe/1.0"
+  telegram:
+    enabled: false
+    # /routes 只查已落库的 v4 snapshot / runtime state / recent events。
+    command: "/routes"
+    send_html_file: true
+    max_hosts: 200
+    dedupe_window: 15m
+    silent_window: 1h
+  overrides: []
+  # 示例：
+  # overrides:
+  #   - host: "promo.example.com"
+  #     enabled: true
+  #     backend_service: "default"
+  #     backend_host: "promo.example.com"
+  #     security_checks_enabled: false
+  #     ip_enrichment_mode: "cache_only"
+  #     probe:
+  #       enabled: true
+  #       mode: "html_discovery"
+  #       url: "https://promo.example.com/"
+  #       link_url: "https://fallback.example.net/"
+  #       patterns:
+  #         - "^https://fallback\\.example\\.net/"
+
 alerts:
   telegram:
     enabled: false

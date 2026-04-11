@@ -8,9 +8,11 @@ import (
 	"html"
 	"io"
 	"log/slog"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"net/url"
+	"net/textproto"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +22,7 @@ import (
 	"gw-ipinfo-nginx/internal/config"
 	"gw-ipinfo-nginx/internal/ipinfo"
 	"gw-ipinfo-nginx/internal/storage"
+	v4query "gw-ipinfo-nginx/internal/v4/query"
 )
 
 type CommandBot struct {
@@ -28,6 +31,8 @@ type CommandBot struct {
 	client          *telegramBotClient
 	lookupService   *ipinfo.LookupService
 	queryCounter    *queryOrdinalTracker
+	routesQuery     *v4query.Service
+	routesCfg       config.V4TelegramConfig
 	stateStore      *commandBotStateStore
 	instanceID      string
 	allowedChatID   int64
@@ -129,6 +134,14 @@ func NewCommandBot(cfg config.TelegramCommandBotConfig, logger *slog.Logger, loo
 		allowedChatID:  chatID,
 		allowedUserIDs: allowedUserIDs,
 	}, nil
+}
+
+func (b *CommandBot) AttachV4Query(cfg config.V4TelegramConfig, service *v4query.Service) {
+	if b == nil {
+		return
+	}
+	b.routesCfg = cfg
+	b.routesQuery = service
 }
 
 func (b *CommandBot) Run(ctx context.Context) error {
@@ -283,12 +296,18 @@ func (b *CommandBot) handleMessage(ctx context.Context, message *botMessage) {
 	}
 
 	text := strings.TrimSpace(message.Text)
-	if text == "" || !matchesCommand(text, b.cfg.Command) {
+	if text == "" {
 		return
 	}
-
 	queryCtx, cancel := context.WithTimeout(ctx, b.cfg.Timeout)
 	defer cancel()
+	if b.routesQuery != nil && b.routesCfg.Enabled && matchesCommand(text, b.routesCfg.Command) {
+		b.handleRoutesQuery(queryCtx, message)
+		return
+	}
+	if !matchesCommand(text, b.cfg.Command) {
+		return
+	}
 
 	ips := parseIPsFromCommand(text)
 	if len(ips) == 0 {
@@ -326,6 +345,32 @@ func (b *CommandBot) handleMessage(ctx context.Context, message *botMessage) {
 				)
 			}
 			return
+		}
+	}
+}
+
+func (b *CommandBot) handleRoutesQuery(ctx context.Context, message *botMessage) {
+	if b.routesQuery == nil {
+		return
+	}
+	result, err := b.routesQuery.BuildRoutesSummary(ctx)
+	if err != nil {
+		_ = b.client.sendHTML(ctx, b.allowedChatID, wrapPre("路由摘要查询失败。\nRoute summary query failed.\n"+err.Error()), message.MessageID)
+		return
+	}
+	replyTo := message.MessageID
+	if strings.TrimSpace(result.SummaryHTML) != "" {
+		if err := b.client.sendHTML(ctx, b.allowedChatID, result.SummaryHTML, replyTo); err != nil {
+			if b.logger != nil {
+				b.logger.Warn("telegram_command_bot_send_error", "event", "telegram_command_bot_send_error", "chat_id", b.allowedChatID, "error", err)
+			}
+			return
+		}
+		replyTo = 0
+	}
+	if len(result.FileContent) > 0 && result.FileName != "" {
+		if err := b.client.sendDocument(ctx, b.allowedChatID, result.FileName, result.ContentType, result.FileContent, "V4 routes summary", replyTo); err != nil && b.logger != nil {
+			b.logger.Warn("telegram_command_bot_send_error", "event", "telegram_command_bot_send_error", "chat_id", b.allowedChatID, "error", err)
 		}
 	}
 }
@@ -749,6 +794,65 @@ func (c *telegramBotClient) sendHTML(ctx context.Context, chatID int64, htmlText
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("sendMessage http %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return nil
+}
+
+func (c *telegramBotClient) sendDocument(ctx context.Context, chatID int64, fileName, contentType string, data []byte, caption string, replyTo int) error {
+	requestURL := c.baseURL.ResolveReference(&url.URL{
+		Path: fmt.Sprintf("/bot%s/sendDocument", c.botToken),
+	})
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	if err := writer.WriteField("chat_id", strconv.FormatInt(chatID, 10)); err != nil {
+		return fmt.Errorf("write document chat_id: %w", err)
+	}
+	if caption != "" {
+		if err := writer.WriteField("caption", caption); err != nil {
+			return fmt.Errorf("write document caption: %w", err)
+		}
+	}
+	if c.parseMode != "" {
+		if err := writer.WriteField("parse_mode", c.parseMode); err != nil {
+			return fmt.Errorf("write document parse_mode: %w", err)
+		}
+	}
+	if replyTo != 0 {
+		if err := writer.WriteField("reply_to_message_id", strconv.Itoa(replyTo)); err != nil {
+			return fmt.Errorf("write document reply_to: %w", err)
+		}
+	}
+	headers := textproto.MIMEHeader{}
+	headers.Set("Content-Disposition", fmt.Sprintf(`form-data; name="document"; filename="%s"`, fileName))
+	if contentType == "" {
+		contentType = "text/html; charset=utf-8"
+	}
+	headers.Set("Content-Type", contentType)
+	part, err := writer.CreatePart(headers)
+	if err != nil {
+		return fmt.Errorf("create document part: %w", err)
+	}
+	if _, err := part.Write(data); err != nil {
+		return fmt.Errorf("write document data: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return fmt.Errorf("close document body: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL.String(), body)
+	if err != nil {
+		return fmt.Errorf("build sendDocument request: %w", err)
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("send sendDocument request: %w", err)
+	}
+	defer resp.Body.Close()
+	responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("sendDocument http %d: %s", resp.StatusCode, strings.TrimSpace(string(responseBody)))
 	}
 	return nil
 }

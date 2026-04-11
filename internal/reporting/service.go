@@ -39,6 +39,8 @@ type Event struct {
 	RouteID              string
 	SourceHost           string
 	TargetHost           string
+	BackendService       string
+	BackendHost          string
 	Host                 string
 	Path                 string
 	RequestURL           string
@@ -58,6 +60,10 @@ type Event struct {
 	V3SelectedTargetHost    string
 	V3StrategyMode          string
 	V3BindingReused         bool
+	V4RuntimeMode           string
+	V4SecurityChecksEnabled bool
+	V4EnrichmentMode        string
+	V4ProbeEnabled          bool
 	IPInfoLookupAction      string
 	DataSourceMode          string
 }
@@ -72,11 +78,17 @@ type Summary struct {
 	RouteID                string             `json:"route_id" bson:"route_id"`
 	SourceHost             string             `json:"source_host" bson:"source_host"`
 	TargetHost             string             `json:"target_host" bson:"target_host"`
+	BackendService         string             `json:"backend_service" bson:"backend_service"`
+	BackendHost            string             `json:"backend_host" bson:"backend_host"`
 	V3SecurityFilterEnabled bool              `json:"v3_security_filter_enabled" bson:"v3_security_filter_enabled"`
 	V3SelectedTargetID      string            `json:"v3_selected_target_id" bson:"v3_selected_target_id"`
 	V3SelectedTargetHost    string            `json:"v3_selected_target_host" bson:"v3_selected_target_host"`
 	V3StrategyMode          string            `json:"v3_strategy_mode" bson:"v3_strategy_mode"`
 	V3BindingReused         bool              `json:"v3_binding_reused" bson:"v3_binding_reused"`
+	V4RuntimeMode           string            `json:"v4_runtime_mode" bson:"v4_runtime_mode"`
+	V4SecurityChecksEnabled bool              `json:"v4_security_checks_enabled" bson:"v4_security_checks_enabled"`
+	V4EnrichmentMode        string            `json:"v4_enrichment_mode" bson:"v4_enrichment_mode"`
+	V4ProbeEnabled          bool              `json:"v4_probe_enabled" bson:"v4_probe_enabled"`
 	IPInfoLookupAction      string            `json:"ipinfo_lookup_action" bson:"ipinfo_lookup_action"`
 	DataSourceMode          string            `json:"data_source_mode" bson:"data_source_mode"`
 	Host                   string             `json:"host" bson:"host"`
@@ -342,11 +354,17 @@ func applyEvent(summary *Summary, event Event, now time.Time) {
 	summary.RouteID = event.RouteID
 	summary.SourceHost = event.SourceHost
 	summary.TargetHost = event.TargetHost
+	summary.BackendService = event.BackendService
+	summary.BackendHost = event.BackendHost
 	summary.V3SecurityFilterEnabled = event.V3SecurityFilterEnabled
 	summary.V3SelectedTargetID = event.V3SelectedTargetID
 	summary.V3SelectedTargetHost = event.V3SelectedTargetHost
 	summary.V3StrategyMode = event.V3StrategyMode
 	summary.V3BindingReused = event.V3BindingReused
+	summary.V4RuntimeMode = event.V4RuntimeMode
+	summary.V4SecurityChecksEnabled = event.V4SecurityChecksEnabled
+	summary.V4EnrichmentMode = event.V4EnrichmentMode
+	summary.V4ProbeEnabled = event.V4ProbeEnabled
 	summary.IPInfoLookupAction = event.IPInfoLookupAction
 	summary.DataSourceMode = event.DataSourceMode
 	summary.Host = event.Host
@@ -874,8 +892,14 @@ func (s *Service) renderCSV(summaries []Summary) ([]byte, error) {
 		"v3_strategy_mode",
 		"v3_selected_target_id",
 		"v3_selected_target_host",
+		"v4_runtime_mode",
+		"v4_security_checks_enabled",
+		"v4_enrichment_mode",
+		"v4_probe_enabled",
 		"source_host",
 		"target_host",
+		"backend_service",
+		"backend_host",
 		"user_agent_summary",
 		"host",
 		"path",
@@ -897,8 +921,14 @@ func (s *Service) renderCSV(summaries []Summary) ([]byte, error) {
 			summary.V3StrategyMode,
 			summary.V3SelectedTargetID,
 			summary.V3SelectedTargetHost,
+			summary.V4RuntimeMode,
+			fmt.Sprintf("%t", summary.V4SecurityChecksEnabled),
+			summary.V4EnrichmentMode,
+			fmt.Sprintf("%t", summary.V4ProbeEnabled),
 			summary.SourceHost,
 			summary.TargetHost,
+			summary.BackendService,
+			summary.BackendHost,
 			summary.UserAgentSummary,
 			summary.Host,
 			summary.Path,
@@ -1471,8 +1501,8 @@ tbody tr:hover{
 
 		routePrimary := reportFirstNonEmpty(strings.TrimSpace(summary.RouteID), strings.TrimSpace(summary.RouteSetKind), "—")
 		routeSecondary := reportJoinParts(
-			reportFirstNonEmpty(strings.TrimSpace(summary.V3SelectedTargetHost), strings.TrimSpace(summary.TargetHost), ""),
-			reportFirstNonEmpty(strings.TrimSpace(summary.V3SelectedTargetID), strings.TrimSpace(summary.V3StrategyMode), ""),
+			reportFirstNonEmpty(strings.TrimSpace(summary.V3SelectedTargetHost), strings.TrimSpace(summary.TargetHost), strings.TrimSpace(summary.BackendHost), ""),
+			reportFirstNonEmpty(strings.TrimSpace(summary.V3SelectedTargetID), strings.TrimSpace(summary.V4RuntimeMode), strings.TrimSpace(summary.V3StrategyMode), ""),
 		)
 
 		shortCircuitLabel := "none"
@@ -1648,11 +1678,17 @@ func mergeSummaries(left, right Summary) Summary {
 		merged.RouteID = right.RouteID
 		merged.SourceHost = right.SourceHost
 		merged.TargetHost = right.TargetHost
+		merged.BackendService = right.BackendService
+		merged.BackendHost = right.BackendHost
 		merged.V3SecurityFilterEnabled = right.V3SecurityFilterEnabled
 		merged.V3SelectedTargetID = right.V3SelectedTargetID
 		merged.V3SelectedTargetHost = right.V3SelectedTargetHost
 		merged.V3StrategyMode = right.V3StrategyMode
 		merged.V3BindingReused = right.V3BindingReused
+		merged.V4RuntimeMode = right.V4RuntimeMode
+		merged.V4SecurityChecksEnabled = right.V4SecurityChecksEnabled
+		merged.V4EnrichmentMode = right.V4EnrichmentMode
+		merged.V4ProbeEnabled = right.V4ProbeEnabled
 		merged.IPInfoLookupAction = right.IPInfoLookupAction
 		merged.DataSourceMode = right.DataSourceMode
 		merged.Host = right.Host

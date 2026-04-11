@@ -35,6 +35,10 @@ type AuditRecord struct {
 	V3SelectedTargetHost    string
 	V3StrategyMode          string
 	V3BindingReused         bool
+	V4RuntimeMode           string
+	V4SecurityChecksEnabled bool
+	V4EnrichmentMode        string
+	V4ProbeEnabled          bool
 	CountryCode            string
 	CountryName            string
 	Region                 string

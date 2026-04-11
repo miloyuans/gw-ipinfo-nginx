@@ -23,6 +23,14 @@ const (
 	BucketAlertsDirty     = "alerts_outbox_dirty"
 	BucketReportRecords   = "report_records"
 	BucketReportDirty     = "report_records_dirty"
+	BucketV4Snapshots     = "v4_route_snapshots"
+	BucketV4SnapshotsDirty = "v4_route_snapshots_dirty"
+	BucketV4SnapshotHosts = "v4_route_snapshot_hosts"
+	BucketV4SnapshotHostsDirty = "v4_route_snapshot_hosts_dirty"
+	BucketV4RuntimeStates = "v4_host_runtime_states"
+	BucketV4RuntimeStatesDirty = "v4_host_runtime_states_dirty"
+	BucketV4Events        = "v4_events"
+	BucketV4EventsDirty   = "v4_events_dirty"
 	BucketMetadata        = "metadata"
 )
 
@@ -76,6 +84,14 @@ func (s *Store) init() error {
 			BucketAlertsDirty,
 			BucketReportRecords,
 			BucketReportDirty,
+			BucketV4Snapshots,
+			BucketV4SnapshotsDirty,
+			BucketV4SnapshotHosts,
+			BucketV4SnapshotHostsDirty,
+			BucketV4RuntimeStates,
+			BucketV4RuntimeStatesDirty,
+			BucketV4Events,
+			BucketV4EventsDirty,
 			BucketMetadata,
 		}
 		for _, name := range buckets {

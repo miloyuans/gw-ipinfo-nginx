@@ -26,6 +26,7 @@ type Config struct {
 	Routing  RoutingConfig  `yaml:"routing"`
 	RouteSets RouteSetsConfig `yaml:"route_sets"`
 	V3Defaults V3DefaultsConfig `yaml:"v3_defaults"`
+	V4       V4Config         `yaml:"v4"`
 	Alerts   AlertsConfig   `yaml:"alerts"`
 	Reports  ReportsConfig  `yaml:"reports"`
 	Storage  StorageConfig  `yaml:"storage"`
@@ -357,6 +358,80 @@ type V3HealthDefaultsConfig struct {
 	Timeout            time.Duration `yaml:"timeout"`
 	HealthyThreshold   int           `yaml:"healthy_threshold"`
 	UnhealthyThreshold int           `yaml:"unhealthy_threshold"`
+}
+
+type V4Config struct {
+	Enabled        bool                   `yaml:"enabled"`
+	Sync           V4SyncConfig           `yaml:"sync"`
+	Ingress        V4IngressConfig        `yaml:"ingress"`
+	Passthrough    V4PassthroughConfig    `yaml:"passthrough"`
+	Security       V4SecurityConfig       `yaml:"security"`
+	IPEnrichment   V4IPEnrichmentConfig   `yaml:"ip_enrichment"`
+	ProbeDefaults  V4ProbeDefaultsConfig  `yaml:"probe_defaults"`
+	Telegram       V4TelegramConfig       `yaml:"telegram"`
+	Overrides      []V4OverrideConfig     `yaml:"overrides"`
+}
+
+type V4SyncConfig struct {
+	Enabled  bool          `yaml:"enabled"`
+	Interval time.Duration `yaml:"interval"`
+}
+
+type V4IngressConfig struct {
+	ConfigPaths []string `yaml:"config_paths"`
+}
+
+type V4PassthroughConfig struct {
+	Service string `yaml:"service"`
+}
+
+type V4SecurityConfig struct {
+	SecurityChecksEnabled bool `yaml:"security_checks_enabled"`
+}
+
+type V4IPEnrichmentConfig struct {
+	Mode string `yaml:"mode"`
+}
+
+type V4ProbeDefaultsConfig struct {
+	Interval           time.Duration `yaml:"interval"`
+	Timeout            time.Duration `yaml:"timeout"`
+	HealthyThreshold   int           `yaml:"healthy_threshold"`
+	UnhealthyThreshold int           `yaml:"unhealthy_threshold"`
+	MinSwitchInterval  time.Duration `yaml:"min_switch_interval"`
+	UserAgent          string        `yaml:"user_agent"`
+}
+
+type V4TelegramConfig struct {
+	Enabled       bool          `yaml:"enabled"`
+	Command       string        `yaml:"command"`
+	SendHTMLFile  bool          `yaml:"send_html_file"`
+	MaxHosts      int           `yaml:"max_hosts"`
+	DedupeWindow  time.Duration `yaml:"dedupe_window"`
+	SilentWindow  time.Duration `yaml:"silent_window"`
+}
+
+type V4OverrideConfig struct {
+	Host                  string               `yaml:"host"`
+	Enabled               bool                 `yaml:"enabled"`
+	BackendService        string               `yaml:"backend_service"`
+	BackendHost           string               `yaml:"backend_host"`
+	SecurityChecksEnabled *bool                `yaml:"security_checks_enabled"`
+	IPEnrichmentMode      string               `yaml:"ip_enrichment_mode"`
+	Probe                 V4ProbeConfig        `yaml:"probe"`
+}
+
+type V4ProbeConfig struct {
+	Enabled            bool          `yaml:"enabled"`
+	Mode               string        `yaml:"mode"`
+	URL                string        `yaml:"url"`
+	LinkURL            string        `yaml:"link_url"`
+	Patterns           []string      `yaml:"patterns"`
+	Interval           time.Duration `yaml:"interval"`
+	Timeout            time.Duration `yaml:"timeout"`
+	HealthyThreshold   int           `yaml:"healthy_threshold"`
+	UnhealthyThreshold int           `yaml:"unhealthy_threshold"`
+	MinSwitchInterval  time.Duration `yaml:"min_switch_interval"`
 }
 
 func Load(path string) (*Config, error) {
@@ -717,6 +792,45 @@ func (c *Config) applyDefaults() {
 	if c.V3Defaults.HealthCheck.UnhealthyThreshold == 0 {
 		c.V3Defaults.HealthCheck.UnhealthyThreshold = 2
 	}
+	if c.V4.Sync.Interval == 0 {
+		c.V4.Sync.Interval = time.Minute
+	}
+	if c.V4.Passthrough.Service == "" {
+		c.V4.Passthrough.Service = c.Routing.DefaultService
+	}
+	if c.V4.IPEnrichment.Mode == "" {
+		c.V4.IPEnrichment.Mode = "disabled"
+	}
+	if c.V4.ProbeDefaults.Interval == 0 {
+		c.V4.ProbeDefaults.Interval = 30 * time.Second
+	}
+	if c.V4.ProbeDefaults.Timeout == 0 {
+		c.V4.ProbeDefaults.Timeout = 3 * time.Second
+	}
+	if c.V4.ProbeDefaults.HealthyThreshold == 0 {
+		c.V4.ProbeDefaults.HealthyThreshold = 2
+	}
+	if c.V4.ProbeDefaults.UnhealthyThreshold == 0 {
+		c.V4.ProbeDefaults.UnhealthyThreshold = 2
+	}
+	if c.V4.ProbeDefaults.MinSwitchInterval == 0 {
+		c.V4.ProbeDefaults.MinSwitchInterval = 2 * time.Minute
+	}
+	if c.V4.ProbeDefaults.UserAgent == "" {
+		c.V4.ProbeDefaults.UserAgent = "gw-ipinfo-nginx-v4-probe/1.0"
+	}
+	if c.V4.Telegram.Command == "" {
+		c.V4.Telegram.Command = "/routes"
+	}
+	if c.V4.Telegram.MaxHosts == 0 {
+		c.V4.Telegram.MaxHosts = 200
+	}
+	if c.V4.Telegram.DedupeWindow == 0 {
+		c.V4.Telegram.DedupeWindow = 15 * time.Minute
+	}
+	if c.V4.Telegram.SilentWindow == 0 {
+		c.V4.Telegram.SilentWindow = time.Hour
+	}
 	if c.Storage.ReplayInterval == 0 {
 		c.Storage.ReplayInterval = 30 * time.Second
 	}
@@ -1043,6 +1157,57 @@ func (c *Config) Validate() error {
 	}
 	if c.V3Defaults.HealthCheck.UnhealthyThreshold <= 0 {
 		errs = append(errs, errors.New("v3_defaults.health_check.unhealthy_threshold must be > 0"))
+	}
+	if c.V4.Enabled {
+		if c.V4.Sync.Interval <= 0 {
+			errs = append(errs, errors.New("v4.sync.interval must be > 0"))
+		}
+		if len(c.V4.Ingress.ConfigPaths) == 0 {
+			errs = append(errs, errors.New("v4.ingress.config_paths must contain at least one file when v4.enabled is true"))
+		}
+		if strings.TrimSpace(c.V4.Passthrough.Service) == "" {
+			errs = append(errs, errors.New("v4.passthrough.service is required when v4.enabled is true"))
+		} else if _, ok := seenServices[c.V4.Passthrough.Service]; !ok {
+			errs = append(errs, fmt.Errorf("v4.passthrough.service %q is not present in routing.services", c.V4.Passthrough.Service))
+		}
+		if !slices.Contains([]string{"disabled", "cache_only", "full"}, c.V4.IPEnrichment.Mode) {
+			errs = append(errs, errors.New("v4.ip_enrichment.mode must be disabled, cache_only, or full"))
+		}
+		if c.V4.ProbeDefaults.Interval <= 0 {
+			errs = append(errs, errors.New("v4.probe_defaults.interval must be > 0"))
+		}
+		if c.V4.ProbeDefaults.Timeout <= 0 {
+			errs = append(errs, errors.New("v4.probe_defaults.timeout must be > 0"))
+		}
+		if c.V4.ProbeDefaults.HealthyThreshold <= 0 {
+			errs = append(errs, errors.New("v4.probe_defaults.healthy_threshold must be > 0"))
+		}
+		if c.V4.ProbeDefaults.UnhealthyThreshold <= 0 {
+			errs = append(errs, errors.New("v4.probe_defaults.unhealthy_threshold must be > 0"))
+		}
+		if c.V4.ProbeDefaults.MinSwitchInterval < 0 {
+			errs = append(errs, errors.New("v4.probe_defaults.min_switch_interval must be >= 0"))
+		}
+		if c.V4.Telegram.Enabled && !strings.HasPrefix(strings.TrimSpace(c.V4.Telegram.Command), "/") {
+			errs = append(errs, errors.New("v4.telegram.command must start with '/'"))
+		}
+		for _, override := range c.V4.Overrides {
+			if strings.TrimSpace(override.Host) == "" {
+				errs = append(errs, errors.New("v4.overrides[].host is required"))
+				continue
+			}
+			if strings.TrimSpace(override.BackendService) != "" {
+				if _, ok := seenServices[strings.TrimSpace(override.BackendService)]; !ok {
+					errs = append(errs, fmt.Errorf("v4 override backend_service %q is not present in routing.services", override.BackendService))
+				}
+			}
+			if override.IPEnrichmentMode != "" && !slices.Contains([]string{"disabled", "cache_only", "full"}, override.IPEnrichmentMode) {
+				errs = append(errs, fmt.Errorf("v4 override ip_enrichment_mode for host %q must be disabled, cache_only, or full", override.Host))
+			}
+			if override.Probe.Mode != "" && !slices.Contains([]string{"local_js", "html_discovery"}, override.Probe.Mode) {
+				errs = append(errs, fmt.Errorf("v4 override probe.mode for host %q must be local_js or html_discovery", override.Host))
+			}
+		}
 	}
 	if c.Perf.RequestQueueSize <= 0 {
 		errs = append(errs, errors.New("performance.request_queue_size must be > 0"))
