@@ -185,7 +185,9 @@ v4:
     # /routes 只查已落库的 v4 snapshot / runtime state / recent events。
     command: "/routes"
     send_html_file: true
-    max_hosts: 200
+    # /routes 正文摘要里最多展示多少个 top hosts。
+    # 默认只展示 3 个，避免正文过长；HTML 附件仍会保留全量明细。
+    max_hosts: 3
     dedupe_window: 15m
     silent_window: 1h
   # 兼容期保留：老版本 v4.overrides 会继续读取，但已废弃。

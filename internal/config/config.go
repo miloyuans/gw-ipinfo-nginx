@@ -839,7 +839,7 @@ func (c *Config) applyDefaults() {
 		c.V4.Telegram.Command = "/routes"
 	}
 	if c.V4.Telegram.MaxHosts == 0 {
-		c.V4.Telegram.MaxHosts = 200
+		c.V4.Telegram.MaxHosts = 3
 	}
 	if c.V4.Telegram.DedupeWindow == 0 {
 		c.V4.Telegram.DedupeWindow = 15 * time.Minute

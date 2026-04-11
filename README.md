@@ -445,7 +445,11 @@ Behavior:
 - `v4` Telegram `/routes`
   - Only reads persisted snapshot / sync state / runtime state / recent events.
   - It does not parse nginx conf live.
-  - The message body is intentionally short. Full route details are sent as an HTML attachment.
+  - The message body is intentionally short and defaults to Top 3 hosts.
+  - `v4.telegram.max_hosts` controls the summary host count.
+  - Full route details are sent as an HTML attachment.
+  - The HTML attachment includes a bilingual field guide for each route column.
+  - When a last-good snapshot is still available but the latest sync failed, `/routes` reports `degraded` instead of treating the whole runtime as unavailable.
 
 Compiler rules:
 

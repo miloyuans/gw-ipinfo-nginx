@@ -3,6 +3,7 @@ package nginxconf
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -75,7 +76,7 @@ func (p *Parser) expandInput(value string) ([]string, error) {
 
 	info, err := os.Stat(value)
 	if err != nil {
-		return nil, fmt.Errorf("stat nginx path %s: %w", value, err)
+		return nil, err
 	}
 	if !info.IsDir() {
 		return []string{value}, nil
@@ -100,6 +101,42 @@ func (p *Parser) expandInput(value string) ([]string, error) {
 	}
 	sort.Strings(files)
 	return files, nil
+}
+
+func (p *Parser) expandIncludeInput(baseDir, includePath string) ([]string, error) {
+	includePath = strings.TrimSpace(includePath)
+	if includePath == "" {
+		return nil, nil
+	}
+
+	candidates := make([]string, 0, 2)
+	if filepath.IsAbs(includePath) {
+		candidates = append(candidates, includePath)
+	} else {
+		candidates = append(candidates, filepath.Join(baseDir, includePath))
+		candidates = append(candidates, includePath)
+	}
+
+	visited := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		candidate = filepath.Clean(candidate)
+		if _, ok := visited[candidate]; ok {
+			continue
+		}
+		visited[candidate] = struct{}{}
+
+		matches, err := p.expandInput(candidate)
+		if err == nil {
+			return matches, nil
+		}
+		if errors.Is(err, os.ErrNotExist) || strings.Contains(strings.ToLower(err.Error()), "no such file or directory") {
+			continue
+		}
+		return nil, err
+	}
+
+	// v4 snapshot 只依赖 server_name。缺失 include 不应让同步失败。
+	return nil, nil
 }
 
 func (p *Parser) parseFile(ctx context.Context, path string, seen map[string]struct{}, visiting map[string]struct{}) error {
@@ -129,7 +166,7 @@ func (p *Parser) parseFile(ctx context.Context, path string, seen map[string]str
 			continue
 		}
 		if includePath, ok := parseInclude(line); ok {
-			includeMatches, err := p.expandInput(filepath.Join(dir, includePath))
+			includeMatches, err := p.expandIncludeInput(dir, includePath)
 			if err != nil {
 				return fmt.Errorf("expand include %s in %s: %w", includePath, path, err)
 			}

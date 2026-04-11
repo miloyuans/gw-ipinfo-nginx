@@ -225,7 +225,9 @@ v4:
     # 只查已落库的快照 / runtime state / recent events。
     command: "/routes"
     send_html_file: true
-    max_hosts: 200
+    # /routes 正文摘要里最多展示多少个 top hosts。
+    # 默认 3 个，避免正文过长；HTML 附件仍保留全量明细。
+    max_hosts: 3
     # 同一 fingerprint 在这个窗口内做去重，避免重复通知。
     dedupe_window: 15m
     # 静默窗口；在静默期内同 fingerprint 事件不重复发通知。
