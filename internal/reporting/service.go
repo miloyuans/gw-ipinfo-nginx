@@ -152,6 +152,7 @@ type Service struct {
 	queue          chan Event
 	workerID       string
 	collectionName string
+	leaseStore     *reportLeaseStore
 	indexOnce      sync.Once
 	scheduleMu     sync.Mutex
 	lastSkipLogKey string
@@ -173,6 +174,7 @@ func NewService(cfg *config.Config, controller *storage.Controller, logger *slog
 		queue:          make(chan Event, cfg.Perf.StatsQueueSize),
 		workerID:       workerID,
 		collectionName: cfg.Cache.MongoCollections.ReportEvents,
+		leaseStore:     newReportLeaseStore(controller, filepath.Join(filepath.Dir(filepath.Clean(cfg.Storage.LocalPath)), "report-scheduler-lease.json"), cfg.Cache.MongoCollections.ReportEvents, cfg.Reports.LeaderLeaseName),
 	}
 	if controller != nil {
 		controller.RegisterReplayer(service)
@@ -218,6 +220,9 @@ func (s *Service) Run(ctx context.Context, workers int) {
 				"resolved_timezone", s.locationName,
 				"period_mode", s.cfg.Reports.PeriodMode,
 				"retry_interval", s.cfg.Reports.RetryInterval,
+				"leader_lease_name", s.cfg.Reports.LeaderLeaseName,
+				"leader_lease_ttl", s.cfg.Reports.LeaderLeaseTTL,
+				"leader_renew_interval", s.cfg.Reports.LeaderRenewInterval,
 				"max_backfill_days", s.cfg.Reports.MaxBackfillDays,
 				"telegram_enabled", s.cfg.Reports.Output.TelegramEnabled,
 				"file_enabled", s.cfg.Reports.Output.FileEnabled,
@@ -421,19 +426,82 @@ func (s *Service) upsertMongo(ctx context.Context, client *mongostore.Client, su
 }
 
 func (s *Service) runScheduler(ctx context.Context) {
-	ticker := time.NewTicker(s.cfg.Reports.PollInterval)
-	defer ticker.Stop()
+	if s.leaseStore == nil {
+		return
+	}
+
+	workTicker := time.NewTicker(s.cfg.Reports.PollInterval)
+	renewTicker := time.NewTicker(s.cfg.Reports.LeaderRenewInterval)
+	defer workTicker.Stop()
+	defer renewTicker.Stop()
+
+	isLeader := false
+	if s.acquireSchedulerLeader(ctx) {
+		isLeader = true
+		if err := s.trySendDailyReport(ctx, time.Now().UTC()); err != nil && s.logger != nil {
+			s.logger.Warn("daily_report_error", "event", "daily_report_error", "error", err)
+		}
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
+			if isLeader {
+				_ = s.leaseStore.Release(context.Background(), s.workerID)
+			}
 			return
-		case <-ticker.C:
+		case <-renewTicker.C:
+			if isLeader {
+				ok, err := s.leaseStore.Refresh(ctx, s.workerID, time.Now().UTC(), s.cfg.Reports.LeaderLeaseTTL)
+				if err != nil || !ok {
+					isLeader = false
+					if s.logger != nil {
+						s.logger.Warn("daily_report_leader_lost",
+							"event", "daily_report_leader_lost",
+							"worker_id", s.workerID,
+							"error", err,
+						)
+					}
+				}
+				continue
+			}
+			isLeader = s.acquireSchedulerLeader(ctx)
+		case <-workTicker.C:
+			if !isLeader {
+				continue
+			}
 			if err := s.trySendDailyReport(ctx, time.Now().UTC()); err != nil && s.logger != nil {
 				s.logger.Warn("daily_report_error", "event", "daily_report_error", "error", err)
 			}
 		}
 	}
+}
+
+func (s *Service) acquireSchedulerLeader(ctx context.Context) bool {
+	lease, acquired, err := s.leaseStore.TryAcquire(ctx, s.workerID, time.Now().UTC(), s.cfg.Reports.LeaderLeaseTTL)
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Warn("daily_report_leader_acquire_error",
+				"event", "daily_report_leader_acquire_error",
+				"lease_name", s.cfg.Reports.LeaderLeaseName,
+				"worker_id", s.workerID,
+				"error", err,
+			)
+		}
+		return false
+	}
+	if !acquired {
+		return false
+	}
+	if s.logger != nil {
+		s.logger.Info("daily_report_leader_acquired",
+			"event", "daily_report_leader_acquired",
+			"lease_name", s.cfg.Reports.LeaderLeaseName,
+			"worker_id", s.workerID,
+			"owner_id", lease.OwnerID,
+		)
+	}
+	return true
 }
 
 func (s *Service) trySendDailyReport(ctx context.Context, now time.Time) error {

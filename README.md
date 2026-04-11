@@ -353,7 +353,7 @@ Linux deployments can optionally enable `server.prefork.enabled=true` and set `s
 
 - Mongo healthy: normal concurrent Mongo read/write path stays unchanged.
 - Mongo degraded: each worker writes only its own local shard and reads peer shards from the shared directory.
-- Daily reports run only in the primary prefork worker to avoid duplicate report sends.
+- Daily reports run only in the primary prefork worker, and also use a shared leader lease across pods, so each report is sent once globally.
 
 ## Route Sets
 
@@ -480,6 +480,7 @@ Runtime rules:
 Daily reports now keep a persistent delivery ledger per day.
 
 - sink delivery state is tracked independently for Telegram HTML, Telegram CSV, file HTML, and file CSV
+- scheduler leadership is coordinated by `reports.leader_lease_name`, `reports.leader_lease_ttl`, and `reports.leader_renew_interval`
 - scheduler retries failed or partially delivered days using `reports.retry_interval`
 - scheduler backfills previous days inside `reports.max_backfill_days`
 - repeated `daily_report_skipped_before_time` log spam is suppressed

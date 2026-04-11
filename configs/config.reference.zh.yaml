@@ -329,6 +329,13 @@ reports:
   daily_send_time: "09:00"
   period_mode: "lookback"
   lookback: 24h
+  # 多 Pod / 多进程场景下的日报调度共享租约名。
+  # 所有副本保持一致后，全局只会有一个 leader 负责真正发送日报，其他副本只等待和续租判断。
+  leader_lease_name: "daily-report-scheduler"
+  # leader 租约 TTL。
+  leader_lease_ttl: 45s
+  # leader 续租间隔，必须小于 leader_lease_ttl。
+  leader_renew_interval: 15s
   # 日报发送失败后，每隔多久重试一次
   retry_interval: 15m
   # 最多向前补发多少天的日报

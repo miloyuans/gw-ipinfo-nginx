@@ -210,6 +210,9 @@ type ReportsConfig struct {
 	Lookback        time.Duration         `yaml:"lookback"`
 	RetryInterval   time.Duration         `yaml:"retry_interval"`
 	MaxBackfillDays int                   `yaml:"max_backfill_days"`
+	LeaderLeaseName string                `yaml:"leader_lease_name"`
+	LeaderLeaseTTL  time.Duration         `yaml:"leader_lease_ttl"`
+	LeaderRenewInterval time.Duration     `yaml:"leader_renew_interval"`
 	TopN            int                   `yaml:"top_n"`
 	IncludeCSV      bool                  `yaml:"include_csv"`
 	IncludeHTML     bool                  `yaml:"include_html"`
@@ -758,6 +761,15 @@ func (c *Config) applyDefaults() {
 	if c.Reports.MaxBackfillDays == 0 {
 		c.Reports.MaxBackfillDays = 7
 	}
+	if c.Reports.LeaderLeaseName == "" {
+		c.Reports.LeaderLeaseName = "daily-report-scheduler"
+	}
+	if c.Reports.LeaderLeaseTTL == 0 {
+		c.Reports.LeaderLeaseTTL = 45 * time.Second
+	}
+	if c.Reports.LeaderRenewInterval == 0 {
+		c.Reports.LeaderRenewInterval = 15 * time.Second
+	}
 	if c.Reports.TopN == 0 {
 		c.Reports.TopN = 10
 	}
@@ -1132,6 +1144,18 @@ func (c *Config) Validate() error {
 	}
 	if c.Reports.MaxBackfillDays <= 0 {
 		errs = append(errs, errors.New("reports.max_backfill_days must be > 0"))
+	}
+	if strings.TrimSpace(c.Reports.LeaderLeaseName) == "" {
+		errs = append(errs, errors.New("reports.leader_lease_name is required"))
+	}
+	if c.Reports.LeaderLeaseTTL <= 0 {
+		errs = append(errs, errors.New("reports.leader_lease_ttl must be > 0"))
+	}
+	if c.Reports.LeaderRenewInterval <= 0 {
+		errs = append(errs, errors.New("reports.leader_renew_interval must be > 0"))
+	}
+	if c.Reports.LeaderRenewInterval >= c.Reports.LeaderLeaseTTL {
+		errs = append(errs, errors.New("reports.leader_renew_interval must be less than leader_lease_ttl"))
 	}
 	if c.Reports.Enabled && c.Reports.Output.TelegramEnabled && !c.Alerts.Telegram.Enabled {
 		errs = append(errs, errors.New("reports.output.telegram_enabled requires alerts.telegram.enabled to be true"))
