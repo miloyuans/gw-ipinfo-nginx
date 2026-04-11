@@ -213,12 +213,19 @@ v4:
     # full：允许走完整 IP enrichment 链路。
     mode: "disabled"
   probe_defaults:
-    interval: 30s
+    # v4 探测默认间隔，默认每 3 秒执行一次。
+    interval: 3s
     timeout: 3s
     healthy_threshold: 2
-    unhealthy_threshold: 2
+    # 连续 3 次异常后才切换到降级路由。
+    unhealthy_threshold: 3
     min_switch_interval: 2m
     user_agent: "gw-ipinfo-nginx-v4-probe/1.0"
+    # 命中这些 HTTP 状态码时视为探测异常，默认把 404 判定为异常。
+    unhealthy_status_codes:
+      - 404
+    # v4 探测临时工作区，会记录每个 host 最近发现到的跳转 URL 和失败详情。
+    workspace_dir: "/data/shared/v4-probe-workspace"
   telegram:
     enabled: false
     # 新增 Telegram 查询命令，默认 /routes。

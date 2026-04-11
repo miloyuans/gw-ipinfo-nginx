@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -407,6 +408,8 @@ type V4ProbeDefaultsConfig struct {
 	UnhealthyThreshold int           `yaml:"unhealthy_threshold"`
 	MinSwitchInterval  time.Duration `yaml:"min_switch_interval"`
 	UserAgent          string        `yaml:"user_agent"`
+	UnhealthyStatusCodes []int       `yaml:"unhealthy_status_codes"`
+	WorkspaceDir       string        `yaml:"workspace_dir"`
 }
 
 type V4TelegramConfig struct {
@@ -432,8 +435,12 @@ type V4ProbeConfig struct {
 	Enabled            bool          `yaml:"enabled"`
 	Mode               string        `yaml:"mode"`
 	URL                string        `yaml:"url"`
+	HTMLPaths          []string      `yaml:"html_paths"`
+	JSPaths            []string      `yaml:"js_paths"`
 	LinkURL            string        `yaml:"link_url"`
+	RedirectURLs       []string      `yaml:"redirect_urls"`
 	Patterns           []string      `yaml:"patterns"`
+	UnhealthyStatusCodes []int       `yaml:"unhealthy_status_codes"`
 	Interval           time.Duration `yaml:"interval"`
 	Timeout            time.Duration `yaml:"timeout"`
 	HealthyThreshold   int           `yaml:"healthy_threshold"`
@@ -830,7 +837,7 @@ func (c *Config) applyDefaults() {
 		c.V4.IPEnrichment.Mode = "disabled"
 	}
 	if c.V4.ProbeDefaults.Interval == 0 {
-		c.V4.ProbeDefaults.Interval = 30 * time.Second
+		c.V4.ProbeDefaults.Interval = 3 * time.Second
 	}
 	if c.V4.ProbeDefaults.Timeout == 0 {
 		c.V4.ProbeDefaults.Timeout = 3 * time.Second
@@ -839,13 +846,19 @@ func (c *Config) applyDefaults() {
 		c.V4.ProbeDefaults.HealthyThreshold = 2
 	}
 	if c.V4.ProbeDefaults.UnhealthyThreshold == 0 {
-		c.V4.ProbeDefaults.UnhealthyThreshold = 2
+		c.V4.ProbeDefaults.UnhealthyThreshold = 3
 	}
 	if c.V4.ProbeDefaults.MinSwitchInterval == 0 {
 		c.V4.ProbeDefaults.MinSwitchInterval = 2 * time.Minute
 	}
 	if c.V4.ProbeDefaults.UserAgent == "" {
 		c.V4.ProbeDefaults.UserAgent = "gw-ipinfo-nginx-v4-probe/1.0"
+	}
+	if len(c.V4.ProbeDefaults.UnhealthyStatusCodes) == 0 {
+		c.V4.ProbeDefaults.UnhealthyStatusCodes = []int{http.StatusNotFound}
+	}
+	if c.V4.ProbeDefaults.WorkspaceDir == "" && c.Storage.LocalPath != "" {
+		c.V4.ProbeDefaults.WorkspaceDir = filepath.Join(filepath.Dir(filepath.Clean(c.Storage.LocalPath)), "v4-probe-workspace")
 	}
 	if c.V4.Telegram.Command == "" {
 		c.V4.Telegram.Command = "/routes"
@@ -1243,6 +1256,11 @@ func (c *Config) Validate() error {
 		if c.V4.ProbeDefaults.MinSwitchInterval < 0 {
 			errs = append(errs, errors.New("v4.probe_defaults.min_switch_interval must be >= 0"))
 		}
+		for _, statusCode := range c.V4.ProbeDefaults.UnhealthyStatusCodes {
+			if statusCode < 100 || statusCode > 599 {
+				errs = append(errs, fmt.Errorf("v4.probe_defaults.unhealthy_status_codes contains invalid status code %d", statusCode))
+			}
+		}
 		if c.V4.Telegram.Enabled && !strings.HasPrefix(strings.TrimSpace(c.V4.Telegram.Command), "/") {
 			errs = append(errs, errors.New("v4.telegram.command must start with '/'"))
 		}
@@ -1261,6 +1279,19 @@ func (c *Config) Validate() error {
 			}
 			if override.Probe.Mode != "" && !slices.Contains([]string{"local_js", "html_discovery"}, override.Probe.Mode) {
 				errs = append(errs, fmt.Errorf("v4 override probe.mode for host %q must be local_js or html_discovery", override.Host))
+			}
+			for _, path := range append(append([]string(nil), override.Probe.HTMLPaths...), override.Probe.JSPaths...) {
+				if strings.TrimSpace(path) == "" {
+					continue
+				}
+				if !filepath.IsAbs(strings.TrimSpace(path)) {
+					errs = append(errs, fmt.Errorf("v4 override probe local path for host %q must be absolute: %s", override.Host, path))
+				}
+			}
+			for _, statusCode := range override.Probe.UnhealthyStatusCodes {
+				if statusCode < 100 || statusCode > 599 {
+					errs = append(errs, fmt.Errorf("v4 override unhealthy status code for host %q is invalid: %d", override.Host, statusCode))
+				}
 			}
 		}
 	}

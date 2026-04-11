@@ -68,8 +68,12 @@ type ProbeSpec struct {
 	Enabled            bool          `json:"enabled" bson:"enabled"`
 	Mode               string        `json:"mode" bson:"mode"`
 	URL                string        `json:"url" bson:"url"`
+	HTMLPaths          []string      `json:"html_paths" bson:"html_paths"`
+	JSPaths            []string      `json:"js_paths" bson:"js_paths"`
 	LinkURL            string        `json:"link_url" bson:"link_url"`
+	RedirectURLs       []string      `json:"redirect_urls" bson:"redirect_urls"`
 	Patterns           []string      `json:"patterns" bson:"patterns"`
+	UnhealthyStatusCodes []int       `json:"unhealthy_status_codes" bson:"unhealthy_status_codes"`
 	Interval           time.Duration `json:"interval" bson:"interval"`
 	Timeout            time.Duration `json:"timeout" bson:"timeout"`
 	HealthyThreshold   int           `json:"healthy_threshold" bson:"healthy_threshold"`
@@ -82,6 +86,9 @@ type HostRuntimeState struct {
 	Host              string    `json:"host" bson:"host"`
 	Mode              string    `json:"mode" bson:"mode"`
 	RedirectURL       string    `json:"redirect_url" bson:"redirect_url"`
+	LastProbeTargets  []string  `json:"last_probe_targets" bson:"last_probe_targets"`
+	LastFailedTargets []string  `json:"last_failed_targets" bson:"last_failed_targets"`
+	WorkspaceFile     string    `json:"workspace_file" bson:"workspace_file"`
 	LastProbeAt       time.Time `json:"last_probe_at" bson:"last_probe_at"`
 	LastProbeError    string    `json:"last_probe_error" bson:"last_probe_error"`
 	LastHealthyAt     time.Time `json:"last_healthy_at" bson:"last_healthy_at"`

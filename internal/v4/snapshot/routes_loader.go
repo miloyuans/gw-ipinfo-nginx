@@ -77,7 +77,22 @@ func normalizeRouteEntry(path string, idx int, raw routeEntry) (config.V4Overrid
 		BackendHost:           strings.TrimSpace(raw.Backend.Host),
 		SecurityChecksEnabled: raw.SecurityChecksEnabled,
 		IPEnrichmentMode:      strings.TrimSpace(strings.ToLower(raw.IPEnrichmentMode)),
-		Probe:                 raw.Probe,
+		Probe: config.V4ProbeConfig{
+			Enabled:              raw.Probe.Enabled,
+			Mode:                 strings.TrimSpace(strings.ToLower(raw.Probe.Mode)),
+			URL:                  strings.TrimSpace(raw.Probe.URL),
+			HTMLPaths:            normalizeLocalPaths(raw.Probe.HTMLPaths),
+			JSPaths:              normalizeLocalPaths(raw.Probe.JSPaths),
+			LinkURL:              strings.TrimSpace(raw.Probe.LinkURL),
+			RedirectURLs:         normalizeURLs(raw.Probe.RedirectURLs),
+			Patterns:             normalizeStrings(raw.Probe.Patterns),
+			UnhealthyStatusCodes: append([]int(nil), raw.Probe.UnhealthyStatusCodes...),
+			Interval:             raw.Probe.Interval,
+			Timeout:              raw.Probe.Timeout,
+			HealthyThreshold:     raw.Probe.HealthyThreshold,
+			UnhealthyThreshold:   raw.Probe.UnhealthyThreshold,
+			MinSwitchInterval:    raw.Probe.MinSwitchInterval,
+		},
 	}
 
 	if entry.BackendHost != "" {
@@ -138,4 +153,55 @@ func resolveV4FilePath(baseConfigPath, value string) string {
 		return filepath.Clean(value)
 	}
 	return filepath.Join(filepath.Dir(filepath.Clean(baseConfigPath)), value)
+}
+
+func normalizeLocalPaths(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = filepath.Clean(strings.TrimSpace(value))
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
+}
+
+func normalizeURLs(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
+}
+
+func normalizeStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
 }

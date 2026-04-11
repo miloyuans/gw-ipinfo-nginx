@@ -1,16 +1,33 @@
 routes:
   # v4 host 级规则文件。
-  # 这里只定义“某个 host 命中 v4 fallback 后应该如何透传 / 探测 / enrichment / 覆盖后端”。
-  # 它不参与 bypass/default/v1/v2/v3 的 source/target 强规则编译。
+  # 这里只定义“某个 host 在命中 v4 fallback 后应该如何透传 / 探测 / enrichment / 覆盖后端”，
+  # 不参与 bypass/default/v1/v2/v3 的强规则编译。
   #
-  # 字段说明：
-  # - host: 必填，入口域名，按 host 精确匹配
-  # - enabled: 可选，默认 true；false 表示显式禁用该 host
-  # - backend.service: 可选；为空时回落到 v4.passthrough.service
-  # - backend.host: 可选；为空时默认等于当前 host
-  # - security_checks_enabled: 可选；为空时回落到 v4.security.security_checks_enabled
-  # - ip_enrichment_mode: 可选；disabled | cache_only | full
-  # - probe.patterns: 普通字符串优先匹配；若需要正则，再写 regex 风格表达式
+  # 常用字段说明：
+  # - host: 必填，入口域名，按 host 精确匹配。
+  # - enabled: 可选，默认 true；false 表示显式禁用该 host。
+  # - backend.service: 可选；为空时回落到 v4.passthrough.service。
+  # - backend.host: 可选；为空时默认等于当前 host。
+  # - security_checks_enabled: 可选；为空时回落到 v4.security.security_checks_enabled。
+  # - ip_enrichment_mode: 可选；disabled | cache_only | full。
+  #
+  # probe 字段说明：
+  # - probe.enabled: 只有显式 true 的 host 才会做探测。
+  # - probe.mode: html_discovery | local_js。
+  # - probe.url: 远程探测入口地址；如果配置了，会抓取这个页面内容并提取跳转 URL。
+  # - probe.html_paths: 本地 HTML 文件绝对路径列表；会从这些静态文件里提取跳转 URL。
+  # - probe.js_paths: 本地 JS 文件绝对路径列表；会直接从这些 JS 文件里提取跳转 URL。
+  # - probe.link_url: 显式目标 URL；配置后优先用于精确匹配提取结果。
+  # - probe.patterns: 候选 URL 过滤规则；普通字符串优先，正则兜底。
+  # - probe.redirect_urls: 发生故障切换后真正使用的跳转目标，可配多个，内部会稳定选一个。
+  # - probe.unhealthy_status_codes: 这些状态码会被判定为异常；默认使用全局 probe_defaults 的 404。
+  # - probe.interval/timeout/healthy_threshold/unhealthy_threshold/min_switch_interval:
+  #   都可以按 host 覆盖全局默认值。
+  #
+  # 本地 html/js 文件提取时：
+  # - 只需要配置本地绝对路径；
+  # - 基准域名默认使用当前 host，内部按 https://<host>/ 解析相对跳转链接；
+  # - 提取出的 URL 会自动去重，并写入 v4 probe 工作区。
 
   - id: "promo-example"
     host: "promo.example.com"
@@ -23,7 +40,29 @@ routes:
     probe:
       enabled: true
       mode: "html_discovery"
+      # 方式一：直接探测线上 HTML 页面并从页面/内联 JS 中提取跳转 URL。
       url: "https://promo.example.com/"
+      # 方式二：同时从本地静态文件中提取，适合你已经把页面文件挂载到 Pod 内。
+      html_paths:
+        - "/usr/share/nginx/html/googleplay/dist/promo.example.com/index.html"
+      # 方式三：如果跳转逻辑写在单独 JS 文件里，可以直接指定多个本地 JS 绝对路径。
+      js_paths:
+        - "/usr/share/nginx/html/googleplay/dist/promo.example.com/assets/app.js"
+      # 显式筛选目标 URL，优先级高于 patterns。
       link_url: "https://fallback.example.net/"
+      # 如果 link_url 为空，则用 patterns 做候选 URL 过滤。
       patterns:
         - "fallback.example.net/"
+      # 真正发生故障切换时要跳转到的固定地址，可以配置一个或多个。
+      redirect_urls:
+        - "https://fallback.example.net/"
+        - "https://fallback2.example.net/"
+      # 命中这些状态码视为异常；不配则回落到全局默认。
+      unhealthy_status_codes:
+        - 404
+        - 410
+      interval: 3s
+      timeout: 3s
+      healthy_threshold: 2
+      unhealthy_threshold: 3
+      min_switch_interval: 2m

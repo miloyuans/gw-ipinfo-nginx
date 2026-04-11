@@ -2,14 +2,19 @@ package probe
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -40,6 +45,19 @@ type Service struct {
 	client  *http.Client
 	mu      sync.Mutex
 	lastRun map[string]time.Time
+}
+
+type probeWorkspaceRecord struct {
+	Host          string    `json:"host"`
+	UpdatedAt     time.Time `json:"updated_at"`
+	Mode          string    `json:"mode"`
+	SourceURL     string    `json:"source_url"`
+	HTMLPaths     []string  `json:"html_paths"`
+	JSPaths       []string  `json:"js_paths"`
+	DiscoveredURLs []string `json:"discovered_urls"`
+	FailedURLs    []string  `json:"failed_urls"`
+	RedirectURLs  []string  `json:"redirect_urls"`
+	LastError     string    `json:"last_error"`
 }
 
 func NewService(cfg config.V4Config, runtime *v4runtime.Service, eventSvc *events.Service, logger *slog.Logger) *Service {
@@ -95,8 +113,13 @@ func (s *Service) runOnce(ctx context.Context) {
 				Fingerprint: "domain_unhealthy:" + host.Host,
 				Level:       "warning",
 				Title:       "V4 domain unhealthy",
-				Message:     fmt.Sprintf("%s switched to degraded redirect", host.Host),
-				Metadata:    map[string]any{"redirect_url": state.RedirectURL, "probe_url": host.Probe.URL},
+				Message:     fmt.Sprintf("%s switched to degraded redirect after %d consecutive unhealthy probes", host.Host, host.Probe.UnhealthyThreshold),
+				Metadata: map[string]any{
+					"redirect_url":  state.RedirectURL,
+					"probe_url":     host.Probe.URL,
+					"failed_urls":   update.FailedTargets,
+					"probe_targets": update.ProbeTargets,
+				},
 			})
 			_ = s.events.Emit(ctx, v4model.Event{
 				Type:        v4model.EventTrafficSwitchedToRedirect,
@@ -104,8 +127,11 @@ func (s *Service) runOnce(ctx context.Context) {
 				Fingerprint: "traffic_switched_to_redirect:" + host.Host + ":" + state.RedirectURL,
 				Level:       "warning",
 				Title:       "V4 traffic switched to redirect",
-				Message:     fmt.Sprintf("%s switched to redirect %s", host.Host, state.RedirectURL),
-				Metadata:    map[string]any{"redirect_url": state.RedirectURL},
+				Message:     fmt.Sprintf("%s switched traffic to redirect %s", host.Host, state.RedirectURL),
+				Metadata: map[string]any{
+					"redirect_url":  state.RedirectURL,
+					"probe_targets": update.ProbeTargets,
+				},
 			})
 		}
 		if recovered {
@@ -143,84 +169,198 @@ func (s *Service) probeHost(ctx context.Context, host v4model.SnapshotHost) v4ru
 		Spec:    host.Probe,
 		Healthy: true,
 	}
-	probeURL := strings.TrimSpace(host.Probe.URL)
-	if err := validateRemoteURL(probeCtx, probeURL); err != nil {
-		update.Healthy = false
-		update.Error = err.Error()
-		return update
+	discoveredURLs, workspacePath, discoveryErr := s.discoverProbeURLs(probeCtx, host)
+	update.ProbeTargets = discoveredURLs
+	update.WorkspaceFile = workspacePath
+
+	failedURLs := make([]string, 0)
+	failureReasons := make([]string, 0)
+	if discoveryErr != nil {
+		failureReasons = append(failureReasons, discoveryErr.Error())
 	}
-	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, probeURL, nil)
-	if err != nil {
+	if len(discoveredURLs) == 0 {
+		failureReasons = append(failureReasons, "no probe targets discovered")
+	} else {
+		failedURLs, failureReasons = s.checkProbeTargets(probeCtx, discoveredURLs, host.Probe)
+	}
+	update.FailedTargets = failedURLs
+	if len(failedURLs) > 0 || len(failureReasons) > 0 {
 		update.Healthy = false
-		update.Error = err.Error()
-		return update
+		update.RedirectURL = pickRedirectURL(host.Host, host.Probe)
+		update.Error = strings.Join(failureReasons, " | ")
+	}
+	s.writeWorkspace(host, discoveredURLs, failedURLs, update.Error)
+	return update
+}
+
+func (s *Service) discoverProbeURLs(ctx context.Context, host v4model.SnapshotHost) ([]string, string, error) {
+	seen := make(map[string]struct{})
+	discovered := make([]string, 0)
+	var errs []string
+
+	if probeURL := strings.TrimSpace(host.Probe.URL); probeURL != "" {
+		if targets, err := s.discoverFromRemoteURL(ctx, probeURL, host.Probe); err != nil {
+			errs = append(errs, err.Error())
+		} else {
+			discovered = appendUniqueURLs(discovered, seen, targets...)
+		}
+	}
+
+	baseURL := defaultHostBaseURL(host.Host)
+	for _, filePath := range host.Probe.HTMLPaths {
+		if targets, err := s.discoverFromLocalFile(filePath, baseURL, host.Probe.Mode, true); err != nil {
+			errs = append(errs, err.Error())
+		} else {
+			discovered = appendUniqueURLs(discovered, seen, targets...)
+		}
+	}
+	for _, filePath := range host.Probe.JSPaths {
+		if targets, err := s.discoverFromLocalFile(filePath, baseURL, "local_js", false); err != nil {
+			errs = append(errs, err.Error())
+		} else {
+			discovered = appendUniqueURLs(discovered, seen, targets...)
+		}
+	}
+
+	discovered = filterCandidateURLs(baseURL, discovered, host.Probe)
+	sort.Strings(discovered)
+
+	var err error
+	if len(errs) > 0 {
+		err = errors.New(strings.Join(errs, " | "))
+	}
+	return discovered, s.workspaceFilePath(host.Host), err
+}
+
+func (s *Service) discoverFromRemoteURL(ctx context.Context, probeURL string, probe v4model.ProbeSpec) ([]string, error) {
+	if err := validateRemoteURL(ctx, probeURL); err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, probeURL, nil)
+	if err != nil {
+		return nil, err
 	}
 	req.Header.Set("User-Agent", s.cfg.ProbeDefaults.UserAgent)
 	resp, err := s.client.Do(req)
 	if err != nil {
-		update.Healthy = false
-		update.Error = err.Error()
-		return update
+		return nil, err
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		update.Healthy = false
-		update.Error = err.Error()
-		return update
+		return nil, err
 	}
-
-	redirectURL, found, err := extractRedirectURL(probeURL, string(body), host.Probe)
-	if err != nil {
-		update.Healthy = false
-		update.Error = err.Error()
-		return update
-	}
-	if found {
-		update.Healthy = false
-		update.RedirectURL = redirectURL
-		return update
-	}
-	return update
+	return extractCandidateURLs(probeURL, string(body), probe.Mode), nil
 }
 
-func extractRedirectURL(baseURL string, body string, probe v4model.ProbeSpec) (string, bool, error) {
-	candidates := collectCandidates(body, probe.Mode)
+func (s *Service) discoverFromLocalFile(path, baseURL, mode string, htmlMode bool) ([]string, error) {
+	raw, err := os.ReadFile(filepath.Clean(path))
+	if err != nil {
+		return nil, fmt.Errorf("read local probe file %s: %w", path, err)
+	}
+	effectiveMode := mode
+	if htmlMode && strings.TrimSpace(effectiveMode) == "" {
+		effectiveMode = "html_discovery"
+	}
+	if !htmlMode {
+		effectiveMode = "local_js"
+	}
+	return extractCandidateURLs(baseURL, string(raw), effectiveMode), nil
+}
+
+func extractCandidateURLs(baseURL string, body string, mode string) []string {
+	candidates := collectCandidates(body, mode)
 	if len(candidates) == 0 {
-		return "", false, nil
+		return nil
 	}
 	base, err := url.Parse(baseURL)
 	if err != nil {
-		return "", false, err
+		return nil
 	}
-
-	explicit := strings.TrimSpace(probe.LinkURL)
+	seen := make(map[string]struct{}, len(candidates))
+	values := make([]string, 0, len(candidates))
 	for _, candidate := range candidates {
 		absolute, err := base.Parse(strings.TrimSpace(candidate))
 		if err != nil {
 			continue
 		}
 		value := absolute.String()
-		if explicit != "" {
-			matchTarget, err := base.Parse(explicit)
-			if err == nil && strings.EqualFold(matchTarget.String(), value) {
-				if err := validateRemoteURL(context.Background(), value); err != nil {
-					return "", false, err
-				}
-				return value, true, nil
-			}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		values = append(values, value)
+	}
+	return values
+}
+
+func filterCandidateURLs(baseURL string, candidates []string, probe v4model.ProbeSpec) []string {
+	if len(candidates) == 0 {
+		return nil
+	}
+	explicit := strings.TrimSpace(probe.LinkURL)
+	hasPatterns := len(probe.Patterns) > 0
+	if explicit == "" && !hasPatterns {
+		return candidates
+	}
+
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		return candidates
+	}
+	allowed := make(map[string]struct{})
+	if explicit != "" {
+		if target, parseErr := base.Parse(explicit); parseErr == nil {
+			allowed[strings.TrimSpace(target.String())] = struct{}{}
+		}
+	}
+
+	filtered := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		if _, ok := allowed[candidate]; ok {
+			filtered = append(filtered, candidate)
 			continue
 		}
 		for _, pattern := range probe.Patterns {
-			if matchProbePattern(value, pattern) {
-				if err := validateRemoteURL(context.Background(), value); err != nil {
-					return "", false, err
-				}
-				return value, true, nil
+			if matchProbePattern(candidate, pattern) {
+				filtered = append(filtered, candidate)
+				break
 			}
 		}
 	}
-	return "", false, nil
+	return dedupeSortedURLs(filtered)
+}
+
+func (s *Service) checkProbeTargets(ctx context.Context, targets []string, probe v4model.ProbeSpec) ([]string, []string) {
+	unhealthyCodes := unhealthyStatusCodeSet(probe.UnhealthyStatusCodes)
+	failed := make([]string, 0)
+	reasons := make([]string, 0)
+	for _, target := range targets {
+		if err := validateRemoteURL(ctx, target); err != nil {
+			failed = append(failed, target)
+			reasons = append(reasons, fmt.Sprintf("%s invalid: %s", target, err.Error()))
+			continue
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+		if err != nil {
+			failed = append(failed, target)
+			reasons = append(reasons, fmt.Sprintf("%s request build failed: %s", target, err.Error()))
+			continue
+		}
+		req.Header.Set("User-Agent", s.cfg.ProbeDefaults.UserAgent)
+		resp, err := s.client.Do(req)
+		if err != nil {
+			failed = append(failed, target)
+			reasons = append(reasons, fmt.Sprintf("%s request failed: %s", target, err.Error()))
+			continue
+		}
+		_ = resp.Body.Close()
+		if _, bad := unhealthyCodes[resp.StatusCode]; bad {
+			failed = append(failed, target)
+			reasons = append(reasons, fmt.Sprintf("%s returned unhealthy status %d", target, resp.StatusCode))
+		}
+	}
+	return dedupeSortedURLs(failed), reasons
 }
 
 func matchProbePattern(value, pattern string) bool {
@@ -244,7 +384,8 @@ func collectCandidates(body, mode string) []string {
 	case "local_js":
 		patterns = jsRedirectPatterns
 	case "html_discovery":
-		patterns = htmlRedirectPatterns
+		patterns = append(patterns, htmlRedirectPatterns...)
+		patterns = append(patterns, jsRedirectPatterns...)
 	default:
 		return nil
 	}
@@ -268,6 +409,20 @@ func collectCandidates(body, mode string) []string {
 		}
 	}
 	return values
+}
+
+func unhealthyStatusCodeSet(values []int) map[int]struct{} {
+	set := make(map[int]struct{}, len(values))
+	for _, value := range values {
+		if value < 100 || value > 599 {
+			continue
+		}
+		set[value] = struct{}{}
+	}
+	if len(set) == 0 {
+		set[http.StatusNotFound] = struct{}{}
+	}
+	return set
 }
 
 func validateRemoteURL(ctx context.Context, raw string) error {
@@ -352,4 +507,124 @@ func (s *Service) shouldProbe(host v4model.SnapshotHost, now time.Time) bool {
 	}
 	s.lastRun[host.Host] = now
 	return true
+}
+
+func pickRedirectURL(host string, probe v4model.ProbeSpec) string {
+	candidates := dedupeSortedURLs(append([]string(nil), probe.RedirectURLs...))
+	if len(candidates) == 0 && strings.TrimSpace(probe.LinkURL) != "" {
+		candidates = []string{strings.TrimSpace(probe.LinkURL)}
+	}
+	if len(candidates) == 0 {
+		return ""
+	}
+	if len(candidates) == 1 {
+		return candidates[0]
+	}
+	hasher := fnv.New32a()
+	_, _ = hasher.Write([]byte(strings.TrimSpace(strings.ToLower(host))))
+	index := int(hasher.Sum32() % uint32(len(candidates)))
+	return candidates[index]
+}
+
+func (s *Service) workspaceFilePath(host string) string {
+	dir := filepath.Clean(strings.TrimSpace(s.cfg.ProbeDefaults.WorkspaceDir))
+	if dir == "." || dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, sanitizeHostFileName(host)+".json")
+}
+
+func (s *Service) writeWorkspace(host v4model.SnapshotHost, discoveredURLs, failedURLs []string, lastError string) {
+	path := s.workspaceFilePath(host.Host)
+	if path == "" {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		if s.logger != nil {
+			s.logger.Warn("v4_probe_workspace_mkdir_error", "event", "v4_probe_workspace_mkdir_error", "host", host.Host, "path", path, "error", err)
+		}
+		return
+	}
+	record := probeWorkspaceRecord{
+		Host:           host.Host,
+		UpdatedAt:      time.Now().UTC(),
+		Mode:           host.Probe.Mode,
+		SourceURL:      strings.TrimSpace(host.Probe.URL),
+		HTMLPaths:      append([]string(nil), host.Probe.HTMLPaths...),
+		JSPaths:        append([]string(nil), host.Probe.JSPaths...),
+		DiscoveredURLs: append([]string(nil), discoveredURLs...),
+		FailedURLs:     append([]string(nil), failedURLs...),
+		RedirectURLs:   dedupeSortedURLs(append([]string(nil), host.Probe.RedirectURLs...)),
+		LastError:      strings.TrimSpace(lastError),
+	}
+	raw, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		return
+	}
+	tmpPath := path + ".tmp"
+	if err := os.WriteFile(tmpPath, raw, 0o644); err != nil {
+		if s.logger != nil {
+			s.logger.Warn("v4_probe_workspace_write_error", "event", "v4_probe_workspace_write_error", "host", host.Host, "path", path, "error", err)
+		}
+		return
+	}
+	if err := os.Rename(tmpPath, path); err != nil && s.logger != nil {
+		s.logger.Warn("v4_probe_workspace_rename_error", "event", "v4_probe_workspace_rename_error", "host", host.Host, "path", path, "error", err)
+	}
+}
+
+func appendUniqueURLs(values []string, seen map[string]struct{}, candidates ...string) []string {
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		if _, ok := seen[candidate]; ok {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		values = append(values, candidate)
+	}
+	return values
+}
+
+func dedupeSortedURLs(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func defaultHostBaseURL(host string) string {
+	host = strings.TrimSpace(strings.ToLower(host))
+	host = strings.TrimSuffix(host, ".")
+	if host == "" {
+		return "https://invalid.local/"
+	}
+	return "https://" + host + "/"
+}
+
+func sanitizeHostFileName(host string) string {
+	host = strings.TrimSpace(strings.ToLower(host))
+	host = strings.TrimSuffix(host, ".")
+	if host == "" {
+		return "unknown-host"
+	}
+	replacer := strings.NewReplacer("/", "_", "\\", "_", ":", "_", "*", "_", "?", "_", "\"", "_", "<", "_", ">", "_", "|", "_")
+	value := replacer.Replace(host)
+	if value == "" {
+		return "unknown-host"
+	}
+	return value
 }

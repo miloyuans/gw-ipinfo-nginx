@@ -403,8 +403,12 @@ func mergeProbe(defaults config.V4ProbeDefaultsConfig, probe config.V4ProbeConfi
 		Enabled:            probe.Enabled,
 		Mode:               probe.Mode,
 		URL:                strings.TrimSpace(probe.URL),
+		HTMLPaths:          append([]string(nil), probe.HTMLPaths...),
+		JSPaths:            append([]string(nil), probe.JSPaths...),
 		LinkURL:            strings.TrimSpace(probe.LinkURL),
+		RedirectURLs:       append([]string(nil), probe.RedirectURLs...),
 		Patterns:           append([]string(nil), probe.Patterns...),
+		UnhealthyStatusCodes: firstStatusCodes(probe.UnhealthyStatusCodes, defaults.UnhealthyStatusCodes),
 		Interval:           firstDuration(probe.Interval, defaults.Interval),
 		Timeout:            firstDuration(probe.Timeout, defaults.Timeout),
 		HealthyThreshold:   firstInt(probe.HealthyThreshold, defaults.HealthyThreshold),
@@ -426,8 +430,12 @@ func snapshotFingerprint(hosts []v4model.SnapshotHost) string {
 			fmt.Sprintf("%t", host.Probe.Enabled),
 			host.Probe.Mode,
 			host.Probe.URL,
+			strings.Join(host.Probe.HTMLPaths, ","),
+			strings.Join(host.Probe.JSPaths, ","),
 			host.Probe.LinkURL,
+			strings.Join(host.Probe.RedirectURLs, ","),
 			strings.Join(host.Probe.Patterns, ","),
+			fmt.Sprint(host.Probe.UnhealthyStatusCodes),
 		}, "|"))
 	}
 	sum := sha1.Sum([]byte(strings.Join(parts, "\n")))
@@ -460,4 +468,23 @@ func firstInt(values ...int) int {
 		}
 	}
 	return 0
+}
+
+func firstStatusCodes(values ...[]int) []int {
+	for _, set := range values {
+		if len(set) == 0 {
+			continue
+		}
+		result := make([]int, 0, len(set))
+		for _, value := range set {
+			if value <= 0 {
+				continue
+			}
+			result = append(result, value)
+		}
+		if len(result) > 0 {
+			return result
+		}
+	}
+	return nil
 }

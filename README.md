@@ -410,6 +410,9 @@ Behavior:
   - Builds a shared last-good snapshot from nginx `server_name` plus `configs/passroute_v4.yaml`.
   - Default behavior is passthrough, default security checks are off, and enrichment defaults to `disabled`.
   - Probe is opt-in per host. Only hosts with `probe.enabled=true` are actively probed.
+  - Probe can discover jump URLs from a remote HTML page, local HTML files, or local JS files.
+  - Multiple discovered jump URLs are deduplicated, written into the probe workspace, and checked one by one.
+  - Default probe behavior is `3s` interval, `404` treated as unhealthy, and `3` consecutive failures before switching to degraded redirect.
 
 ### Default And Deny Behavior
 
@@ -441,6 +444,16 @@ Behavior:
 - `v4` last-good behavior
   - Parse or sync failure emits an event and log, but does not clear the previous last-good snapshot.
   - If no snapshot is available, the gateway logs `v4_fallback_to_legacy=true` and falls back to legacy routing where applicable.
+
+- `v4` probe behavior
+  - `probe.url` fetches a remote HTML entry page and extracts candidate jump URLs from HTML and inline JS.
+  - `probe.html_paths` reads one or more local absolute HTML files and extracts candidate jump URLs with the current host as the default base URL.
+  - `probe.js_paths` reads one or more local absolute JS files and extracts candidate jump URLs directly.
+  - `probe.link_url` is an explicit target matcher with higher priority than `probe.patterns`.
+  - `probe.patterns` uses plain substring match first and regexp as fallback.
+  - `probe.redirect_urls` defines the fixed failover destinations that traffic actually switches to after the host becomes unhealthy.
+  - `probe.unhealthy_status_codes` defines which HTTP statuses are considered unhealthy; default is `404`.
+  - Probe discoveries and failures are written to `v4.probe_defaults.workspace_dir`.
 
 - `v4` Telegram `/routes`
   - Only reads persisted snapshot / sync state / runtime state / recent events.

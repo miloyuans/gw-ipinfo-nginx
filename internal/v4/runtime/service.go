@@ -24,6 +24,9 @@ type ProbeUpdate struct {
 	Host        string
 	Healthy     bool
 	RedirectURL string
+	ProbeTargets []string
+	FailedTargets []string
+	WorkspaceFile string
 	Error       string
 	ProbeAt     time.Time
 	Spec        v4model.ProbeSpec
@@ -175,6 +178,9 @@ func (s *Service) ApplyProbeUpdate(ctx context.Context, update ProbeUpdate) (v4m
 	now := update.ProbeAt.UTC()
 	state.LastProbeAt = now
 	state.LastProbeError = strings.TrimSpace(update.Error)
+	state.LastProbeTargets = append([]string(nil), update.ProbeTargets...)
+	state.LastFailedTargets = append([]string(nil), update.FailedTargets...)
+	state.WorkspaceFile = strings.TrimSpace(update.WorkspaceFile)
 	modeChanged := false
 	recovered := false
 
