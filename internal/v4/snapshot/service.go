@@ -28,6 +28,7 @@ type Service struct {
 	lease               *syncLeaseStore
 	instanceID          string
 	serviceNames        map[string]struct{}
+	excludedHosts       map[string]struct{}
 	legacyWarned        bool
 	onUpdated           func(v4model.Snapshot, []v4model.SnapshotHost)
 }
@@ -60,11 +61,27 @@ func NewService(
 		lease:          newSyncLeaseStore(controller, sharedStatePath, cfg.Sync.LeaseName),
 		instanceID:     instanceID,
 		serviceNames:   names,
+		excludedHosts:  make(map[string]struct{}),
 	}
 }
 
 func (s *Service) SetOnUpdated(fn func(v4model.Snapshot, []v4model.SnapshotHost)) {
 	s.onUpdated = fn
+}
+
+func (s *Service) SetExcludedHosts(hosts []string) {
+	if s == nil {
+		return
+	}
+	next := make(map[string]struct{}, len(hosts))
+	for _, host := range hosts {
+		host = strings.TrimSpace(strings.ToLower(host))
+		if host == "" {
+			continue
+		}
+		next[host] = struct{}{}
+	}
+	s.excludedHosts = next
 }
 
 func (s *Service) Run(ctx context.Context) {
@@ -159,6 +176,7 @@ func (s *Service) SyncOnce(ctx context.Context) error {
 		s.recordSyncFailure(ctx, now, err, map[string]any{"config_paths": s.cfg.Ingress.ConfigPaths})
 		return err
 	}
+	autoHosts = s.filterExcludedHosts(autoHosts)
 
 	fileEntries, err := s.loadExplicitRoutes()
 	if err != nil {
@@ -222,6 +240,18 @@ func (s *Service) SyncOnce(ctx context.Context) error {
 		Source:      "nginx_conf+v4_routes",
 	}
 	if err := s.repo.ReplaceLastGood(ctx, snapshot, snapshotHosts); err != nil {
+		if s.onUpdated != nil {
+			s.onUpdated(snapshot, snapshotHosts)
+		}
+		if s.logger != nil {
+			s.logger.Warn("v4_snapshot_persist_degraded_local_only",
+				"event", "v4_snapshot_persist_degraded_local_only",
+				"instance_id", s.instanceID,
+				"fingerprint", fingerprint,
+				"host_count", len(snapshotHosts),
+				"error", err,
+			)
+		}
 		s.recordSyncFailure(ctx, now, err, map[string]any{"host_count": len(snapshotHosts), "fingerprint": fingerprint})
 		return err
 	}
@@ -285,6 +315,31 @@ func (s *Service) loadExplicitRoutes() ([]config.V4OverrideConfig, error) {
 
 func (s *Service) compileHosts(autoHosts []string, overrides []config.V4OverrideConfig) ([]v4model.SnapshotHost, error) {
 	return BuildEffectiveHosts(BuildAutoHosts(autoHosts, s.cfg), s.cfg, overrides, s.serviceNames)
+}
+
+func (s *Service) filterExcludedHosts(hosts []string) []string {
+	if len(hosts) == 0 || len(s.excludedHosts) == 0 {
+		return hosts
+	}
+	filtered := make([]string, 0, len(hosts))
+	for _, host := range hosts {
+		normalized := strings.TrimSpace(strings.ToLower(host))
+		if normalized == "" {
+			continue
+		}
+		if _, excluded := s.excludedHosts[normalized]; excluded {
+			if s.logger != nil {
+				s.logger.Info("v4_snapshot_host_excluded",
+					"event", "v4_snapshot_host_excluded",
+					"host", normalized,
+					"reason", "claimed_by_route_sets",
+				)
+			}
+			continue
+		}
+		filtered = append(filtered, host)
+	}
+	return filtered
 }
 
 func (s *Service) logCompiledOverrides(overrides []config.V4OverrideConfig, hosts []v4model.SnapshotHost) {

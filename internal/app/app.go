@@ -124,9 +124,45 @@ func New(configPath string) (*Application, error) {
 		return nil, err
 	}
 	resolver := routing.NewResolver(cfg.Routing)
-	compiledRouteSets, err := routesets.LoadAndCompile(configPath, cfg.RouteSets, cfg.Routing, cfg.V3Defaults, logger)
+	localCompiledRouteSets, err := routesets.LoadAndCompile(configPath, cfg.RouteSets, cfg.Routing, cfg.V3Defaults, logger)
 	if err != nil {
 		return nil, fmt.Errorf("compile route sets: %w", err)
+	}
+	compiledRouteSets := localCompiledRouteSets
+	if cfg.RouteSets.SharedManifestEnabled {
+		routeSetRepo := routesets.NewRepository(storageControl, logger)
+		manifest, persistErr := routeSetRepo.ReplaceLatest(context.Background(), localCompiledRouteSets, configPath)
+		if persistErr != nil {
+			logger.Warn("route_sets_manifest_persist_degraded_local_only",
+				"event", "route_sets_manifest_persist_degraded_local_only",
+				"version", manifest.Version,
+				"fingerprint", manifest.Fingerprint,
+				"error", persistErr,
+			)
+		} else {
+			logger.Info("route_sets_manifest_persisted",
+				"event", "route_sets_manifest_persisted",
+				"version", manifest.Version,
+				"fingerprint", manifest.Fingerprint,
+				"enabled", manifest.Enabled,
+				"source", manifest.Source,
+			)
+		}
+		if sharedCompiled, sharedManifest, found, loadErr := routeSetRepo.LoadLatest(context.Background()); loadErr != nil {
+			logger.Warn("route_sets_manifest_load_failed",
+				"event", "route_sets_manifest_load_failed",
+				"error", loadErr,
+			)
+		} else if found && sharedCompiled != nil {
+			compiledRouteSets = sharedCompiled
+			logger.Info("route_sets_manifest_loaded",
+				"event", "route_sets_manifest_loaded",
+				"version", sharedManifest.Version,
+				"fingerprint", sharedManifest.Fingerprint,
+				"enabled", sharedManifest.Enabled,
+				"source", sharedManifest.Source,
+			)
+		}
 	}
 	routeRuntime := routesets.NewRuntime(compiledRouteSets, cfg.RouteSets, logger)
 	proxyManager, err := proxy.NewManager(cfg.Routing.Services, cfg.Perf, metricSet, logger)
@@ -207,6 +243,9 @@ func New(configPath string) (*Application, error) {
 			resolver.ServiceNames(),
 			logger,
 		)
+		if compiledRouteSets != nil {
+			v4SnapshotSvc.SetExcludedHosts(routeSetHosts(compiledRouteSets))
+		}
 		v4SnapshotSvc.SetOnUpdated(func(snapshot v4model.Snapshot, hosts []v4model.SnapshotHost) {
 			v4RuntimeSvc.ReplaceSnapshot(snapshot, hosts)
 		})
@@ -1498,4 +1537,19 @@ func resolveLocalStoragePath(path string) string {
 		return filepath.Join(scope, base)
 	}
 	return filepath.Join(dir, scope, base)
+}
+
+func routeSetHosts(compiled *routesets.Compiled) []string {
+	if compiled == nil || len(compiled.AllowedHosts) == 0 {
+		return nil
+	}
+	hosts := make([]string, 0, len(compiled.AllowedHosts))
+	for host := range compiled.AllowedHosts {
+		host = strings.TrimSpace(strings.ToLower(host))
+		if host == "" {
+			continue
+		}
+		hosts = append(hosts, host)
+	}
+	return hosts
 }

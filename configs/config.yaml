@@ -107,6 +107,10 @@ routing:
       preserve_host: true
 
 route_sets:
+  # route_sets 编译结果会主动写入数据库作为共享 manifest。
+  # 多副本运行时，以数据库里的共享 manifest 作为全局主数据；
+  # 本地仅保留降级副本和 replay 缓冲，避免每个 Pod 各读各的 route 文件导致行为漂移。
+  shared_manifest_enabled: true
   bypass:
     enabled: false
     config_path: "bypassroute.yaml"

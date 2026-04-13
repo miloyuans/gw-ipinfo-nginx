@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"time"
 
 	"gw-ipinfo-nginx/internal/localdisk"
@@ -71,25 +72,71 @@ func (r *RuntimeStateRepository) Name() string { return "v4_runtime_states" }
 func (r *EventRepository) Name() string        { return "v4_events" }
 
 func (r *SnapshotRepository) LoadLatest(ctx context.Context) (v4model.Snapshot, []v4model.SnapshotHost, bool, error) {
+	var (
+		mongoSnapshot v4model.Snapshot
+		mongoHosts    []v4model.SnapshotHost
+		mongoFound    bool
+	)
 	if client := r.controller.Client(); client != nil && r.controller.Mode() != storage.ModeLocal {
 		snapshot, hosts, found, err := r.loadLatestMongo(ctx, client)
 		if err == nil {
-			return snapshot, hosts, found, nil
+			mongoSnapshot = snapshot
+			mongoHosts = hosts
+			mongoFound = found
+		} else {
+			r.controller.HandleMongoError(err)
 		}
-		r.controller.HandleMongoError(err)
 	}
-	return r.loadLatestLocal(ctx)
+	localSnapshot, localHosts, localFound, localErr := r.loadLatestLocal(ctx)
+	if localErr != nil {
+		if mongoFound {
+			return mongoSnapshot, mongoHosts, true, nil
+		}
+		return v4model.Snapshot{}, nil, false, localErr
+	}
+	if mongoFound && localFound {
+		if newerSnapshot(localSnapshot, mongoSnapshot) {
+			return localSnapshot, localHosts, true, nil
+		}
+		return mongoSnapshot, mongoHosts, true, nil
+	}
+	if mongoFound {
+		return mongoSnapshot, mongoHosts, true, nil
+	}
+	return localSnapshot, localHosts, localFound, nil
 }
 
 func (r *SnapshotRepository) LoadSyncState(ctx context.Context) (v4model.SyncState, bool, error) {
+	var (
+		mongoState v4model.SyncState
+		mongoFound bool
+	)
 	if client := r.controller.Client(); client != nil && r.controller.Mode() != storage.ModeLocal {
 		state, found, err := r.loadSyncStateMongo(ctx, client)
 		if err == nil {
-			return state, found, nil
+			mongoState = state
+			mongoFound = found
+		} else {
+			r.controller.HandleMongoError(err)
 		}
-		r.controller.HandleMongoError(err)
 	}
-	return r.loadSyncStateLocal(ctx)
+	localState, localFound, localErr := r.loadSyncStateLocal(ctx)
+	if localErr != nil {
+		if mongoFound {
+			return mongoState, true, nil
+		}
+		return v4model.SyncState{}, false, localErr
+	}
+	if mongoFound && localFound {
+		if newerSyncState(localState, mongoState) {
+			return localState, true, nil
+		}
+		return mongoState, true, nil
+	}
+	if mongoFound {
+		return mongoState, true, nil
+	}
+	return localState, localFound, nil
 }
 
 func (r *SnapshotRepository) ReplaceLastGood(ctx context.Context, snapshot v4model.Snapshot, hosts []v4model.SnapshotHost) error {
@@ -106,6 +153,7 @@ func (r *SnapshotRepository) ReplaceLastGood(ctx context.Context, snapshot v4mod
 			return nil
 		} else {
 			r.controller.HandleMongoError(err)
+			return err
 		}
 	}
 	return nil
@@ -121,6 +169,7 @@ func (r *SnapshotRepository) UpsertSyncState(ctx context.Context, state v4model.
 			return nil
 		} else {
 			r.controller.HandleMongoError(err)
+			return err
 		}
 	}
 	return nil
@@ -620,4 +669,43 @@ func (r *EventRepository) persistLocalMirror(ctx context.Context, event v4model.
 		LastEventID: event.ID,
 		SilentUntil: event.SilentUntil,
 	})
+}
+
+func newerSnapshot(left, right v4model.Snapshot) bool {
+	leftUpdated := left.UpdatedAt.UTC()
+	rightUpdated := right.UpdatedAt.UTC()
+	if !leftUpdated.IsZero() && !rightUpdated.IsZero() {
+		if leftUpdated.After(rightUpdated) {
+			return true
+		}
+		if leftUpdated.Before(rightUpdated) {
+			return false
+		}
+	}
+	return strings.TrimSpace(left.Version) > strings.TrimSpace(right.Version)
+}
+
+func newerSyncState(left, right v4model.SyncState) bool {
+	leftUpdated := maxTime(left.UpdatedAt, left.LastSuccessAt, left.LastSyncAt)
+	rightUpdated := maxTime(right.UpdatedAt, right.LastSuccessAt, right.LastSyncAt)
+	if !leftUpdated.IsZero() && !rightUpdated.IsZero() {
+		if leftUpdated.After(rightUpdated) {
+			return true
+		}
+		if leftUpdated.Before(rightUpdated) {
+			return false
+		}
+	}
+	return strings.TrimSpace(left.LastSnapshotVersion) > strings.TrimSpace(right.LastSnapshotVersion)
+}
+
+func maxTime(values ...time.Time) time.Time {
+	latest := time.Time{}
+	for _, value := range values {
+		value = value.UTC()
+		if value.After(latest) {
+			latest = value
+		}
+	}
+	return latest
 }

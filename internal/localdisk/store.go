@@ -31,6 +31,8 @@ const (
 	BucketV4RuntimeStatesDirty = "v4_host_runtime_states_dirty"
 	BucketV4Events        = "v4_events"
 	BucketV4EventsDirty   = "v4_events_dirty"
+	BucketRouteSetsManifest = "route_sets_manifest"
+	BucketRouteSetsManifestDirty = "route_sets_manifest_dirty"
 	BucketMetadata        = "metadata"
 )
 
@@ -92,6 +94,8 @@ func (s *Store) init() error {
 			BucketV4RuntimeStatesDirty,
 			BucketV4Events,
 			BucketV4EventsDirty,
+			BucketRouteSetsManifest,
+			BucketRouteSetsManifestDirty,
 			BucketMetadata,
 		}
 		for _, name := range buckets {

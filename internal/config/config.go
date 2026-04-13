@@ -166,6 +166,7 @@ type RouteSetsConfig struct {
 	V2                 RouteSetFileConfig `yaml:"v2"`
 	V3                 RouteSetFileConfig `yaml:"v3"`
 	V4                 RouteSetFileConfig `yaml:"v4"`
+	SharedManifestEnabled bool            `yaml:"shared_manifest_enabled"`
 	StrictHostControl  bool               `yaml:"strict_host_control"`
 	FailFastOnConflict bool               `yaml:"fail_fast_on_conflict"`
 	RedirectStatusCode int                `yaml:"redirect_status_code"`
@@ -621,6 +622,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.RouteSets.RedirectStatusCode == 0 {
 		c.RouteSets.RedirectStatusCode = 302
+	}
+	if !c.RouteSets.SharedManifestEnabled {
+		c.RouteSets.SharedManifestEnabled = true
 	}
 	if c.RouteSets.V1Grant.TTL == 0 {
 		c.RouteSets.V1Grant.TTL = time.Hour

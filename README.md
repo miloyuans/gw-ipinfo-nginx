@@ -430,6 +430,11 @@ Behavior:
 
 ### V4 Runtime Notes
 
+- `route_sets.shared_manifest_enabled`
+  - The compiled `bypass/default/v1/v2/v3` route-set manifest is persisted to shared storage first, with Mongo as the global source of truth.
+  - Replicas load the shared manifest instead of relying on per-pod local compiler output.
+  - Localdisk only keeps the degraded copy and replay buffer.
+
 - `route_sets.v4`
   - Only provides the file path for `configs/passroute_v4.yaml`.
   - It does not make v4 part of the strong route compiler.
