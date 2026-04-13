@@ -131,7 +131,7 @@ func BuildEffectiveHosts(baseHosts []v4model.SnapshotHost, cfg config.V4Config, 
 }
 
 func HostsFingerprint(hosts []v4model.SnapshotHost) string {
-	return snapshotFingerprint(hosts)
+	return v4model.CanonicalSnapshotFingerprint(hosts)
 }
 
 func sortHosts(hosts []v4model.SnapshotHost) {
