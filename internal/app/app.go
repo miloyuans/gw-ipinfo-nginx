@@ -193,7 +193,7 @@ func New(configPath string) (*Application, error) {
 		v4StateRepo = v4repo.NewRuntimeStateRepository(storageControl)
 		v4EventRepo = v4repo.NewEventRepository(storageControl, logger)
 		v4EventService = v4events.NewService(cfg.V4.Telegram, v4EventRepo, sender, logger)
-		v4RuntimeSvc = v4runtime.NewService(cfg.V4, v4SnapshotRepo, v4StateRepo, logger)
+		v4RuntimeSvc = v4runtime.NewService(cfg.V4, cfg.RouteSets.V4, configPath, resolver.ServiceNames(), v4SnapshotRepo, v4StateRepo, logger)
 		v4SyncStatePath := filepath.Join(filepath.Dir(filepath.Clean(sharedStoragePath)), "v4-sync-state.json")
 		v4SnapshotSvc = v4snapshot.NewService(
 			cfg.V4,
@@ -211,7 +211,7 @@ func New(configPath string) (*Application, error) {
 			v4RuntimeSvc.ReplaceSnapshot(snapshot, hosts)
 		})
 		v4ProbeSvc = v4probe.NewService(cfg.V4, v4RuntimeSvc, v4EventService, logger)
-		v4QuerySvc = v4query.NewService(cfg.V4.Telegram, v4SnapshotRepo, v4StateRepo, v4EventRepo)
+		v4QuerySvc = v4query.NewService(cfg.V4.Telegram, cfg.V4, cfg.RouteSets.V4, configPath, resolver.ServiceNames(), v4SnapshotRepo, v4StateRepo, v4EventRepo)
 	}
 
 	var commandBot *alerts.CommandBot

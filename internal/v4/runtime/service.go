@@ -10,6 +10,7 @@ import (
 
 	"gw-ipinfo-nginx/internal/config"
 	"gw-ipinfo-nginx/internal/v4/repository"
+	v4snapshot "gw-ipinfo-nginx/internal/v4/snapshot"
 	v4model "gw-ipinfo-nginx/internal/v4/model"
 )
 
@@ -36,21 +37,31 @@ type ProbeUpdate struct {
 
 type Service struct {
 	cfg          config.V4Config
+	routeFile    config.RouteSetFileConfig
+	baseConfigPath string
 	snapshots    *repository.SnapshotRepository
 	states       *repository.RuntimeStateRepository
 	logger       *slog.Logger
+	serviceNames map[string]struct{}
 	mu           sync.RWMutex
 	hostsByName  map[string]v4model.SnapshotHost
 	fingerprint  string
 }
 
-func NewService(cfg config.V4Config, snapshots *repository.SnapshotRepository, states *repository.RuntimeStateRepository, logger *slog.Logger) *Service {
+func NewService(cfg config.V4Config, routeFile config.RouteSetFileConfig, baseConfigPath string, serviceNames []string, snapshots *repository.SnapshotRepository, states *repository.RuntimeStateRepository, logger *slog.Logger) *Service {
+	names := make(map[string]struct{}, len(serviceNames))
+	for _, name := range serviceNames {
+		names[strings.TrimSpace(name)] = struct{}{}
+	}
 	return &Service{
-		cfg:         cfg,
-		snapshots:   snapshots,
-		states:      states,
-		logger:      logger,
-		hostsByName: make(map[string]v4model.SnapshotHost),
+		cfg:            cfg,
+		routeFile:      routeFile,
+		baseConfigPath: baseConfigPath,
+		snapshots:      snapshots,
+		states:         states,
+		logger:         logger,
+		serviceNames:   names,
+		hostsByName:    make(map[string]v4model.SnapshotHost),
 	}
 }
 
@@ -79,15 +90,39 @@ func (s *Service) Run(ctx context.Context) {
 	}
 }
 
-func (s *Service) ReplaceSnapshot(snapshot v4model.Snapshot, hosts []v4model.SnapshotHost) {
+func (s *Service) ReplaceSnapshot(_ v4model.Snapshot, hosts []v4model.SnapshotHost) bool {
+	effectiveHosts := hosts
+	if overrides, err := v4snapshot.LoadEffectiveOverrides(s.baseConfigPath, s.cfg, s.routeFile); err != nil {
+		if s.logger != nil {
+			s.logger.Warn("v4_runtime_local_override_load_error",
+				"event", "v4_runtime_local_override_load_error",
+				"error", err,
+			)
+		}
+	} else if merged, err := v4snapshot.BuildEffectiveHosts(hosts, s.cfg, overrides, s.serviceNames); err != nil {
+		if s.logger != nil {
+			s.logger.Warn("v4_runtime_local_override_apply_error",
+				"event", "v4_runtime_local_override_apply_error",
+				"error", err,
+			)
+		}
+	} else {
+		effectiveHosts = merged
+	}
+
+	effectiveFingerprint := v4snapshot.HostsFingerprint(effectiveHosts)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	next := make(map[string]v4model.SnapshotHost, len(hosts))
-	for _, host := range hosts {
+	if s.fingerprint == effectiveFingerprint && effectiveFingerprint != "" {
+		return false
+	}
+	next := make(map[string]v4model.SnapshotHost, len(effectiveHosts))
+	for _, host := range effectiveHosts {
 		next[host.Host] = host
 	}
 	s.hostsByName = next
-	s.fingerprint = snapshot.Fingerprint
+	s.fingerprint = effectiveFingerprint
+	return true
 }
 
 func (s *Service) refreshSnapshot(ctx context.Context) {
@@ -110,21 +145,28 @@ func (s *Service) refreshSnapshot(ctx context.Context) {
 		return
 	}
 
-	s.mu.RLock()
-	currentFingerprint := s.fingerprint
-	s.mu.RUnlock()
-	if currentFingerprint == snapshot.Fingerprint && currentFingerprint != "" {
+	if !s.ReplaceSnapshot(snapshot, hosts) {
 		return
 	}
-
-	s.ReplaceSnapshot(snapshot, hosts)
 	if s.logger != nil {
 		s.logger.Info("v4_runtime_snapshot_refreshed",
 			"event", "v4_runtime_snapshot_refreshed",
-			"fingerprint", snapshot.Fingerprint,
-			"host_count", len(hosts),
+			"fingerprint", s.currentFingerprint(),
+			"host_count", s.hostCount(),
 		)
 	}
+}
+
+func (s *Service) currentFingerprint() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.fingerprint
+}
+
+func (s *Service) hostCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.hostsByName)
 }
 
 func (s *Service) Resolve(ctx context.Context, req *http.Request) Resolution {

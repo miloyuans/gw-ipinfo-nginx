@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
-	"sort"
 	"strings"
 	"time"
 
@@ -270,8 +269,6 @@ func (s *Service) SyncOnce(ctx context.Context) error {
 }
 
 func (s *Service) loadExplicitRoutes() ([]config.V4OverrideConfig, error) {
-	routes := make([]config.V4OverrideConfig, 0)
-
 	if len(s.cfg.Overrides) > 0 {
 		if !s.legacyWarned && s.logger != nil {
 			s.logger.Warn("v4_overrides_deprecated",
@@ -281,89 +278,12 @@ func (s *Service) loadExplicitRoutes() ([]config.V4OverrideConfig, error) {
 			)
 		}
 		s.legacyWarned = true
-		routes = append(routes, s.cfg.Overrides...)
 	}
-
-	if !s.routeFile.Enabled {
-		return routes, nil
-	}
-
-	fileEntries, err := loadRouteFile(s.baseConfigPath, s.routeFile.ConfigPath)
-	if err != nil {
-		return nil, err
-	}
-	routes = append(routes, fileEntries...)
-	return routes, nil
+	return LoadEffectiveOverrides(s.baseConfigPath, s.cfg, s.routeFile)
 }
 
 func (s *Service) compileHosts(autoHosts []string, overrides []config.V4OverrideConfig) ([]v4model.SnapshotHost, error) {
-	byHost := make(map[string]v4model.SnapshotHost)
-	now := time.Now().UTC()
-
-	for _, host := range autoHosts {
-		byHost[host] = v4model.SnapshotHost{
-			ID:                    host,
-			SnapshotID:            "last_good",
-			Host:                  host,
-			Source:                "auto",
-			BackendService:        s.cfg.Passthrough.Service,
-			BackendHost:           host,
-			SecurityChecksEnabled: s.cfg.Security.SecurityChecksEnabled,
-			IPEnrichmentMode:      s.cfg.IPEnrichment.Mode,
-			UpdatedAt:             now,
-		}
-	}
-
-	for _, override := range overrides {
-		host, err := normalizeV4Host(override.Host)
-		if err != nil {
-			return nil, err
-		}
-		if !override.Enabled {
-			delete(byHost, host)
-			continue
-		}
-
-		entry, ok := byHost[host]
-		if !ok {
-			entry = v4model.SnapshotHost{
-				ID:         host,
-				SnapshotID: "last_good",
-				Host:       host,
-				Source:     "route_file",
-				UpdatedAt:  now,
-			}
-		}
-
-		backendService := firstNonEmpty(strings.TrimSpace(override.BackendService), entry.BackendService, s.cfg.Passthrough.Service)
-		if _, ok := s.serviceNames[backendService]; !ok {
-			return nil, fmt.Errorf("v4 backend service %q for host %q is not present in routing.services", backendService, host)
-		}
-		entry.BackendService = backendService
-
-		backendHost := firstNonEmpty(strings.ToLower(strings.TrimSpace(override.BackendHost)), entry.BackendHost, host)
-		normalizedBackendHost, err := normalizeV4Host(backendHost)
-		if err != nil {
-			return nil, fmt.Errorf("invalid v4 backend host for %q: %w", host, err)
-		}
-		entry.BackendHost = normalizedBackendHost
-
-		if override.SecurityChecksEnabled != nil {
-			entry.SecurityChecksEnabled = *override.SecurityChecksEnabled
-		}
-		entry.IPEnrichmentMode = firstNonEmpty(override.IPEnrichmentMode, entry.IPEnrichmentMode, s.cfg.IPEnrichment.Mode)
-		entry.Probe = mergeProbe(s.cfg.ProbeDefaults, override.Probe)
-		entry.Source = "route_file"
-		entry.UpdatedAt = now
-		byHost[host] = entry
-	}
-
-	hosts := make([]v4model.SnapshotHost, 0, len(byHost))
-	for _, host := range byHost {
-		hosts = append(hosts, host)
-	}
-	sort.Slice(hosts, func(i, j int) bool { return hosts[i].Host < hosts[j].Host })
-	return hosts, nil
+	return BuildEffectiveHosts(BuildAutoHosts(autoHosts, s.cfg), s.cfg, overrides, s.serviceNames)
 }
 
 func (s *Service) recordSyncFailure(ctx context.Context, now time.Time, err error, metadata map[string]any) {

@@ -12,6 +12,7 @@ import (
 	"gw-ipinfo-nginx/internal/config"
 	v4model "gw-ipinfo-nginx/internal/v4/model"
 	"gw-ipinfo-nginx/internal/v4/repository"
+	v4snapshot "gw-ipinfo-nginx/internal/v4/snapshot"
 )
 
 type Result struct {
@@ -22,14 +23,31 @@ type Result struct {
 }
 
 type Service struct {
-	cfg       config.V4TelegramConfig
-	snapshots *repository.SnapshotRepository
-	states    *repository.RuntimeStateRepository
-	events    *repository.EventRepository
+	cfg            config.V4TelegramConfig
+	v4Cfg          config.V4Config
+	routeFile      config.RouteSetFileConfig
+	baseConfigPath string
+	serviceNames   map[string]struct{}
+	snapshots      *repository.SnapshotRepository
+	states         *repository.RuntimeStateRepository
+	events         *repository.EventRepository
 }
 
-func NewService(cfg config.V4TelegramConfig, snapshots *repository.SnapshotRepository, states *repository.RuntimeStateRepository, events *repository.EventRepository) *Service {
-	return &Service{cfg: cfg, snapshots: snapshots, states: states, events: events}
+func NewService(cfg config.V4TelegramConfig, v4Cfg config.V4Config, routeFile config.RouteSetFileConfig, baseConfigPath string, serviceNames []string, snapshots *repository.SnapshotRepository, states *repository.RuntimeStateRepository, events *repository.EventRepository) *Service {
+	names := make(map[string]struct{}, len(serviceNames))
+	for _, name := range serviceNames {
+		names[strings.TrimSpace(name)] = struct{}{}
+	}
+	return &Service{
+		cfg:            cfg,
+		v4Cfg:          v4Cfg,
+		routeFile:      routeFile,
+		baseConfigPath: baseConfigPath,
+		serviceNames:   names,
+		snapshots:      snapshots,
+		states:         states,
+		events:         events,
+	}
 }
 
 func (s *Service) BuildRoutesSummary(ctx context.Context) (Result, error) {
@@ -42,6 +60,12 @@ func (s *Service) BuildRoutesSummary(ctx context.Context) (Result, error) {
 		return Result{
 			SummaryHTML: buildNoSnapshotSummary(syncState),
 		}, nil
+	}
+	if overrides, overlayErr := v4snapshot.LoadEffectiveOverrides(s.baseConfigPath, s.v4Cfg, s.routeFile); overlayErr == nil {
+		if merged, err := v4snapshot.BuildEffectiveHosts(hosts, s.v4Cfg, overrides, s.serviceNames); err == nil {
+			hosts = merged
+			snapshot.HostCount = len(hosts)
+		}
 	}
 
 	states, err := s.states.List(ctx)
