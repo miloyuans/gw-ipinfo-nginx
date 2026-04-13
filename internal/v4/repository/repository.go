@@ -412,17 +412,27 @@ func (r *SnapshotRepository) replaceMongo(ctx context.Context, client *mongostor
 	if _, err := db.Collection(v4model.CollectionSnapshots).UpdateByID(child, lastGoodSnapshotID, bson.M{"$set": snapshot}, options.Update().SetUpsert(true)); err != nil {
 		return err
 	}
-	if _, err := db.Collection(v4model.CollectionSnapshotHosts).DeleteMany(child, bson.M{}); err != nil {
+	hostCollection := db.Collection(v4model.CollectionSnapshotHosts)
+	if len(hosts) == 0 {
+		_, err := hostCollection.DeleteMany(child, bson.M{})
 		return err
 	}
-	if len(hosts) == 0 {
-		return nil
-	}
-	docs := make([]any, 0, len(hosts))
+
+	models := make([]mongo.WriteModel, 0, len(hosts))
+	hostIDs := make([]string, 0, len(hosts))
 	for _, host := range hosts {
-		docs = append(docs, host)
+		hostIDs = append(hostIDs, host.Host)
+		models = append(models, mongo.NewReplaceOneModel().
+			SetFilter(bson.M{"_id": host.Host}).
+			SetReplacement(host).
+			SetUpsert(true))
 	}
-	_, err := db.Collection(v4model.CollectionSnapshotHosts).InsertMany(child, docs)
+	if len(models) > 0 {
+		if _, err := hostCollection.BulkWrite(child, models, options.BulkWrite().SetOrdered(false)); err != nil {
+			return err
+		}
+	}
+	_, err := hostCollection.DeleteMany(child, bson.M{"_id": bson.M{"$nin": hostIDs}})
 	return err
 }
 
