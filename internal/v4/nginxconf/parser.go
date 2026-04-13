@@ -159,10 +159,27 @@ func (p *Parser) parseFile(ctx context.Context, path string, seen map[string]str
 
 	scanner := bufio.NewScanner(file)
 	serverDepth := 0
+	pendingServerName := ""
 	dir := filepath.Dir(path)
 	for scanner.Scan() {
 		line := stripComment(scanner.Text())
 		if line == "" {
+			continue
+		}
+		if pendingServerName != "" {
+			pendingServerName = strings.TrimSpace(pendingServerName + " " + line)
+			if names, done := parseServerNamesDirective(pendingServerName); done {
+				for _, host := range names {
+					if normalized, ok := normalizeHost(host); ok {
+						seen[normalized] = struct{}{}
+					}
+				}
+				pendingServerName = ""
+			}
+			serverDepth += strings.Count(line, "{") - strings.Count(line, "}")
+			if serverDepth < 0 {
+				serverDepth = 0
+			}
 			continue
 		}
 		if includePath, ok := parseInclude(line); ok {
@@ -181,7 +198,17 @@ func (p *Parser) parseFile(ctx context.Context, path string, seen map[string]str
 			serverDepth++
 		}
 		if serverDepth > 0 {
-			if names, ok := parseServerNames(line); ok {
+			if strings.HasPrefix(strings.TrimSpace(line), "server_name") {
+				if names, done := parseServerNamesDirective(line); done {
+					for _, host := range names {
+						if normalized, ok := normalizeHost(host); ok {
+							seen[normalized] = struct{}{}
+						}
+					}
+				} else {
+					pendingServerName = line
+				}
+			} else if names, ok := parseServerNames(line); ok {
 				for _, host := range names {
 					if normalized, ok := normalizeHost(host); ok {
 						seen[normalized] = struct{}{}
@@ -227,6 +254,21 @@ func parseServerNames(line string) ([]string, bool) {
 	rest := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(line, "server_name"), ";"))
 	if rest == "" {
 		return nil, false
+	}
+	return strings.Fields(rest), true
+}
+
+func parseServerNamesDirective(line string) ([]string, bool) {
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, "server_name") {
+		return nil, false
+	}
+	if !strings.HasSuffix(line, ";") {
+		return nil, false
+	}
+	rest := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(line, "server_name"), ";"))
+	if rest == "" {
+		return nil, true
 	}
 	return strings.Fields(rest), true
 }

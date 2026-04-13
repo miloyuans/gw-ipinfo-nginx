@@ -741,7 +741,8 @@ func (s *Service) writeWorkspace(host v4model.SnapshotHost, discoveredURLs, fail
 	if path == "" {
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		if s.logger != nil {
 			s.logger.Warn("v4_probe_workspace_mkdir_error", "event", "v4_probe_workspace_mkdir_error", "host", host.Host, "path", path, "error", err)
 		}
@@ -763,15 +764,34 @@ func (s *Service) writeWorkspace(host v4model.SnapshotHost, discoveredURLs, fail
 	if err != nil {
 		return
 	}
-	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, raw, 0o644); err != nil {
+	tmpFile, err := os.CreateTemp(dir, filepath.Base(path)+".*.tmp")
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Warn("v4_probe_workspace_tempfile_error", "event", "v4_probe_workspace_tempfile_error", "host", host.Host, "path", path, "error", err)
+		}
+		return
+	}
+	tmpPath := tmpFile.Name()
+	if _, err := tmpFile.Write(raw); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
 		if s.logger != nil {
 			s.logger.Warn("v4_probe_workspace_write_error", "event", "v4_probe_workspace_write_error", "host", host.Host, "path", path, "error", err)
 		}
 		return
 	}
-	if err := os.Rename(tmpPath, path); err != nil && s.logger != nil {
-		s.logger.Warn("v4_probe_workspace_rename_error", "event", "v4_probe_workspace_rename_error", "host", host.Host, "path", path, "error", err)
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		if s.logger != nil {
+			s.logger.Warn("v4_probe_workspace_close_error", "event", "v4_probe_workspace_close_error", "host", host.Host, "path", path, "error", err)
+		}
+		return
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		if s.logger != nil {
+			s.logger.Warn("v4_probe_workspace_rename_error", "event", "v4_probe_workspace_rename_error", "host", host.Host, "path", path, "error", err)
+		}
 	}
 }
 
