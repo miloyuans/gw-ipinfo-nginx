@@ -2,9 +2,7 @@ package repository
 
 import (
 	"context"
-	"crypto/sha1"
 	"encoding/json"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -378,22 +376,16 @@ func selectSnapshotHosts(snapshot v4model.Snapshot, hostsMap map[string]v4model.
 		return nil
 	}
 	version := strings.TrimSpace(snapshot.Version)
+	if version == "" {
+		return nil
+	}
 	hosts := make([]v4model.SnapshotHost, 0, len(hostsMap))
-	if version != "" {
-		for _, host := range hostsMap {
-			if strings.TrimSpace(host.SnapshotID) == version {
-				hosts = append(hosts, host)
-			}
-		}
-		if len(hosts) > 0 {
-			return hosts
-		}
-	}
-	legacyHosts := make([]v4model.SnapshotHost, 0, len(hostsMap))
 	for _, host := range hostsMap {
-		legacyHosts = append(legacyHosts, host)
+		if strings.TrimSpace(host.SnapshotID) == version {
+			hosts = append(hosts, host)
+		}
 	}
-	return legacyHosts
+	return hosts
 }
 
 func (r *SnapshotRepository) loadSyncStateLocal(ctx context.Context) (v4model.SyncState, bool, error) {
@@ -492,7 +484,12 @@ func (r *SnapshotRepository) replaceMongo(ctx context.Context, client *mongostor
 	child, cancel := client.WithTimeout(ctx)
 	defer cancel()
 	db := client.Database()
-	if _, err := db.Collection(v4model.CollectionSnapshots).UpdateByID(child, lastGoodSnapshotID, bson.M{"$set": snapshot}, options.Update().SetUpsert(true)); err != nil {
+	if _, err := db.Collection(v4model.CollectionSnapshots).ReplaceOne(
+		child,
+		bson.M{"_id": lastGoodSnapshotID},
+		snapshot,
+		options.Replace().SetUpsert(true),
+	); err != nil {
 		return err
 	}
 	hostCollection := db.Collection(v4model.CollectionSnapshotHosts)
@@ -538,11 +535,11 @@ func (r *SnapshotRepository) replaceMongo(ctx context.Context, client *mongostor
 func (r *SnapshotRepository) upsertSyncStateMongo(ctx context.Context, client *mongostore.Client, state v4model.SyncState) error {
 	child, cancel := client.WithTimeout(ctx)
 	defer cancel()
-	_, err := client.Database().Collection(v4model.CollectionSnapshots).UpdateByID(
+	_, err := client.Database().Collection(v4model.CollectionSnapshots).ReplaceOne(
 		child,
-		v4model.SyncStateID,
-		bson.M{"$set": state},
-		options.Update().SetUpsert(true),
+		bson.M{"_id": v4model.SyncStateID},
+		state,
+		options.Replace().SetUpsert(true),
 	)
 	return err
 }
@@ -780,36 +777,29 @@ func stampSnapshotHosts(snapshot v4model.Snapshot, hosts []v4model.SnapshotHost)
 }
 
 func (r *SnapshotRepository) findMongoSnapshotHosts(ctx context.Context, hostCollection *mongo.Collection, version string) ([]v4model.SnapshotHost, error) {
-	queries := []bson.M{}
 	version = strings.TrimSpace(version)
-	if version != "" {
-		queries = append(queries, bson.M{"snapshot_id": version})
+	if version == "" {
+		return nil, nil
 	}
-	queries = append(queries, bson.M{})
-	for idx, query := range queries {
-		cursor, err := hostCollection.Find(ctx, query)
-		if err != nil {
-			return nil, err
-		}
-		hosts := make([]v4model.SnapshotHost, 0)
-		for cursor.Next(ctx) {
-			var host v4model.SnapshotHost
-			if err := cursor.Decode(&host); err != nil {
-				_ = cursor.Close(ctx)
-				return nil, err
-			}
-			hosts = append(hosts, host)
-		}
-		if err := cursor.Err(); err != nil {
+	cursor, err := hostCollection.Find(ctx, bson.M{"snapshot_id": version})
+	if err != nil {
+		return nil, err
+	}
+	hosts := make([]v4model.SnapshotHost, 0)
+	for cursor.Next(ctx) {
+		var host v4model.SnapshotHost
+		if err := cursor.Decode(&host); err != nil {
 			_ = cursor.Close(ctx)
 			return nil, err
 		}
-		_ = cursor.Close(ctx)
-		if len(hosts) > 0 || idx == len(queries)-1 {
-			return hosts, nil
-		}
+		hosts = append(hosts, host)
 	}
-	return nil, nil
+	if err := cursor.Err(); err != nil {
+		_ = cursor.Close(ctx)
+		return nil, err
+	}
+	_ = cursor.Close(ctx)
+	return hosts, nil
 }
 
 func (r *SnapshotRepository) validateLoadedSnapshot(source string, snapshot v4model.Snapshot, hosts []v4model.SnapshotHost) (bool, error) {
@@ -843,35 +833,5 @@ func (r *SnapshotRepository) logSnapshotInvalid(source string, snapshot v4model.
 }
 
 func snapshotHostFingerprint(hosts []v4model.SnapshotHost) string {
-	if len(hosts) == 0 {
-		return ""
-	}
-	parts := make([]string, 0, len(hosts))
-	for _, host := range hosts {
-		parts = append(parts, strings.Join([]string{
-			host.Host,
-			host.Source,
-			host.BackendService,
-			host.BackendHost,
-			host.IPEnrichmentMode,
-			fmt.Sprintf("%t", host.SecurityChecksEnabled),
-			fmt.Sprintf("%t", host.Probe.Enabled),
-			host.Probe.Mode,
-			host.Probe.URL,
-			strings.Join(host.Probe.HTMLPaths, ","),
-			strings.Join(host.Probe.JSPaths, ","),
-			host.Probe.LinkURL,
-			strings.Join(host.Probe.RedirectURLs, ","),
-			strings.Join(host.Probe.Patterns, ","),
-			fmt.Sprint(host.Probe.UnhealthyStatusCodes),
-			host.Probe.Interval.String(),
-			host.Probe.Timeout.String(),
-			fmt.Sprint(host.Probe.HealthyThreshold),
-			fmt.Sprint(host.Probe.UnhealthyThreshold),
-			host.Probe.MinSwitchInterval.String(),
-		}, "|"))
-	}
-	sort.Strings(parts)
-	sum := sha1.Sum([]byte(strings.Join(parts, "\n")))
-	return hex.EncodeToString(sum[:])
+	return v4model.CanonicalSnapshotFingerprint(hosts)
 }

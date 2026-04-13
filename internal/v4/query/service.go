@@ -221,6 +221,9 @@ func buildHTMLDocument(snapshot v4model.Snapshot, syncView syncView, hosts []v4m
 
 func buildNoSnapshotSummary(syncState v4model.SyncState) string {
 	view := buildSyncView(v4model.Snapshot{}, syncState, nil)
+	if view.Status == "success" {
+		view.Status = "rebuilding"
+	}
 	lines := []string{
 		"当前没有可用的 v4 路由快照。",
 		"No v4 snapshot is available.",

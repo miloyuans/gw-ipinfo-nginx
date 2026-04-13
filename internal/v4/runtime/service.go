@@ -4,7 +4,6 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -97,7 +96,7 @@ func (s *Service) ReplaceSnapshot(snapshot v4model.Snapshot, hosts []v4model.Sna
 }
 
 func (s *Service) replaceSnapshot(snapshot v4model.Snapshot, hosts []v4model.SnapshotHost) bool {
-	effectiveFingerprint := snapshotFingerprint(hosts)
+	effectiveFingerprint := v4model.CanonicalSnapshotFingerprint(hosts)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if isOlderSnapshot(snapshot, s.snapshotUpdatedAt, s.snapshotVersion) {
@@ -301,53 +300,6 @@ func switchAllowed(lastSwitchAt, now time.Time, interval time.Duration) bool {
 		return true
 	}
 	return !lastSwitchAt.Add(interval).After(now)
-}
-
-func snapshotFingerprint(hosts []v4model.SnapshotHost) string {
-	parts := make([]string, 0, len(hosts))
-	for _, host := range hosts {
-		parts = append(parts, strings.Join([]string{
-			host.Host,
-			host.Source,
-			host.BackendService,
-			host.BackendHost,
-			host.IPEnrichmentMode,
-			boolString(host.SecurityChecksEnabled),
-			boolString(host.Probe.Enabled),
-			host.Probe.Mode,
-			host.Probe.URL,
-			strings.Join(host.Probe.HTMLPaths, ","),
-			strings.Join(host.Probe.JSPaths, ","),
-			host.Probe.LinkURL,
-			strings.Join(host.Probe.RedirectURLs, ","),
-			strings.Join(host.Probe.Patterns, ","),
-			strings.Join(intStrings(host.Probe.UnhealthyStatusCodes), ","),
-			host.Probe.Interval.String(),
-			host.Probe.Timeout.String(),
-			strconv.Itoa(host.Probe.HealthyThreshold),
-			strconv.Itoa(host.Probe.UnhealthyThreshold),
-			host.Probe.MinSwitchInterval.String(),
-		}, "|"))
-	}
-	return strings.Join(parts, "\n")
-}
-
-func boolString(value bool) string {
-	if value {
-		return "true"
-	}
-	return "false"
-}
-
-func intStrings(values []int) []string {
-	if len(values) == 0 {
-		return nil
-	}
-	result := make([]string, 0, len(values))
-	for _, value := range values {
-		result = append(result, strconv.Itoa(value))
-	}
-	return result
 }
 
 func normalizeStateForHost(host v4model.SnapshotHost, state v4model.HostRuntimeState) v4model.HostRuntimeState {

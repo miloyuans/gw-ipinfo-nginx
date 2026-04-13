@@ -2,8 +2,6 @@ package snapshot
 
 import (
 	"context"
-	"crypto/sha1"
-	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -201,8 +199,15 @@ func (s *Service) SyncOnce(ctx context.Context) error {
 		)
 	}
 
-	fingerprint := snapshotFingerprint(snapshotHosts)
+	fingerprint := v4model.CanonicalSnapshotFingerprint(snapshotHosts)
 	current, _, found, _ := s.repo.LoadLatest(ctx)
+	if !found && s.logger != nil {
+		s.logger.Info("v4_snapshot_bootstrap_rebuild",
+			"event", "v4_snapshot_bootstrap_rebuild",
+			"instance_id", s.instanceID,
+			"reason", "missing_or_incompatible_history",
+		)
+	}
 	if found && current.Fingerprint == fingerprint {
 		_ = s.repo.UpsertSyncState(ctx, v4model.SyncState{
 			ID:                  v4model.SyncStateID,
@@ -432,36 +437,6 @@ func mergeProbe(defaults config.V4ProbeDefaultsConfig, probe config.V4ProbeConfi
 		UnhealthyThreshold: firstInt(probe.UnhealthyThreshold, defaults.UnhealthyThreshold),
 		MinSwitchInterval:  firstDuration(probe.MinSwitchInterval, defaults.MinSwitchInterval),
 	}
-}
-
-func snapshotFingerprint(hosts []v4model.SnapshotHost) string {
-	parts := make([]string, 0, len(hosts))
-	for _, host := range hosts {
-		parts = append(parts, strings.Join([]string{
-			host.Host,
-			host.Source,
-			host.BackendService,
-			host.BackendHost,
-			host.IPEnrichmentMode,
-			fmt.Sprintf("%t", host.SecurityChecksEnabled),
-			fmt.Sprintf("%t", host.Probe.Enabled),
-			host.Probe.Mode,
-			host.Probe.URL,
-			strings.Join(host.Probe.HTMLPaths, ","),
-			strings.Join(host.Probe.JSPaths, ","),
-			host.Probe.LinkURL,
-			strings.Join(host.Probe.RedirectURLs, ","),
-			strings.Join(host.Probe.Patterns, ","),
-			fmt.Sprint(host.Probe.UnhealthyStatusCodes),
-			host.Probe.Interval.String(),
-			host.Probe.Timeout.String(),
-			fmt.Sprint(host.Probe.HealthyThreshold),
-			fmt.Sprint(host.Probe.UnhealthyThreshold),
-			host.Probe.MinSwitchInterval.String(),
-		}, "|"))
-	}
-	sum := sha1.Sum([]byte(strings.Join(parts, "\n")))
-	return hex.EncodeToString(sum[:])
 }
 
 func firstNonEmpty(values ...string) string {
