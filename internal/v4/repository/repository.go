@@ -2,7 +2,9 @@ package repository
 
 import (
 	"context"
+	"crypto/sha1"
 	"encoding/json"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -870,5 +872,6 @@ func snapshotHostFingerprint(hosts []v4model.SnapshotHost) string {
 		}, "|"))
 	}
 	sort.Strings(parts)
-	return strings.Join(parts, "\n")
+	sum := sha1.Sum([]byte(strings.Join(parts, "\n")))
+	return hex.EncodeToString(sum[:])
 }
