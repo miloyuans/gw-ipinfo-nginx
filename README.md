@@ -1,5 +1,10 @@
 # gw-ipinfo-nginx
 
+完整中文使用文档：
+
+- [docs/usage.zh-CN.md](./docs/usage.zh-CN.md)
+- [docs/config-reference.zh-CN.md](./docs/config-reference.zh-CN.md)
+
 `gw-ipinfo-nginx` 是一个 Go 网关服务。它先从请求头中提取真实公网客户端 IP，再执行请求级规则、IPinfo、Geo、Privacy 和短路缓存判定；放行后反向代理到配置好的 nginx 入口，未通过时返回固定静态拦截页。
 
 当前主线版本重点补齐了：
