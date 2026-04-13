@@ -4,14 +4,14 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"gw-ipinfo-nginx/internal/config"
-	"gw-ipinfo-nginx/internal/v4/repository"
-	v4snapshot "gw-ipinfo-nginx/internal/v4/snapshot"
 	v4model "gw-ipinfo-nginx/internal/v4/model"
+	"gw-ipinfo-nginx/internal/v4/repository"
 )
 
 type Resolution struct {
@@ -91,33 +91,14 @@ func (s *Service) Run(ctx context.Context) {
 }
 
 func (s *Service) ReplaceSnapshot(_ v4model.Snapshot, hosts []v4model.SnapshotHost) bool {
-	effectiveHosts := hosts
-	if overrides, err := v4snapshot.LoadEffectiveOverrides(s.baseConfigPath, s.cfg, s.routeFile); err != nil {
-		if s.logger != nil {
-			s.logger.Warn("v4_runtime_local_override_load_error",
-				"event", "v4_runtime_local_override_load_error",
-				"error", err,
-			)
-		}
-	} else if merged, err := v4snapshot.BuildEffectiveHosts(hosts, s.cfg, overrides, s.serviceNames); err != nil {
-		if s.logger != nil {
-			s.logger.Warn("v4_runtime_local_override_apply_error",
-				"event", "v4_runtime_local_override_apply_error",
-				"error", err,
-			)
-		}
-	} else {
-		effectiveHosts = merged
-	}
-
-	effectiveFingerprint := v4snapshot.HostsFingerprint(effectiveHosts)
+	effectiveFingerprint := snapshotFingerprint(hosts)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.fingerprint == effectiveFingerprint && effectiveFingerprint != "" {
 		return false
 	}
-	next := make(map[string]v4model.SnapshotHost, len(effectiveHosts))
-	for _, host := range effectiveHosts {
+	next := make(map[string]v4model.SnapshotHost, len(hosts))
+	for _, host := range hosts {
 		next[host.Host] = host
 	}
 	s.hostsByName = next
@@ -295,4 +276,51 @@ func switchAllowed(lastSwitchAt, now time.Time, interval time.Duration) bool {
 		return true
 	}
 	return !lastSwitchAt.Add(interval).After(now)
+}
+
+func snapshotFingerprint(hosts []v4model.SnapshotHost) string {
+	parts := make([]string, 0, len(hosts))
+	for _, host := range hosts {
+		parts = append(parts, strings.Join([]string{
+			host.Host,
+			host.Source,
+			host.BackendService,
+			host.BackendHost,
+			host.IPEnrichmentMode,
+			boolString(host.SecurityChecksEnabled),
+			boolString(host.Probe.Enabled),
+			host.Probe.Mode,
+			host.Probe.URL,
+			strings.Join(host.Probe.HTMLPaths, ","),
+			strings.Join(host.Probe.JSPaths, ","),
+			host.Probe.LinkURL,
+			strings.Join(host.Probe.RedirectURLs, ","),
+			strings.Join(host.Probe.Patterns, ","),
+			strings.Join(intStrings(host.Probe.UnhealthyStatusCodes), ","),
+			host.Probe.Interval.String(),
+			host.Probe.Timeout.String(),
+			strconv.Itoa(host.Probe.HealthyThreshold),
+			strconv.Itoa(host.Probe.UnhealthyThreshold),
+			host.Probe.MinSwitchInterval.String(),
+		}, "|"))
+	}
+	return strings.Join(parts, "\n")
+}
+
+func boolString(value bool) string {
+	if value {
+		return "true"
+	}
+	return "false"
+}
+
+func intStrings(values []int) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		result = append(result, strconv.Itoa(value))
+	}
+	return result
 }

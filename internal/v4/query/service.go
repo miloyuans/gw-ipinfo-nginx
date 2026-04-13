@@ -12,7 +12,6 @@ import (
 	"gw-ipinfo-nginx/internal/config"
 	v4model "gw-ipinfo-nginx/internal/v4/model"
 	"gw-ipinfo-nginx/internal/v4/repository"
-	v4snapshot "gw-ipinfo-nginx/internal/v4/snapshot"
 )
 
 type Result struct {
@@ -60,12 +59,6 @@ func (s *Service) BuildRoutesSummary(ctx context.Context) (Result, error) {
 		return Result{
 			SummaryHTML: buildNoSnapshotSummary(syncState),
 		}, nil
-	}
-	if overrides, overlayErr := v4snapshot.LoadEffectiveOverrides(s.baseConfigPath, s.v4Cfg, s.routeFile); overlayErr == nil {
-		if merged, err := v4snapshot.BuildEffectiveHosts(hosts, s.v4Cfg, overrides, s.serviceNames); err == nil {
-			hosts = merged
-			snapshot.HostCount = len(hosts)
-		}
 	}
 
 	states, err := s.states.List(ctx)
