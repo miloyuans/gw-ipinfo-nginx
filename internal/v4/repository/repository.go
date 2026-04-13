@@ -80,9 +80,13 @@ func (r *SnapshotRepository) LoadLatest(ctx context.Context) (v4model.Snapshot, 
 	if client := r.controller.Client(); client != nil && r.controller.Mode() != storage.ModeLocal {
 		snapshot, hosts, found, err := r.loadLatestMongo(ctx, client)
 		if err == nil {
-			mongoSnapshot = snapshot
-			mongoHosts = hosts
-			mongoFound = found
+			if valid, validationErr := r.validateLoadedSnapshot("mongo", snapshot, hosts); valid {
+				mongoSnapshot = snapshot
+				mongoHosts = hosts
+				mongoFound = found
+			} else if validationErr != nil {
+				r.logSnapshotInvalid("mongo", snapshot, validationErr)
+			}
 		} else {
 			r.controller.HandleMongoError(err)
 		}
@@ -93,6 +97,15 @@ func (r *SnapshotRepository) LoadLatest(ctx context.Context) (v4model.Snapshot, 
 			return mongoSnapshot, mongoHosts, true, nil
 		}
 		return v4model.Snapshot{}, nil, false, localErr
+	}
+	if valid, validationErr := r.validateLoadedSnapshot("localdisk", localSnapshot, localHosts); !valid {
+		invalidSnapshot := localSnapshot
+		localSnapshot = v4model.Snapshot{}
+		localHosts = nil
+		localFound = false
+		if validationErr != nil {
+			r.logSnapshotInvalid("localdisk", invalidSnapshot, validationErr)
+		}
 	}
 	if mongoFound && localFound {
 		if newerSnapshot(localSnapshot, mongoSnapshot) {
@@ -141,13 +154,14 @@ func (r *SnapshotRepository) LoadSyncState(ctx context.Context) (v4model.SyncSta
 
 func (r *SnapshotRepository) ReplaceLastGood(ctx context.Context, snapshot v4model.Snapshot, hosts []v4model.SnapshotHost) error {
 	snapshot.ID = lastGoodSnapshotID
-	if err := r.replaceLocal(ctx, snapshot, hosts); err != nil {
+	stampedHosts := stampSnapshotHosts(snapshot, hosts)
+	if err := r.replaceLocal(ctx, snapshot, stampedHosts); err != nil {
 		return err
 	}
 	if client := r.controller.Client(); client != nil && r.controller.Mode() != storage.ModeLocal {
-		if err := r.replaceMongo(ctx, client, snapshot, hosts); err == nil {
+		if err := r.replaceMongo(ctx, client, snapshot, stampedHosts); err == nil {
 			_ = r.controller.Local().ClearDirty(ctx, localdisk.BucketV4SnapshotsDirty, lastGoodSnapshotID)
-			for _, host := range hosts {
+			for _, host := range stampedHosts {
 				_ = r.controller.Local().ClearDirty(ctx, localdisk.BucketV4SnapshotHostsDirty, host.Host)
 			}
 			return nil
@@ -180,14 +194,15 @@ func (r *SnapshotRepository) Replay(ctx context.Context, client *mongostore.Clie
 	if err != nil || !found {
 		return 0, err
 	}
-	if err := r.replaceMongo(ctx, client, snapshot, hosts); err != nil {
+	stampedHosts := stampSnapshotHosts(snapshot, hosts)
+	if err := r.replaceMongo(ctx, client, snapshot, stampedHosts); err != nil {
 		return 0, err
 	}
 	_ = r.controller.Local().ClearDirty(ctx, localdisk.BucketV4SnapshotsDirty, lastGoodSnapshotID)
-	for _, host := range hosts {
+	for _, host := range stampedHosts {
 		_ = r.controller.Local().ClearDirty(ctx, localdisk.BucketV4SnapshotHostsDirty, host.Host)
 	}
-	return len(hosts) + 1, nil
+	return len(stampedHosts) + 1, nil
 }
 
 func (r *RuntimeStateRepository) Get(ctx context.Context, host string) (v4model.HostRuntimeState, bool, error) {
@@ -345,12 +360,38 @@ func (r *SnapshotRepository) loadLatestLocal(ctx context.Context) (v4model.Snaps
 	}); err != nil {
 		return v4model.Snapshot{}, nil, false, err
 	}
-	hosts := make([]v4model.SnapshotHost, 0, len(hostsMap))
-	for _, host := range hostsMap {
-		hosts = append(hosts, host)
+	hosts := selectSnapshotHosts(snapshot, hostsMap)
+	if len(hosts) == 0 && len(hostsMap) > 0 {
+		hosts = make([]v4model.SnapshotHost, 0, len(hostsMap))
+		for _, host := range hostsMap {
+			hosts = append(hosts, host)
+		}
 	}
 	sort.Slice(hosts, func(i, j int) bool { return hosts[i].Host < hosts[j].Host })
 	return snapshot, hosts, true, nil
+}
+
+func selectSnapshotHosts(snapshot v4model.Snapshot, hostsMap map[string]v4model.SnapshotHost) []v4model.SnapshotHost {
+	if len(hostsMap) == 0 {
+		return nil
+	}
+	version := strings.TrimSpace(snapshot.Version)
+	hosts := make([]v4model.SnapshotHost, 0, len(hostsMap))
+	if version != "" {
+		for _, host := range hostsMap {
+			if strings.TrimSpace(host.SnapshotID) == version {
+				hosts = append(hosts, host)
+			}
+		}
+		if len(hosts) > 0 {
+			return hosts
+		}
+	}
+	legacyHosts := make([]v4model.SnapshotHost, 0, len(hostsMap))
+	for _, host := range hostsMap {
+		legacyHosts = append(legacyHosts, host)
+	}
+	return legacyHosts
 }
 
 func (r *SnapshotRepository) loadSyncStateLocal(ctx context.Context) (v4model.SyncState, bool, error) {
@@ -421,22 +462,13 @@ func (r *SnapshotRepository) loadLatestMongo(ctx context.Context, client *mongos
 		}
 		return v4model.Snapshot{}, nil, false, err
 	}
-	cursor, err := client.Database().Collection(v4model.CollectionSnapshotHosts).Find(child, bson.M{})
+	hostCollection := client.Database().Collection(v4model.CollectionSnapshotHosts)
+	hosts, err := r.findMongoSnapshotHosts(child, hostCollection, snapshot.Version)
 	if err != nil {
 		return v4model.Snapshot{}, nil, false, err
 	}
-	defer cursor.Close(child)
-
-	hosts := make([]v4model.SnapshotHost, 0)
-	for cursor.Next(child) {
-		var host v4model.SnapshotHost
-		if err := cursor.Decode(&host); err != nil {
-			return v4model.Snapshot{}, nil, false, err
-		}
-		hosts = append(hosts, host)
-	}
 	sort.Slice(hosts, func(i, j int) bool { return hosts[i].Host < hosts[j].Host })
-	return snapshot, hosts, true, cursor.Err()
+	return snapshot, hosts, true, nil
 }
 
 func (r *SnapshotRepository) loadSyncStateMongo(ctx context.Context, client *mongostore.Client) (v4model.SyncState, bool, error) {
@@ -482,7 +514,23 @@ func (r *SnapshotRepository) replaceMongo(ctx context.Context, client *mongostor
 		}
 	}
 	_, err := hostCollection.DeleteMany(child, bson.M{"_id": bson.M{"$nin": hostIDs}})
-	return err
+	if err != nil {
+		return err
+	}
+	verifiedSnapshot, verifiedHosts, found, verifyErr := r.loadLatestMongo(ctx, client)
+	if verifyErr != nil {
+		return verifyErr
+	}
+	if !found {
+		return errors.New("v4 snapshot verification failed: snapshot not found after mongo replace")
+	}
+	if valid, validationErr := r.validateLoadedSnapshot("mongo", verifiedSnapshot, verifiedHosts); !valid {
+		if validationErr != nil {
+			return validationErr
+		}
+		return errors.New("v4 snapshot verification failed: persisted mongo snapshot is inconsistent")
+	}
+	return nil
 }
 
 func (r *SnapshotRepository) upsertSyncStateMongo(ctx context.Context, client *mongostore.Client, state v4model.SyncState) error {
@@ -708,4 +756,119 @@ func maxTime(values ...time.Time) time.Time {
 		}
 	}
 	return latest
+}
+
+func stampSnapshotHosts(snapshot v4model.Snapshot, hosts []v4model.SnapshotHost) []v4model.SnapshotHost {
+	if len(hosts) == 0 {
+		return nil
+	}
+	version := strings.TrimSpace(snapshot.Version)
+	stamped := make([]v4model.SnapshotHost, 0, len(hosts))
+	for _, host := range hosts {
+		host.ID = strings.TrimSpace(host.Host)
+		if host.ID == "" {
+			host.ID = strings.TrimSpace(host.Host)
+		}
+		if version != "" {
+			host.SnapshotID = version
+		}
+		stamped = append(stamped, host)
+	}
+	return stamped
+}
+
+func (r *SnapshotRepository) findMongoSnapshotHosts(ctx context.Context, hostCollection *mongo.Collection, version string) ([]v4model.SnapshotHost, error) {
+	queries := []bson.M{}
+	version = strings.TrimSpace(version)
+	if version != "" {
+		queries = append(queries, bson.M{"snapshot_id": version})
+	}
+	queries = append(queries, bson.M{})
+	for idx, query := range queries {
+		cursor, err := hostCollection.Find(ctx, query)
+		if err != nil {
+			return nil, err
+		}
+		hosts := make([]v4model.SnapshotHost, 0)
+		for cursor.Next(ctx) {
+			var host v4model.SnapshotHost
+			if err := cursor.Decode(&host); err != nil {
+				_ = cursor.Close(ctx)
+				return nil, err
+			}
+			hosts = append(hosts, host)
+		}
+		if err := cursor.Err(); err != nil {
+			_ = cursor.Close(ctx)
+			return nil, err
+		}
+		_ = cursor.Close(ctx)
+		if len(hosts) > 0 || idx == len(queries)-1 {
+			return hosts, nil
+		}
+	}
+	return nil, nil
+}
+
+func (r *SnapshotRepository) validateLoadedSnapshot(source string, snapshot v4model.Snapshot, hosts []v4model.SnapshotHost) (bool, error) {
+	if strings.TrimSpace(snapshot.ID) == "" && strings.TrimSpace(snapshot.Version) == "" && len(hosts) == 0 {
+		return false, nil
+	}
+	if snapshot.HostCount > 0 && len(hosts) == 0 {
+		return false, fmt.Errorf("v4 snapshot %s is missing hosts for version %s", source, strings.TrimSpace(snapshot.Version))
+	}
+	if snapshot.HostCount > 0 && len(hosts) != snapshot.HostCount {
+		return false, fmt.Errorf("v4 snapshot %s host_count mismatch: snapshot=%d loaded=%d version=%s", source, snapshot.HostCount, len(hosts), strings.TrimSpace(snapshot.Version))
+	}
+	computed := snapshotHostFingerprint(hosts)
+	if strings.TrimSpace(snapshot.Fingerprint) != "" && computed != strings.TrimSpace(snapshot.Fingerprint) {
+		return false, fmt.Errorf("v4 snapshot %s fingerprint mismatch: snapshot=%s loaded=%s version=%s", source, strings.TrimSpace(snapshot.Fingerprint), computed, strings.TrimSpace(snapshot.Version))
+	}
+	return true, nil
+}
+
+func (r *SnapshotRepository) logSnapshotInvalid(source string, snapshot v4model.Snapshot, err error) {
+	if r == nil || r.logger == nil || err == nil {
+		return
+	}
+	r.logger.Warn("v4_snapshot_source_invalid",
+		"event", "v4_snapshot_source_invalid",
+		"source", source,
+		"version", strings.TrimSpace(snapshot.Version),
+		"fingerprint", strings.TrimSpace(snapshot.Fingerprint),
+		"error", err,
+	)
+}
+
+func snapshotHostFingerprint(hosts []v4model.SnapshotHost) string {
+	if len(hosts) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(hosts))
+	for _, host := range hosts {
+		parts = append(parts, strings.Join([]string{
+			host.Host,
+			host.Source,
+			host.BackendService,
+			host.BackendHost,
+			host.IPEnrichmentMode,
+			fmt.Sprintf("%t", host.SecurityChecksEnabled),
+			fmt.Sprintf("%t", host.Probe.Enabled),
+			host.Probe.Mode,
+			host.Probe.URL,
+			strings.Join(host.Probe.HTMLPaths, ","),
+			strings.Join(host.Probe.JSPaths, ","),
+			host.Probe.LinkURL,
+			strings.Join(host.Probe.RedirectURLs, ","),
+			strings.Join(host.Probe.Patterns, ","),
+			fmt.Sprint(host.Probe.UnhealthyStatusCodes),
+			host.Probe.Interval.String(),
+			host.Probe.Timeout.String(),
+			fmt.Sprint(host.Probe.HealthyThreshold),
+			fmt.Sprint(host.Probe.UnhealthyThreshold),
+			host.Probe.MinSwitchInterval.String(),
+		}, "|"))
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, "\n")
 }
