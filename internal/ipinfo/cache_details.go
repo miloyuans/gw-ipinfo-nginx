@@ -27,14 +27,14 @@ func decodeLookupDetails(raw string) (LookupDetails, bool) {
 		return LookupDetails{}, false
 	}
 
-	return details, true
+	return normalizeLookupDetails(details), true
 }
 
 func detailsFromEntry(entry cache.Entry) LookupDetails {
 	if details, ok := decodeLookupDetails(entry.DetailsJSON); ok {
 		return details
 	}
-	return DetailsFromContext(entry.IPContext)
+	return normalizeLookupDetails(DetailsFromContext(entry.IPContext))
 }
 
 func hasLookupDetails(entry cache.Entry) bool {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"time"
@@ -33,6 +34,9 @@ type LookupDetails struct {
 	Anonymous   *LookupAnonymous   `json:"anonymous,omitempty"`
 	IsAnonymous bool               `json:"is_anonymous"`
 	IsAnycast   bool               `json:"is_anycast"`
+	IsBogon     bool               `json:"is_bogon"`
+	IsSpecialIP bool               `json:"is_special_ip"`
+	SpecialNote string             `json:"special_note,omitempty"`
 	IsHosting   bool               `json:"is_hosting"`
 	IsMobile    bool               `json:"is_mobile"`
 	IsSatellite bool               `json:"is_satellite"`
@@ -229,6 +233,8 @@ type response struct {
 	Anonymous        anonymousResponse `json:"anonymous"`
 	IsAnonymous      bool              `json:"is_anonymous"`
 	IsAnycast        bool              `json:"is_anycast"`
+	Bogon            bool              `json:"bogon"`
+	IsBogon          bool              `json:"is_bogon"`
 	IsHosting        bool              `json:"is_hosting"`
 	IsMobile         bool              `json:"is_mobile"`
 	IsSatellite      bool              `json:"is_satellite"`
@@ -303,11 +309,20 @@ func (r response) normalize(ip string) ipctx.Context {
 
 func (r response) details(ip string) LookupDetails {
 	lookupTime := time.Now().UTC()
+	effectiveIP := firstNonEmpty(strings.TrimSpace(r.IP), strings.TrimSpace(ip))
+	isSpecialIP, specialNote := detectSpecialIP(effectiveIP)
+	isBogon := r.Bogon || r.IsBogon
+	if isBogon && specialNote == "" {
+		specialNote = "Reserved / Bogon"
+	}
 	details := LookupDetails{
-		IP:          firstNonEmpty(strings.TrimSpace(r.IP), strings.TrimSpace(ip)),
+		IP:          effectiveIP,
 		Hostname:    strings.TrimSpace(r.Hostname),
 		IsAnonymous: r.IsAnonymous,
 		IsAnycast:   r.IsAnycast,
+		IsBogon:     isBogon,
+		IsSpecialIP: isSpecialIP || isBogon,
+		SpecialNote: specialNote,
 		IsHosting:   r.IsHosting,
 		IsMobile:    r.IsMobile,
 		IsSatellite: r.IsSatellite,
@@ -446,7 +461,8 @@ func (d LookupDetails) ToContext() ipctx.Context {
 }
 
 func DetailsFromContext(ctx ipctx.Context) LookupDetails {
-	return LookupDetails{
+	isSpecialIP, specialNote := detectSpecialIP(ctx.IP)
+	return normalizeLookupDetails(LookupDetails{
 		IP: ctx.IP,
 		Geo: &LookupGeo{
 			City:        ctx.City,
@@ -454,9 +470,11 @@ func DetailsFromContext(ctx ipctx.Context) LookupDetails {
 			Country:     ctx.CountryName,
 			CountryCode: ctx.CountryCode,
 		},
-		Privacy:    ctx.Privacy,
-		LookupTime: ctx.LookupTime,
-	}
+		IsSpecialIP: isSpecialIP,
+		SpecialNote: specialNote,
+		Privacy:     ctx.Privacy,
+		LookupTime:  ctx.LookupTime,
+	})
 }
 
 func valueOrEmpty[T any](value *T, fn func(*T) string) string {
@@ -477,4 +495,86 @@ func (e retryableError) Error() string {
 func isRetryable(err error) bool {
 	var value retryableError
 	return errors.As(err, &value)
+}
+
+func normalizeLookupDetails(details LookupDetails) LookupDetails {
+	if details.IsBogon && strings.TrimSpace(details.SpecialNote) == "" {
+		details.SpecialNote = "Reserved / Bogon"
+	}
+	if details.IsSpecialIP {
+		if strings.TrimSpace(details.SpecialNote) == "" {
+			details.SpecialNote = "Reserved / Special-use"
+		}
+		return details
+	}
+	isSpecialIP, specialNote := detectSpecialIP(details.IP)
+	if isSpecialIP {
+		details.IsSpecialIP = true
+		if strings.TrimSpace(details.SpecialNote) == "" {
+			details.SpecialNote = specialNote
+		}
+	}
+	return details
+}
+
+var specialPrefixes = mustPrefixes([]string{
+	"0.0.0.0/8",
+	"10.0.0.0/8",
+	"100.64.0.0/10",
+	"127.0.0.0/8",
+	"169.254.0.0/16",
+	"172.16.0.0/12",
+	"192.0.0.0/24",
+	"192.0.2.0/24",
+	"192.88.99.0/24",
+	"192.168.0.0/16",
+	"198.18.0.0/15",
+	"198.51.100.0/24",
+	"203.0.113.0/24",
+	"224.0.0.0/4",
+	"240.0.0.0/4",
+	"::/128",
+	"::1/128",
+	"100::/64",
+	"2001:db8::/32",
+	"fc00::/7",
+	"fe80::/10",
+	"ff00::/8",
+})
+
+func detectSpecialIP(value string) (bool, string) {
+	addr, err := netip.ParseAddr(strings.TrimSpace(value))
+	if err != nil || !addr.IsValid() {
+		return false, ""
+	}
+	if addr.IsLoopback() {
+		return true, "Loopback"
+	}
+	if addr.IsPrivate() {
+		return true, "Private"
+	}
+	if addr.IsUnspecified() {
+		return true, "Unspecified"
+	}
+	for _, prefix := range specialPrefixes {
+		if prefix.Contains(addr) {
+			return true, "Reserved / Special-use"
+		}
+	}
+	if !addr.IsGlobalUnicast() {
+		return true, "Non-global"
+	}
+	return false, ""
+}
+
+func mustPrefixes(values []string) []netip.Prefix {
+	prefixes := make([]netip.Prefix, 0, len(values))
+	for _, value := range values {
+		prefix, err := netip.ParsePrefix(value)
+		if err != nil {
+			panic(err)
+		}
+		prefixes = append(prefixes, prefix)
+	}
+	return prefixes
 }

@@ -589,6 +589,14 @@ func formatLookupDetailsHTML(details ipinfo.LookupDetails) string {
 		sb.WriteString(fmt.Sprintf("• AS Domain（组织域名）: %s\n", html.EscapeString(asDomain)))
 	}
 
+	if details.IsSpecialIP || details.IsBogon {
+		note := strings.TrimSpace(details.SpecialNote)
+		if note == "" {
+			note = "Reserved / Bogon"
+		}
+		sb.WriteString(fmt.Sprintf("• Special IP（特殊地址）: %s\n", html.EscapeString(note)))
+	}
+
 	if details.Anonymous != nil {
 		if strings.TrimSpace(details.Anonymous.Name) != "" {
 			sb.WriteString(fmt.Sprintf("• Anonymous Provider（匿名服务商）: %s\n", html.EscapeString(details.Anonymous.Name)))
@@ -632,7 +640,28 @@ func formatLookupDetailsHTML(details ipinfo.LookupDetails) string {
 		sb.WriteString("• Satellite（卫星网络）: Yes\n")
 	}
 
+	if shouldShowSparseLookupHint(details) {
+		sb.WriteString("• Lookup Note（查询说明）: 上游返回的公开信息较少，缓存已按原样保存 / Upstream returned limited public data, cache stored as-is\n")
+	}
+
 	return sb.String()
+}
+
+func shouldShowSparseLookupHint(details ipinfo.LookupDetails) bool {
+	if details.IsSpecialIP || details.IsBogon {
+		return true
+	}
+	if details.Geo != nil {
+		if strings.TrimSpace(details.Geo.Country) != "" || strings.TrimSpace(details.Geo.Region) != "" || strings.TrimSpace(details.Geo.City) != "" {
+			return false
+		}
+	}
+	if details.AS != nil {
+		if strings.TrimSpace(details.AS.Name) != "" || strings.TrimSpace(details.AS.ASN) != "" || strings.TrimSpace(details.AS.Domain) != "" {
+			return false
+		}
+	}
+	return true
 }
 
 func matchesCommand(text, command string) bool {
