@@ -46,6 +46,8 @@ type Service struct {
 	mu           sync.RWMutex
 	hostsByName  map[string]v4model.SnapshotHost
 	fingerprint  string
+	snapshotVersion string
+	snapshotUpdatedAt time.Time
 }
 
 func NewService(cfg config.V4Config, routeFile config.RouteSetFileConfig, baseConfigPath string, serviceNames []string, snapshots *repository.SnapshotRepository, states *repository.RuntimeStateRepository, logger *slog.Logger) *Service {
@@ -90,10 +92,27 @@ func (s *Service) Run(ctx context.Context) {
 	}
 }
 
-func (s *Service) ReplaceSnapshot(_ v4model.Snapshot, hosts []v4model.SnapshotHost) bool {
+func (s *Service) ReplaceSnapshot(snapshot v4model.Snapshot, hosts []v4model.SnapshotHost) bool {
+	return s.replaceSnapshot(snapshot, hosts)
+}
+
+func (s *Service) replaceSnapshot(snapshot v4model.Snapshot, hosts []v4model.SnapshotHost) bool {
 	effectiveFingerprint := snapshotFingerprint(hosts)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if isOlderSnapshot(snapshot, s.snapshotUpdatedAt, s.snapshotVersion) {
+		if s.logger != nil {
+			s.logger.Info("v4_runtime_snapshot_ignored",
+				"event", "v4_runtime_snapshot_ignored",
+				"reason", "stale_snapshot",
+				"incoming_version", strings.TrimSpace(snapshot.Version),
+				"incoming_updated_at", snapshot.UpdatedAt,
+				"current_version", s.snapshotVersion,
+				"current_updated_at", s.snapshotUpdatedAt,
+			)
+		}
+		return false
+	}
 	if s.fingerprint == effectiveFingerprint && effectiveFingerprint != "" {
 		return false
 	}
@@ -103,6 +122,8 @@ func (s *Service) ReplaceSnapshot(_ v4model.Snapshot, hosts []v4model.SnapshotHo
 	}
 	s.hostsByName = next
 	s.fingerprint = effectiveFingerprint
+	s.snapshotVersion = strings.TrimSpace(snapshot.Version)
+	s.snapshotUpdatedAt = snapshot.UpdatedAt.UTC()
 	return true
 }
 
@@ -126,7 +147,7 @@ func (s *Service) refreshSnapshot(ctx context.Context) {
 		return
 	}
 
-	if !s.ReplaceSnapshot(snapshot, hosts) {
+	if !s.replaceSnapshot(snapshot, hosts) {
 		return
 	}
 	if s.logger != nil {
@@ -184,6 +205,7 @@ func (s *Service) Resolve(ctx context.Context, req *http.Request) Resolution {
 			UpdatedAt: time.Now().UTC(),
 		}
 	}
+	state = normalizeStateForHost(spec, state)
 	return Resolution{Host: spec, State: state, Found: true, Reason: "matched"}
 }
 
@@ -242,6 +264,9 @@ func (s *Service) ApplyProbeUpdate(ctx context.Context, update ProbeUpdate) (v4m
 				modeChanged = true
 			}
 		}
+	}
+	if state.Mode == v4model.ModePassthrough && strings.TrimSpace(state.RedirectURL) != "" {
+		state.RedirectURL = ""
 	}
 
 	state.UpdatedAt = now
@@ -323,4 +348,57 @@ func intStrings(values []int) []string {
 		result = append(result, strconv.Itoa(value))
 	}
 	return result
+}
+
+func normalizeStateForHost(host v4model.SnapshotHost, state v4model.HostRuntimeState) v4model.HostRuntimeState {
+	if strings.TrimSpace(state.ID) == "" {
+		state.ID = host.Host
+	}
+	if strings.TrimSpace(state.Host) == "" {
+		state.Host = host.Host
+	}
+
+	switch strings.TrimSpace(state.Mode) {
+	case "", v4model.ModePassthrough:
+		state.Mode = v4model.ModePassthrough
+	case v4model.ModeDegradedRedirect, v4model.ModeRecovering:
+	default:
+		state.Mode = v4model.ModePassthrough
+	}
+
+	if !host.Probe.Enabled {
+		state.Mode = v4model.ModePassthrough
+		state.RedirectURL = ""
+		state.LastProbeTargets = nil
+		state.LastFailedTargets = nil
+		state.LastProbeError = ""
+		return state
+	}
+
+	if state.Mode == v4model.ModePassthrough {
+		state.RedirectURL = ""
+	}
+	return state
+}
+
+func isOlderSnapshot(incoming v4model.Snapshot, currentUpdatedAt time.Time, currentVersion string) bool {
+	incomingVersion := strings.TrimSpace(incoming.Version)
+	if currentUpdatedAt.IsZero() && strings.TrimSpace(currentVersion) == "" {
+		return false
+	}
+
+	incomingUpdatedAt := incoming.UpdatedAt.UTC()
+	if !incomingUpdatedAt.IsZero() && !currentUpdatedAt.IsZero() {
+		if incomingUpdatedAt.Before(currentUpdatedAt) {
+			return true
+		}
+		if incomingUpdatedAt.After(currentUpdatedAt) {
+			return false
+		}
+	}
+
+	if incomingVersion != "" && strings.TrimSpace(currentVersion) != "" {
+		return incomingVersion < strings.TrimSpace(currentVersion)
+	}
+	return false
 }

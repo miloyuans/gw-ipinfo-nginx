@@ -171,6 +171,7 @@ func (s *Service) SyncOnce(ctx context.Context) error {
 		s.recordSyncFailure(ctx, now, err, map[string]any{"route_file_path": s.routeFile.ConfigPath})
 		return err
 	}
+	s.logCompiledOverrides(fileEntries, snapshotHosts)
 
 	if s.logger != nil {
 		s.logger.Info("v4_snapshot_sync_compiled",
@@ -286,6 +287,47 @@ func (s *Service) compileHosts(autoHosts []string, overrides []config.V4Override
 	return BuildEffectiveHosts(BuildAutoHosts(autoHosts, s.cfg), s.cfg, overrides, s.serviceNames)
 }
 
+func (s *Service) logCompiledOverrides(overrides []config.V4OverrideConfig, hosts []v4model.SnapshotHost) {
+	if s.logger == nil || len(overrides) == 0 {
+		return
+	}
+
+	byHost := make(map[string]v4model.SnapshotHost, len(hosts))
+	for _, host := range hosts {
+		byHost[host.Host] = host
+	}
+
+	for _, override := range overrides {
+		host := strings.TrimSpace(strings.ToLower(override.Host))
+		if host == "" {
+			continue
+		}
+		compiled, ok := byHost[host]
+		if !ok {
+			s.logger.Info("v4_snapshot_route_overlay_compiled",
+				"event", "v4_snapshot_route_overlay_compiled",
+				"host", host,
+				"enabled", override.Enabled,
+				"compiled", false,
+			)
+			continue
+		}
+		s.logger.Info("v4_snapshot_route_overlay_compiled",
+			"event", "v4_snapshot_route_overlay_compiled",
+			"host", compiled.Host,
+			"enabled", override.Enabled,
+			"compiled", true,
+			"backend_service", compiled.BackendService,
+			"backend_host", compiled.BackendHost,
+			"security_checks_enabled", compiled.SecurityChecksEnabled,
+			"ip_enrichment_mode", compiled.IPEnrichmentMode,
+			"probe_enabled", compiled.Probe.Enabled,
+			"probe_mode", compiled.Probe.Mode,
+			"redirect_urls_count", len(compiled.Probe.RedirectURLs),
+		)
+	}
+}
+
 func (s *Service) recordSyncFailure(ctx context.Context, now time.Time, err error, metadata map[string]any) {
 	_ = s.repo.UpsertSyncState(ctx, v4model.SyncState{
 		ID:             v4model.SyncStateID,
@@ -356,6 +398,11 @@ func snapshotFingerprint(hosts []v4model.SnapshotHost) string {
 			strings.Join(host.Probe.RedirectURLs, ","),
 			strings.Join(host.Probe.Patterns, ","),
 			fmt.Sprint(host.Probe.UnhealthyStatusCodes),
+			host.Probe.Interval.String(),
+			host.Probe.Timeout.String(),
+			fmt.Sprint(host.Probe.HealthyThreshold),
+			fmt.Sprint(host.Probe.UnhealthyThreshold),
+			host.Probe.MinSwitchInterval.String(),
 		}, "|"))
 	}
 	sum := sha1.Sum([]byte(strings.Join(parts, "\n")))

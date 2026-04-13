@@ -111,7 +111,7 @@ func (s *Service) BuildRoutesSummary(ctx context.Context) (Result, error) {
 
 	summary.WriteString("\n<b>Top Hosts / 摘要域名</b>\n")
 	for _, host := range summaryHosts {
-		state := stateByHost[host.Host]
+		state := normalizeDisplayedState(host, stateByHost[host.Host])
 		mode := strings.TrimSpace(state.Mode)
 		if mode == "" {
 			mode = v4model.ModePassthrough
@@ -178,7 +178,7 @@ func buildHTMLDocument(snapshot v4model.Snapshot, syncView syncView, hosts []v4m
 	buffer.WriteString("<table border=\"1\" cellspacing=\"0\" cellpadding=\"6\">")
 	buffer.WriteString("<tr><th>Host<br/>入口域名</th><th>Mode<br/>运行模式</th><th>Backend Service<br/>后端服务</th><th>Backend Host<br/>后端 Host</th><th>Security<br/>安全检查</th><th>Enrichment<br/>IP 丰富化</th><th>Probe<br/>探测</th><th>Targets<br/>目标数</th><th>Last Reason<br/>最近原因</th><th>Redirect URL<br/>降级跳转</th></tr>")
 	for _, host := range hosts {
-		state := stateByHost[host.Host]
+		state := normalizeDisplayedState(host, stateByHost[host.Host])
 		mode := strings.TrimSpace(state.Mode)
 		if mode == "" {
 			mode = v4model.ModePassthrough
@@ -336,4 +336,32 @@ func trimForSummary(value string, limit int) string {
 		return value
 	}
 	return value[:limit] + "..."
+}
+
+func normalizeDisplayedState(host v4model.SnapshotHost, state v4model.HostRuntimeState) v4model.HostRuntimeState {
+	if strings.TrimSpace(state.Host) == "" {
+		state.Host = host.Host
+	}
+
+	switch strings.TrimSpace(state.Mode) {
+	case "", v4model.ModePassthrough:
+		state.Mode = v4model.ModePassthrough
+	case v4model.ModeDegradedRedirect, v4model.ModeRecovering:
+	default:
+		state.Mode = v4model.ModePassthrough
+	}
+
+	if !host.Probe.Enabled {
+		state.Mode = v4model.ModePassthrough
+		state.RedirectURL = ""
+		state.LastProbeTargets = nil
+		state.LastFailedTargets = nil
+		state.LastProbeError = ""
+		return state
+	}
+
+	if state.Mode == v4model.ModePassthrough {
+		state.RedirectURL = ""
+	}
+	return state
 }

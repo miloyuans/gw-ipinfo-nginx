@@ -50,9 +50,10 @@ func BuildAutoHosts(autoHosts []string, cfg config.V4Config) []v4model.SnapshotH
 	return hosts
 }
 
-// BuildEffectiveHosts overlays local route-file host overrides on top of a base
-// host set. It is used both when persisting a snapshot and when materializing
-// runtime/query views so local pod config can win over stale shared snapshots.
+// BuildEffectiveHosts overlays the explicit v4 host route file on top of the
+// auto-discovered host set and produces the leader-compiled shared snapshot.
+// Runtime and query views must consume the persisted shared snapshot directly;
+// they must not re-apply local route files per pod.
 func BuildEffectiveHosts(baseHosts []v4model.SnapshotHost, cfg config.V4Config, overrides []config.V4OverrideConfig, serviceNames map[string]struct{}) ([]v4model.SnapshotHost, error) {
 	byHost := make(map[string]v4model.SnapshotHost, len(baseHosts))
 	now := time.Now().UTC()
