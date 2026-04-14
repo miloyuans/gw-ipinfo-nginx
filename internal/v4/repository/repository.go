@@ -188,6 +188,11 @@ func (r *RuntimeStateRepository) Get(ctx context.Context, host string) (v4model.
 }
 
 func (r *RuntimeStateRepository) Upsert(ctx context.Context, state v4model.HostRuntimeState) error {
+	if current, found, err := r.currentAuthoritativeState(ctx, state.Host); err != nil {
+		return err
+	} else if found && staleRuntimeStateWrite(current, state) {
+		return nil
+	}
 	if err := r.controller.Local().PutJSONDirty(ctx, localdisk.BucketV4RuntimeStates, localdisk.BucketV4RuntimeStatesDirty, state.Host, state); err != nil {
 		return err
 	}
@@ -367,6 +372,13 @@ func (r *SnapshotRepository) loadSyncStateLocal(ctx context.Context) (v4model.Sy
 }
 
 func (r *SnapshotRepository) replaceLocal(ctx context.Context, snapshot v4model.Snapshot, hosts []v4model.SnapshotHost) error {
+	current, _, found, err := r.loadLatestLocal(ctx)
+	if err != nil {
+		return err
+	}
+	if found && staleSnapshotWrite(current, snapshot) {
+		return nil
+	}
 	return r.controller.Local().Update(ctx, func(tx *bolt.Tx) error {
 		snapshots := tx.Bucket([]byte(localdisk.BucketV4Snapshots))
 		snapshotDirty := tx.Bucket([]byte(localdisk.BucketV4SnapshotsDirty))
@@ -450,6 +462,13 @@ func (r *SnapshotRepository) loadSyncStateMongo(ctx context.Context, client *mon
 func (r *SnapshotRepository) replaceMongo(ctx context.Context, client *mongostore.Client, snapshot v4model.Snapshot, hosts []v4model.SnapshotHost) error {
 	child, cancel := client.WithTimeout(ctx)
 	defer cancel()
+	current, _, found, err := r.loadLatestMongo(ctx, client)
+	if err != nil {
+		return err
+	}
+	if found && staleSnapshotWrite(current, snapshot) {
+		return nil
+	}
 	db := client.Database()
 	if _, err := db.Collection(v4model.CollectionSnapshots).ReplaceOne(
 		child,
@@ -502,6 +521,13 @@ func (r *SnapshotRepository) replaceMongo(ctx context.Context, client *mongostor
 func (r *SnapshotRepository) upsertSyncStateMongo(ctx context.Context, client *mongostore.Client, state v4model.SyncState) error {
 	child, cancel := client.WithTimeout(ctx)
 	defer cancel()
+	current, found, err := r.loadSyncStateMongo(ctx, client)
+	if err != nil {
+		return err
+	}
+	if found && staleSyncStateWrite(current, state) {
+		return nil
+	}
 	_, err := client.Database().Collection(v4model.CollectionSnapshots).ReplaceOne(
 		child,
 		bson.M{"_id": v4model.SyncStateID},
@@ -559,6 +585,13 @@ func (r *RuntimeStateRepository) listMongo(ctx context.Context, client *mongosto
 func (r *RuntimeStateRepository) upsertMongo(ctx context.Context, client *mongostore.Client, state v4model.HostRuntimeState) error {
 	child, cancel := client.WithTimeout(ctx)
 	defer cancel()
+	current, found, err := r.getMongo(ctx, client, state.Host)
+	if err != nil {
+		return err
+	}
+	if found && staleRuntimeStateWrite(current, state) {
+		return nil
+	}
 	_, err := client.Database().Collection(v4model.CollectionRuntimeStates).UpdateByID(child, state.Host, bson.M{"$set": state}, options.Update().SetUpsert(true))
 	return err
 }
@@ -711,9 +744,18 @@ func stampSnapshotHosts(snapshot v4model.Snapshot, hosts []v4model.SnapshotHost)
 		if version != "" {
 			host.SnapshotID = version
 		}
+		host.WriterInstanceID = snapshot.WriterInstanceID
+		host.UpdatedAt = host.UpdatedAt.UTC()
 		stamped = append(stamped, host)
 	}
 	return stamped
+}
+
+func (r *RuntimeStateRepository) currentAuthoritativeState(ctx context.Context, host string) (v4model.HostRuntimeState, bool, error) {
+	if r.mongoAuthoritative() {
+		return r.getMongo(ctx, r.controller.Client(), host)
+	}
+	return r.getLocal(ctx, host)
 }
 
 func (r *SnapshotRepository) findMongoSnapshotHosts(ctx context.Context, hostCollection *mongo.Collection, version string) ([]v4model.SnapshotHost, error) {
@@ -774,4 +816,39 @@ func (r *SnapshotRepository) logSnapshotInvalid(source string, snapshot v4model.
 
 func snapshotHostFingerprint(hosts []v4model.SnapshotHost) string {
 	return v4model.CanonicalSnapshotFingerprint(hosts)
+}
+
+func staleSnapshotWrite(current, incoming v4model.Snapshot) bool {
+	return staleWriterWrite(current.WriterStartedAt, current.UpdatedAt, incoming.WriterStartedAt, incoming.UpdatedAt)
+}
+
+func staleSyncStateWrite(current, incoming v4model.SyncState) bool {
+	return staleWriterWrite(current.WriterStartedAt, current.UpdatedAt, incoming.WriterStartedAt, incoming.UpdatedAt)
+}
+
+func staleRuntimeStateWrite(current, incoming v4model.HostRuntimeState) bool {
+	return staleWriterWrite(current.WriterStartedAt, current.UpdatedAt, incoming.WriterStartedAt, incoming.UpdatedAt)
+}
+
+func staleWriterWrite(currentStartedAt, currentUpdatedAt, incomingStartedAt, incomingUpdatedAt time.Time) bool {
+	currentStartedAt = currentStartedAt.UTC()
+	currentUpdatedAt = currentUpdatedAt.UTC()
+	incomingStartedAt = incomingStartedAt.UTC()
+	incomingUpdatedAt = incomingUpdatedAt.UTC()
+
+	if !currentStartedAt.IsZero() {
+		if incomingStartedAt.IsZero() {
+			return true
+		}
+		if incomingStartedAt.Before(currentStartedAt) {
+			return true
+		}
+		if incomingStartedAt.After(currentStartedAt) {
+			return false
+		}
+	}
+	if !currentUpdatedAt.IsZero() && !incomingUpdatedAt.IsZero() && incomingUpdatedAt.Before(currentUpdatedAt) {
+		return true
+	}
+	return false
 }

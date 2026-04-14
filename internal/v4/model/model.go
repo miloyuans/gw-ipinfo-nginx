@@ -32,6 +32,8 @@ type Snapshot struct {
 	HostCount   int       `json:"host_count" bson:"host_count"`
 	CreatedAt   time.Time `json:"created_at" bson:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at" bson:"updated_at"`
+	WriterInstanceID string `json:"writer_instance_id" bson:"writer_instance_id"`
+	WriterStartedAt  time.Time `json:"writer_started_at" bson:"writer_started_at"`
 	LastGood    bool      `json:"last_good" bson:"last_good"`
 	Source      string    `json:"source" bson:"source"`
 }
@@ -41,6 +43,8 @@ type SyncState struct {
 	LeaseName            string    `json:"lease_name" bson:"lease_name"`
 	LeaseOwner           string    `json:"lease_owner" bson:"lease_owner"`
 	LeaseExpiresAt       time.Time `json:"lease_expires_at" bson:"lease_expires_at"`
+	WriterInstanceID     string    `json:"writer_instance_id" bson:"writer_instance_id"`
+	WriterStartedAt      time.Time `json:"writer_started_at" bson:"writer_started_at"`
 	LastSyncAt           time.Time `json:"last_sync_at" bson:"last_sync_at"`
 	LastSuccessAt        time.Time `json:"last_success_at" bson:"last_success_at"`
 	LastStatus           string    `json:"last_status" bson:"last_status"`
@@ -86,6 +90,8 @@ type HostRuntimeState struct {
 	Host              string    `json:"host" bson:"host"`
 	SnapshotVersion   string    `json:"snapshot_version" bson:"snapshot_version"`
 	SnapshotFingerprint string  `json:"snapshot_fingerprint" bson:"snapshot_fingerprint"`
+	WriterInstanceID  string    `json:"writer_instance_id" bson:"writer_instance_id"`
+	WriterStartedAt   time.Time `json:"writer_started_at" bson:"writer_started_at"`
 	Mode              string    `json:"mode" bson:"mode"`
 	SourceURL         string    `json:"source_url" bson:"source_url"`
 	RedirectURL       string    `json:"redirect_url" bson:"redirect_url"`

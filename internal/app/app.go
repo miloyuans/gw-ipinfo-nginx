@@ -74,6 +74,7 @@ func New(configPath string) (*Application, error) {
 	metricsRegistry := metrics.NewRegistry()
 	metricSet := metrics.NewGatewayMetrics(metricsRegistry)
 	instanceID := workerID()
+	instanceStartedAt := time.Now().UTC()
 
 	sharedStoragePath := cfg.Storage.LocalPath
 	cfg.Storage.LocalPath = resolveLocalStoragePath(cfg.Storage.LocalPath)
@@ -132,7 +133,7 @@ func New(configPath string) (*Application, error) {
 	}
 	compiledRouteSets := localCompiledRouteSets
 	if cfg.RouteSets.SharedManifestEnabled {
-		routeSetRepo := routesets.NewRepository(storageControl, logger)
+		routeSetRepo := routesets.NewRepository(storageControl, logger, instanceID, instanceStartedAt)
 		manifest, persistErr := routeSetRepo.ReplaceLatest(context.Background(), localCompiledRouteSets, configPath)
 		if persistErr != nil {
 			logger.Warn("route_sets_manifest_persist_degraded_local_only",
@@ -231,7 +232,7 @@ func New(configPath string) (*Application, error) {
 		v4StateRepo = v4repo.NewRuntimeStateRepository(storageControl)
 		v4EventRepo = v4repo.NewEventRepository(storageControl, logger)
 		v4EventService = v4events.NewService(cfg.V4.Telegram, v4EventRepo, sender, logger)
-		v4RuntimeSvc = v4runtime.NewService(cfg.V4, cfg.RouteSets.V4, configPath, resolver.ServiceNames(), v4SnapshotRepo, v4StateRepo, logger)
+		v4RuntimeSvc = v4runtime.NewService(cfg.V4, cfg.RouteSets.V4, configPath, resolver.ServiceNames(), v4SnapshotRepo, v4StateRepo, logger, instanceID, instanceStartedAt)
 		v4SyncStatePath := filepath.Join(filepath.Dir(filepath.Clean(sharedStoragePath)), "v4-sync-state.json")
 		v4SnapshotSvc = v4snapshot.NewService(
 			cfg.V4,
@@ -242,6 +243,7 @@ func New(configPath string) (*Application, error) {
 			storageControl,
 			v4SyncStatePath,
 			instanceID,
+			instanceStartedAt,
 			resolver.ServiceNames(),
 			logger,
 		)

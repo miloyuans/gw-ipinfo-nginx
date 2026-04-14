@@ -25,6 +25,7 @@ type Service struct {
 	logger              *slog.Logger
 	lease               *syncLeaseStore
 	instanceID          string
+	instanceStartedAt   time.Time
 	serviceNames        map[string]struct{}
 	excludedHosts       map[string]struct{}
 	legacyWarned        bool
@@ -40,6 +41,7 @@ func NewService(
 	controller *storage.Controller,
 	sharedStatePath string,
 	instanceID string,
+	instanceStartedAt time.Time,
 	serviceNames []string,
 	logger *slog.Logger,
 ) *Service {
@@ -58,6 +60,7 @@ func NewService(
 		logger:         logger,
 		lease:          newSyncLeaseStore(controller, sharedStatePath, cfg.Sync.LeaseName),
 		instanceID:     instanceID,
+		instanceStartedAt: instanceStartedAt.UTC(),
 		serviceNames:   names,
 		excludedHosts:  make(map[string]struct{}),
 	}
@@ -241,6 +244,8 @@ func (s *Service) SyncOnce(ctx context.Context) error {
 		HostCount:   len(snapshotHosts),
 		CreatedAt:   now,
 		UpdatedAt:   now,
+		WriterInstanceID: s.instanceID,
+		WriterStartedAt:  s.instanceStartedAt,
 		LastGood:    true,
 		Source:      "nginx_conf+v4_routes",
 	}
@@ -266,6 +271,8 @@ func (s *Service) SyncOnce(ctx context.Context) error {
 		LeaseName:           s.cfg.Sync.LeaseName,
 		LeaseOwner:          s.instanceID,
 		LeaseExpiresAt:      now.Add(s.cfg.Sync.LeaseTTL),
+		WriterInstanceID:    s.instanceID,
+		WriterStartedAt:     s.instanceStartedAt,
 		LastSyncAt:          now,
 		LastSuccessAt:       now,
 		LastStatus:          "success",
@@ -394,6 +401,8 @@ func (s *Service) recordSyncFailure(ctx context.Context, now time.Time, err erro
 		LeaseName:      s.cfg.Sync.LeaseName,
 		LeaseOwner:     s.instanceID,
 		LeaseExpiresAt: now.Add(s.cfg.Sync.LeaseTTL),
+		WriterInstanceID: s.instanceID,
+		WriterStartedAt:  s.instanceStartedAt,
 		LastSyncAt:     now,
 		LastStatus:     "failed",
 		LastError:      strings.TrimSpace(err.Error()),

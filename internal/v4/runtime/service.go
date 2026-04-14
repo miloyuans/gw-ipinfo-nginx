@@ -42,6 +42,8 @@ type Service struct {
 	snapshots    *repository.SnapshotRepository
 	states       *repository.RuntimeStateRepository
 	logger       *slog.Logger
+	instanceID   string
+	instanceStartedAt time.Time
 	serviceNames map[string]struct{}
 	mu           sync.RWMutex
 	hostsByName  map[string]v4model.SnapshotHost
@@ -51,7 +53,7 @@ type Service struct {
 	snapshotUpdatedAt time.Time
 }
 
-func NewService(cfg config.V4Config, routeFile config.RouteSetFileConfig, baseConfigPath string, serviceNames []string, snapshots *repository.SnapshotRepository, states *repository.RuntimeStateRepository, logger *slog.Logger) *Service {
+func NewService(cfg config.V4Config, routeFile config.RouteSetFileConfig, baseConfigPath string, serviceNames []string, snapshots *repository.SnapshotRepository, states *repository.RuntimeStateRepository, logger *slog.Logger, instanceID string, instanceStartedAt time.Time) *Service {
 	names := make(map[string]struct{}, len(serviceNames))
 	for _, name := range serviceNames {
 		names[strings.TrimSpace(name)] = struct{}{}
@@ -63,6 +65,8 @@ func NewService(cfg config.V4Config, routeFile config.RouteSetFileConfig, baseCo
 		snapshots:      snapshots,
 		states:         states,
 		logger:         logger,
+		instanceID:     strings.TrimSpace(instanceID),
+		instanceStartedAt: instanceStartedAt.UTC(),
 		serviceNames:   names,
 		hostsByName:    make(map[string]v4model.SnapshotHost),
 		statesByHost:   make(map[string]v4model.HostRuntimeState),
@@ -174,6 +178,7 @@ func (s *Service) refreshSnapshot(ctx context.Context) {
 	if s.logger != nil {
 		s.logger.Info("v4_runtime_snapshot_refreshed",
 			"event", "v4_runtime_snapshot_refreshed",
+			"version", strings.TrimSpace(snapshot.Version),
 			"fingerprint", s.currentFingerprint(),
 			"host_count", s.hostCount(),
 		)
@@ -270,6 +275,8 @@ func (s *Service) Resolve(ctx context.Context, req *http.Request) Resolution {
 			Host:               host,
 			SnapshotVersion:    snapshotVersion,
 			SnapshotFingerprint: snapshotFingerprint,
+			WriterInstanceID:   s.instanceID,
+			WriterStartedAt:    s.instanceStartedAt,
 			Mode:               v4model.ModePassthrough,
 			UpdatedAt:          time.Now().UTC(),
 		}
@@ -306,6 +313,8 @@ func (s *Service) reconcileSnapshotState(ctx context.Context, snapshot v4model.S
 	for _, host := range hosts {
 		current := stateByHost[host.Host]
 		normalized := normalizeStateForHost(host, current, snapshot.Version, snapshot.Fingerprint)
+		normalized.WriterInstanceID = s.instanceID
+		normalized.WriterStartedAt = s.instanceStartedAt
 		if !runtimeStateNeedsUpdate(current, normalized) {
 			continue
 		}
@@ -348,6 +357,8 @@ func (s *Service) ApplyProbeUpdate(ctx context.Context, update ProbeUpdate) (v4m
 			Host:                update.Host,
 			SnapshotVersion:     snapshotVersion,
 			SnapshotFingerprint: snapshotFingerprint,
+			WriterInstanceID:    s.instanceID,
+			WriterStartedAt:     s.instanceStartedAt,
 			Mode:                v4model.ModePassthrough,
 		}
 	}
@@ -402,6 +413,8 @@ func (s *Service) ApplyProbeUpdate(ctx context.Context, update ProbeUpdate) (v4m
 
 	state.SnapshotVersion = snapshotVersion
 	state.SnapshotFingerprint = snapshotFingerprint
+	state.WriterInstanceID = s.instanceID
+	state.WriterStartedAt = s.instanceStartedAt
 	state.UpdatedAt = now
 	if err := s.states.Upsert(ctx, state); err != nil {
 		return v4model.HostRuntimeState{}, false, false, err
@@ -455,6 +468,8 @@ func normalizeStateForHost(host v4model.SnapshotHost, state v4model.HostRuntimeS
 			Host:                host.Host,
 			SnapshotVersion:     snapshotVersion,
 			SnapshotFingerprint: snapshotFingerprint,
+			WriterInstanceID:    state.WriterInstanceID,
+			WriterStartedAt:     state.WriterStartedAt,
 			Mode:                v4model.ModePassthrough,
 		}
 	}

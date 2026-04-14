@@ -30,6 +30,8 @@ type Manifest struct {
 	Version     string    `json:"version" bson:"version"`
 	Fingerprint string    `json:"fingerprint" bson:"fingerprint"`
 	UpdatedAt   time.Time `json:"updated_at" bson:"updated_at"`
+	WriterInstanceID string `json:"writer_instance_id" bson:"writer_instance_id"`
+	WriterStartedAt  time.Time `json:"writer_started_at" bson:"writer_started_at"`
 	Enabled     bool      `json:"enabled" bson:"enabled"`
 	Payload     []byte    `json:"payload" bson:"payload"`
 	Source      string    `json:"source" bson:"source"`
@@ -38,12 +40,16 @@ type Manifest struct {
 type Repository struct {
 	controller *storage.Controller
 	logger     *slog.Logger
+	instanceID string
+	instanceStartedAt time.Time
 }
 
-func NewRepository(controller *storage.Controller, logger *slog.Logger) *Repository {
+func NewRepository(controller *storage.Controller, logger *slog.Logger, instanceID string, instanceStartedAt time.Time) *Repository {
 	repo := &Repository{
 		controller: controller,
 		logger:     logger,
+		instanceID: strings.TrimSpace(instanceID),
+		instanceStartedAt: instanceStartedAt.UTC(),
 	}
 	if controller != nil {
 		controller.RegisterReplayer(repo)
@@ -54,7 +60,7 @@ func NewRepository(controller *storage.Controller, logger *slog.Logger) *Reposit
 func (r *Repository) Name() string { return "route_sets_manifest" }
 
 func (r *Repository) ReplaceLatest(ctx context.Context, compiled *Compiled, source string) (Manifest, error) {
-	manifest, err := newManifest(compiled, source)
+	manifest, err := newManifest(compiled, source, r.instanceID, r.instanceStartedAt)
 	if err != nil {
 		return Manifest{}, err
 	}
@@ -119,6 +125,13 @@ func (r *Repository) mongoClient() *mongostore.Client {
 }
 
 func (r *Repository) replaceLocal(ctx context.Context, manifest Manifest) error {
+	current, found, err := r.loadLocal(ctx)
+	if err != nil {
+		return err
+	}
+	if found && staleManifestWrite(current, manifest) {
+		return nil
+	}
 	return r.controller.Local().PutJSONDirty(ctx, localdisk.BucketRouteSetsManifest, localdisk.BucketRouteSetsManifestDirty, activeManifestID, manifest)
 }
 
@@ -136,6 +149,13 @@ func (r *Repository) loadLocal(ctx context.Context) (Manifest, bool, error) {
 func (r *Repository) replaceMongo(ctx context.Context, client *mongostore.Client, manifest Manifest) error {
 	child, cancel := client.WithTimeout(ctx)
 	defer cancel()
+	current, found, err := r.loadMongo(ctx, client)
+	if err != nil {
+		return err
+	}
+	if found && staleManifestWrite(current, manifest) {
+		return nil
+	}
 	_, err := client.Database().Collection(CollectionManifests).ReplaceOne(
 		child,
 		bson.M{"_id": activeManifestID},
@@ -160,7 +180,7 @@ func (r *Repository) loadMongo(ctx context.Context, client *mongostore.Client) (
 	return manifest, true, nil
 }
 
-func newManifest(compiled *Compiled, source string) (Manifest, error) {
+func newManifest(compiled *Compiled, source string, instanceID string, instanceStartedAt time.Time) (Manifest, error) {
 	if compiled == nil {
 		compiled = &Compiled{}
 	}
@@ -175,10 +195,42 @@ func newManifest(compiled *Compiled, source string) (Manifest, error) {
 		Version:     now.Format(time.RFC3339Nano),
 		Fingerprint: hex.EncodeToString(hash[:]),
 		UpdatedAt:   now,
+		WriterInstanceID: strings.TrimSpace(instanceID),
+		WriterStartedAt:  instanceStartedAt.UTC(),
 		Enabled:     compiled.IsEnabled(),
 		Payload:     payload,
 		Source:      strings.TrimSpace(source),
 	}, nil
+}
+
+func staleManifestWrite(current, incoming Manifest) bool {
+	if writerWriteIsStale(current.WriterStartedAt, current.UpdatedAt, incoming.WriterStartedAt, incoming.UpdatedAt) {
+		return true
+	}
+	return false
+}
+
+func writerWriteIsStale(currentStartedAt, currentUpdatedAt, incomingStartedAt, incomingUpdatedAt time.Time) bool {
+	currentStartedAt = currentStartedAt.UTC()
+	currentUpdatedAt = currentUpdatedAt.UTC()
+	incomingStartedAt = incomingStartedAt.UTC()
+	incomingUpdatedAt = incomingUpdatedAt.UTC()
+
+	if !currentStartedAt.IsZero() {
+		if incomingStartedAt.IsZero() {
+			return true
+		}
+		if incomingStartedAt.Before(currentStartedAt) {
+			return true
+		}
+		if incomingStartedAt.After(currentStartedAt) {
+			return false
+		}
+	}
+	if !currentUpdatedAt.IsZero() && !incomingUpdatedAt.IsZero() && incomingUpdatedAt.Before(currentUpdatedAt) {
+		return true
+	}
+	return false
 }
 
 func decodeManifest(manifest Manifest) (*Compiled, error) {
