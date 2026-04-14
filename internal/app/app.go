@@ -497,6 +497,7 @@ type routeContext struct {
 	V3StrategyMode          string
 	V3BindingReused         bool
 	V4RuntimeMode           string
+	V4RouteSource           string
 	V4SecurityChecksEnabled bool
 	V4EnrichmentMode        string
 	V4ProbeEnabled          bool
@@ -932,6 +933,7 @@ func (h *GatewayHandler) serveV4Fallback(w http.ResponseWriter, r *http.Request,
 		BackendHost:             resolution.Host.BackendHost,
 		TargetPublicURL:         resolution.State.RedirectURL,
 		V4RuntimeMode:           runtimeMode,
+		V4RouteSource:           resolution.Host.Source,
 		V4SecurityChecksEnabled: resolution.Host.SecurityChecksEnabled,
 		V4EnrichmentMode:        resolution.Host.IPEnrichmentMode,
 		V4ProbeEnabled:          resolution.Host.Probe.Enabled,
@@ -1357,6 +1359,7 @@ func (h *GatewayHandler) trackReport(req *http.Request, record model.AuditRecord
 		V3StrategyMode:          record.V3StrategyMode,
 		V3BindingReused:         record.V3BindingReused,
 		V4RuntimeMode:           record.V4RuntimeMode,
+		V4RouteSource:           record.V4RouteSource,
 		V4SecurityChecksEnabled: record.V4SecurityChecksEnabled,
 		V4EnrichmentMode:        record.V4EnrichmentMode,
 		V4ProbeEnabled:          record.V4ProbeEnabled,
@@ -1469,6 +1472,7 @@ func (h *GatewayHandler) auditRecord(req *http.Request, requestID string, servic
 		V3StrategyMode:          routeMeta.V3StrategyMode,
 		V3BindingReused:         routeMeta.V3BindingReused,
 		V4RuntimeMode:           routeMeta.V4RuntimeMode,
+		V4RouteSource:           routeMeta.V4RouteSource,
 		V4SecurityChecksEnabled: routeMeta.V4SecurityChecksEnabled,
 		V4EnrichmentMode:        routeMeta.V4EnrichmentMode,
 		V4ProbeEnabled:          routeMeta.V4ProbeEnabled,

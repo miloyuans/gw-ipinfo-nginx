@@ -426,7 +426,7 @@ Behavior:
 
 - Blacklist / deny mode
   - Any request denied by UA / Accept-Language / Geo / Privacy / route miss / v1 grant validation enters the existing global deny path.
-  - The deny path can either render the built-in block page or reverse-proxy to `deny_page.target_url`.
+  - The deny path can either render the built-in block page, reverse-proxy to `deny_page.target_url`, or 302 redirect to `deny_page.target_url` when `deny_page.redirect_enabled=true`.
 
 ### V4 Runtime Notes
 

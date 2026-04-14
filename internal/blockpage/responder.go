@@ -28,6 +28,7 @@ type Responder struct {
 	cfg    config.DenyPageConfig
 	logger *slog.Logger
 	proxy  *httputil.ReverseProxy
+	redirectURL string
 }
 
 func NewResponder(cfg config.DenyPageConfig, perf config.PerformanceConfig, logger *slog.Logger) (*Responder, error) {
@@ -38,6 +39,11 @@ func NewResponder(cfg config.DenyPageConfig, perf config.PerformanceConfig, logg
 
 	targetURL := strings.TrimSpace(cfg.TargetURL)
 	if targetURL == "" {
+		return responder, nil
+	}
+
+	responder.redirectURL = targetURL
+	if cfg.RedirectEnabled {
 		return responder, nil
 	}
 
@@ -108,7 +114,17 @@ func (r *Responder) ServeHTTP(
 	serviceName string,
 	clientIP string,
 ) {
-	if r == nil || r.proxy == nil || req.Header.Get(headerDenyProxy) == "1" {
+	if r == nil {
+		Write(w, denyStatus, config.DenyPageConfig{}, requestID)
+		return
+	}
+
+	if r.cfg.RedirectEnabled && strings.TrimSpace(r.redirectURL) != "" {
+		http.Redirect(w, req, r.redirectURL, http.StatusFound)
+		return
+	}
+
+	if r.proxy == nil || req.Header.Get(headerDenyProxy) == "1" {
 		Write(w, denyStatus, r.cfg, requestID)
 		return
 	}

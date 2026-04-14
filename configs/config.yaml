@@ -348,7 +348,10 @@ performance:
   proxy_expect_continue_timeout: 1s
 
 deny_page:
+  # Leave empty to render the built-in deny page. Set a URL to proxy or redirect denied traffic.
   target_url: ""
+  # false: reverse-proxy to target_url (default). true: return a 302 redirect to target_url.
+  redirect_enabled: false
   preserve_host: false
   title: "Access Unavailable"
   heading: "Request Blocked"

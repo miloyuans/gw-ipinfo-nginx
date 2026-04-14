@@ -50,12 +50,19 @@ real_ip:
 
 ### 3. 未通过检查时不再返回 JSON，改为固定静态页
 
-现在所有策略拦截都会返回统一静态页。
+现在所有策略拦截都会走统一 deny path，支持三种结果：
+
+- `target_url` 为空：返回内置静态页
+- `target_url` 非空且 `redirect_enabled: false`：反代到目标地址
+- `target_url` 非空且 `redirect_enabled: true`：302 重定向到目标地址
 
 页面内容可在 [config.yaml](/C:/Users/mylo/Documents/milo2025/go/gw-ipinfo-nginx/configs/config.yaml) 中修改：
 
 ```yaml
 deny_page:
+  target_url: "https://vpbet.com"
+  redirect_enabled: false
+  preserve_host: false
   title: "Access Unavailable"
   heading: "Request Blocked"
   message: "Your request did not pass the gateway security checks."

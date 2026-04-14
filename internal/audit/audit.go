@@ -51,6 +51,7 @@ func (l *Logger) LogDecision(record model.AuditRecord) {
 		"v3_strategy_mode", record.V3StrategyMode,
 		"v3_binding_reused", record.V3BindingReused,
 		"v4_runtime_mode", record.V4RuntimeMode,
+		"v4_route_source", record.V4RouteSource,
 		"v4_security_checks_enabled", record.V4SecurityChecksEnabled,
 		"v4_enrichment_mode", record.V4EnrichmentMode,
 		"v4_probe_enabled", record.V4ProbeEnabled,

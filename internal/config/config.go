@@ -249,6 +249,7 @@ type PerformanceConfig struct {
 
 type DenyPageConfig struct {
 	TargetURL    string `yaml:"target_url"`
+	RedirectEnabled bool `yaml:"redirect_enabled"`
 	PreserveHost bool   `yaml:"preserve_host"`
 	Title        string `yaml:"title"`
 	Heading      string `yaml:"heading"`

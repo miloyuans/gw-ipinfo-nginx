@@ -398,7 +398,11 @@ performance:
   proxy_expect_continue_timeout: 1s
 
 deny_page:
+  # 留空时返回内置静态拦截页；填写后可以选择反代到目标地址，或直接 302 跳转。
   target_url: "https://vpbet.com"
+  # false：默认反代到 target_url。
+  # true：直接 302 重定向到 target_url，不再通过网关反代拦截页目标站。
+  redirect_enabled: false
   preserve_host: false
   title: "Access Unavailable"
   heading: "Request Blocked"

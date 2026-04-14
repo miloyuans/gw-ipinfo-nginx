@@ -37,6 +37,7 @@ type AuditRecord struct {
 	V3StrategyMode          string
 	V3BindingReused         bool
 	V4RuntimeMode           string
+	V4RouteSource           string
 	V4SecurityChecksEnabled bool
 	V4EnrichmentMode        string
 	V4ProbeEnabled          bool

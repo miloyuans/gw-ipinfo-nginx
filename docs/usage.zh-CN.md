@@ -90,6 +90,12 @@
 - `security.privacy`
 - `deny_page`
 
+deny path 现在支持三种行为：
+
+- `deny_page.target_url` 为空：返回内置拦截页
+- `deny_page.target_url` 非空且 `deny_page.redirect_enabled=false`：反代到拦截目标
+- `deny_page.target_url` 非空且 `deny_page.redirect_enabled=true`：302 跳转到拦截目标
+
 典型场景：
 
 - 拦截 bot、爬虫、无语言头流量
@@ -257,7 +263,7 @@
 这时你可以把它理解成：
 
 - 放行：一个域名或多个域名统一通过默认后端 Nginx
-- 拦截：返回静态拦截页或反代到指定 deny 地址
+- 拦截：返回静态拦截页、反代到指定 deny 地址，或 302 跳转到指定 deny 地址
 
 ---
 
@@ -686,4 +692,3 @@ sh ./scripts/down.sh
 3. [configs/config.reference.zh.yaml](../configs/config.reference.zh.yaml)
 4. 你的实际 `configs/config.yaml`
 5. 如使用 v4，再看 `configs/passroute_v4.yaml`
-
