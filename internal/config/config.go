@@ -381,6 +381,7 @@ type V4Config struct {
 type V4SyncConfig struct {
 	Enabled       bool          `yaml:"enabled"`
 	Interval      time.Duration `yaml:"interval"`
+	ReadModelRefreshInterval time.Duration `yaml:"read_model_refresh_interval"`
 	LeaseName     string        `yaml:"lease_name"`
 	LeaseTTL      time.Duration `yaml:"lease_ttl"`
 	RenewInterval time.Duration `yaml:"renew_interval"`
@@ -864,6 +865,9 @@ func (c *Config) applyDefaults() {
 	if c.V4.ProbeDefaults.WorkspaceDir == "" && c.Storage.LocalPath != "" {
 		c.V4.ProbeDefaults.WorkspaceDir = filepath.Join(filepath.Dir(filepath.Clean(c.Storage.LocalPath)), "v4-probe-workspace")
 	}
+	if c.V4.Sync.ReadModelRefreshInterval == 0 {
+		c.V4.Sync.ReadModelRefreshInterval = 5 * time.Second
+	}
 	if c.V4.Telegram.Command == "" {
 		c.V4.Telegram.Command = "/routes"
 	}
@@ -1218,6 +1222,9 @@ func (c *Config) Validate() error {
 	if c.V4.Enabled {
 		if c.V4.Sync.Interval <= 0 {
 			errs = append(errs, errors.New("v4.sync.interval must be > 0"))
+		}
+		if c.V4.Sync.ReadModelRefreshInterval <= 0 {
+			errs = append(errs, errors.New("v4.sync.read_model_refresh_interval must be > 0"))
 		}
 		if strings.TrimSpace(c.V4.Sync.LeaseName) == "" {
 			errs = append(errs, errors.New("v4.sync.lease_name is required when v4.enabled is true"))

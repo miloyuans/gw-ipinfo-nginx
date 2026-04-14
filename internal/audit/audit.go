@@ -18,6 +18,7 @@ func (l *Logger) LogDecision(record model.AuditRecord) {
 	attrs := []any{
 		"event", "gateway_request",
 		"request_id", record.RequestID,
+		"instance_id", record.InstanceID,
 		"client_ip", record.ClientIP,
 		"service_name", record.ServiceName,
 		"upstream_url", record.UpstreamURL,
@@ -53,6 +54,8 @@ func (l *Logger) LogDecision(record model.AuditRecord) {
 		"v4_security_checks_enabled", record.V4SecurityChecksEnabled,
 		"v4_enrichment_mode", record.V4EnrichmentMode,
 		"v4_probe_enabled", record.V4ProbeEnabled,
+		"v4_evaluation_mode", record.V4EvaluationMode,
+		"v4_snapshot_version", record.V4SnapshotVersion,
 		"latency_ms", record.LatencyMS,
 		"country_code", record.CountryCode,
 		"country_name", record.CountryName,

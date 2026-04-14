@@ -79,9 +79,9 @@ func (s *Service) Run(ctx context.Context) {
 	}
 	s.refreshSnapshot(ctx)
 	s.refreshStates(ctx)
-	interval := s.cfg.Sync.Interval
+	interval := s.cfg.Sync.ReadModelRefreshInterval
 	if interval <= 0 {
-		interval = time.Minute
+		interval = 5 * time.Second
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()

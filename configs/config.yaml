@@ -157,6 +157,9 @@ v4:
     # conf 解析失败时不会覆盖历史快照。
     enabled: true
     interval: 1m
+    # 非 leader 副本从数据库刷新 v4 内存读模型的周期。
+    # 这个值越小，leader 写入数据库后的全局收敛越快；不会触发重新解析 nginx conf。
+    read_model_refresh_interval: 5s
     # 仅一个 leader 负责构建和写入 v4 snapshot。
     lease_name: "v4-snapshot-sync"
     lease_ttl: 45s

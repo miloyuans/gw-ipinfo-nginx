@@ -47,6 +47,7 @@ import (
 type Application struct {
 	cfg              *config.Config
 	logger           *slog.Logger
+	instanceID       string
 	server           *http.Server
 	mongoClient      *mongostore.Client
 	localStore       *localdisk.Store
@@ -72,6 +73,7 @@ func New(configPath string) (*Application, error) {
 	logger := logging.New(cfg.Logging)
 	metricsRegistry := metrics.NewRegistry()
 	metricSet := metrics.NewGatewayMetrics(metricsRegistry)
+	instanceID := workerID()
 
 	sharedStoragePath := cfg.Storage.LocalPath
 	cfg.Storage.LocalPath = resolveLocalStoragePath(cfg.Storage.LocalPath)
@@ -207,7 +209,7 @@ func New(configPath string) (*Application, error) {
 		if count <= 0 {
 			count = 1
 		}
-		baseID := workerID()
+		baseID := instanceID
 		alertWorkers = make([]*alerts.Worker, 0, count)
 		for idx := 0; idx < count; idx++ {
 			alertWorkers = append(alertWorkers, alerts.NewWorker(logger, alertRepo, sender, cfg.Alerts.Delivery, metricSet, fmt.Sprintf("%s-%d", baseID, idx+1)))
@@ -239,7 +241,7 @@ func New(configPath string) (*Application, error) {
 			v4EventService,
 			storageControl,
 			v4SyncStatePath,
-			workerID(),
+			instanceID,
 			resolver.ServiceNames(),
 			logger,
 		)
@@ -274,7 +276,7 @@ func New(configPath string) (*Application, error) {
 			commandLookupService = ipinfo.NewLookupService(&commandLookupCfg, l1, cacheRepo, commandIPInfoClient, metricSet)
 		}
 		commandBotStatePath := filepath.Join(filepath.Dir(filepath.Clean(sharedStoragePath)), "telegram-command-bot-state.json")
-		commandBot, err = alerts.NewCommandBot(cfg.Alerts.Telegram.CommandBot, logger, commandLookupService, storageControl, commandBotStatePath, workerID())
+		commandBot, err = alerts.NewCommandBot(cfg.Alerts.Telegram.CommandBot, logger, commandLookupService, storageControl, commandBotStatePath, instanceID)
 		if err != nil {
 			return nil, err
 		}
@@ -285,20 +287,21 @@ func New(configPath string) (*Application, error) {
 
 	var reportingService *reporting.Service
 	if sender != nil || cfg.Reports.Enabled {
-		reportingService, err = reporting.NewService(cfg, storageControl, logger, sender, metricSet, workerID())
+		reportingService, err = reporting.NewService(cfg, storageControl, logger, sender, metricSet, instanceID)
 		if err != nil {
 			return nil, err
 		}
 	}
 	lifecycleStatePath := filepath.Join(filepath.Dir(cfg.Storage.LocalPath), "gw-ipinfo-nginx.runtime.json")
 	hostname, _ := os.Hostname()
-	lifecycleManager := alerts.NewLifecycleManager(cfg.Alerts.Telegram, sender, logger, workerID(), hostname, lifecycleStatePath)
+	lifecycleManager := alerts.NewLifecycleManager(cfg.Alerts.Telegram, sender, logger, instanceID, hostname, lifecycleStatePath)
 
 	healthHandler := health.New(mongoChecker{controller: storageControl})
 	auditor := audit.New(logger)
 	gatewayHandler := &GatewayHandler{
 		cfg:             cfg,
 		logger:          logger,
+		instanceID:      instanceID,
 		auditor:         auditor,
 		metrics:         metricSet,
 		controller:      storageControl,
@@ -328,6 +331,7 @@ func New(configPath string) (*Application, error) {
 	return &Application{
 		cfg:              cfg,
 		logger:           logger,
+		instanceID:       instanceID,
 		server:           server.NewHTTPServer(cfg.Server, mux),
 		mongoClient:      mongoClient,
 		localStore:       localStore,
@@ -440,6 +444,7 @@ func (a *Application) run(ctx context.Context, listener net.Listener) error {
 type GatewayHandler struct {
 	cfg             *config.Config
 	logger          *slog.Logger
+	instanceID      string
 	auditor         *audit.Logger
 	metrics         *metrics.GatewayMetrics
 	controller      *storage.Controller
@@ -493,6 +498,8 @@ type routeContext struct {
 	V4SecurityChecksEnabled bool
 	V4EnrichmentMode        string
 	V4ProbeEnabled          bool
+	V4EvaluationMode        string
+	V4SnapshotVersion       string
 }
 
 type responseAction struct {
@@ -926,6 +933,8 @@ func (h *GatewayHandler) serveV4Fallback(w http.ResponseWriter, r *http.Request,
 		V4SecurityChecksEnabled: resolution.Host.SecurityChecksEnabled,
 		V4EnrichmentMode:        resolution.Host.IPEnrichmentMode,
 		V4ProbeEnabled:          resolution.Host.Probe.Enabled,
+		V4EvaluationMode:        v4EvaluationMode(resolution),
+		V4SnapshotVersion:       resolution.State.SnapshotVersion,
 	}
 	action := responseAction{upstreamHost: resolution.Host.BackendHost}
 	if outcome.decision.Allowed && resolution.State.Mode == v4model.ModeDegradedRedirect && resolution.State.RedirectURL != "" {
@@ -1425,6 +1434,7 @@ func safeURL(req *http.Request, maskQuery bool) string {
 func (h *GatewayHandler) auditRecord(req *http.Request, requestID string, service config.ServiceConfig, clientIP string, cacheSource ipctx.CacheSource, decision policy.Decision, ipContext *ipctx.Context, latency time.Duration, state flowState, routeMeta routeContext) model.AuditRecord {
 	record := model.AuditRecord{
 		RequestID:              requestID,
+		InstanceID:             h.instanceID,
 		ClientIP:               clientIP,
 		ServiceName:            service.Name,
 		UpstreamURL:            service.TargetURL,
@@ -1460,6 +1470,8 @@ func (h *GatewayHandler) auditRecord(req *http.Request, requestID string, servic
 		V4SecurityChecksEnabled: routeMeta.V4SecurityChecksEnabled,
 		V4EnrichmentMode:        routeMeta.V4EnrichmentMode,
 		V4ProbeEnabled:          routeMeta.V4ProbeEnabled,
+		V4EvaluationMode:        routeMeta.V4EvaluationMode,
+		V4SnapshotVersion:       routeMeta.V4SnapshotVersion,
 		LatencyMS:              float64(latency.Milliseconds()),
 	}
 	if ipContext != nil {
@@ -1552,4 +1564,11 @@ func routeSetHosts(compiled *routesets.Compiled) []string {
 		hosts = append(hosts, host)
 	}
 	return hosts
+}
+
+func v4EvaluationMode(resolution v4runtime.Resolution) string {
+	if resolution.Host.SecurityChecksEnabled {
+		return "full_security_chain"
+	}
+	return "light_passthrough_chain"
 }

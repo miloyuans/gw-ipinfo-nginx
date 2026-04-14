@@ -190,6 +190,9 @@ v4:
     # 解析失败时只记事件和日志，不会覆盖历史可用快照。
     enabled: true
     interval: 1m
+    # 非 leader 副本从数据库刷新 v4 内存读模型的周期。
+    # 仅用于同步数据库中的最新快照和运行态，不会重新解析 nginx conf。
+    read_model_refresh_interval: 5s
     # v4 snapshot 同步 leader 租约名；多副本下只允许一个 leader 周期写 Mongo。
     lease_name: "v4-snapshot-sync"
     # leader 租约 TTL。

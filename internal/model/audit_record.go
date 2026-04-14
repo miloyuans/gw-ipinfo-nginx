@@ -4,6 +4,7 @@ import "gw-ipinfo-nginx/internal/ipctx"
 
 type AuditRecord struct {
 	RequestID              string
+	InstanceID             string
 	ClientIP               string
 	ServiceName            string
 	UpstreamURL            string
@@ -39,6 +40,8 @@ type AuditRecord struct {
 	V4SecurityChecksEnabled bool
 	V4EnrichmentMode        string
 	V4ProbeEnabled          bool
+	V4EvaluationMode        string
+	V4SnapshotVersion       string
 	CountryCode            string
 	CountryName            string
 	Region                 string
