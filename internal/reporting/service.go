@@ -41,6 +41,7 @@ type Event struct {
 	TargetHost           string
 	BackendService       string
 	BackendHost          string
+	V4RouteSource        string
 	Host                 string
 	Path                 string
 	RequestURL           string
@@ -80,6 +81,7 @@ type Summary struct {
 	TargetHost             string             `json:"target_host" bson:"target_host"`
 	BackendService         string             `json:"backend_service" bson:"backend_service"`
 	BackendHost            string             `json:"backend_host" bson:"backend_host"`
+	V4RouteSource          string             `json:"v4_route_source" bson:"v4_route_source"`
 	V3SecurityFilterEnabled bool              `json:"v3_security_filter_enabled" bson:"v3_security_filter_enabled"`
 	V3SelectedTargetID      string            `json:"v3_selected_target_id" bson:"v3_selected_target_id"`
 	V3SelectedTargetHost    string            `json:"v3_selected_target_host" bson:"v3_selected_target_host"`
@@ -361,6 +363,7 @@ func applyEvent(summary *Summary, event Event, now time.Time) {
 	summary.TargetHost = event.TargetHost
 	summary.BackendService = event.BackendService
 	summary.BackendHost = event.BackendHost
+	summary.V4RouteSource = event.V4RouteSource
 	summary.V3SecurityFilterEnabled = event.V3SecurityFilterEnabled
 	summary.V3SelectedTargetID = event.V3SelectedTargetID
 	summary.V3SelectedTargetHost = event.V3SelectedTargetHost
@@ -1748,6 +1751,7 @@ func mergeSummaries(left, right Summary) Summary {
 		merged.TargetHost = right.TargetHost
 		merged.BackendService = right.BackendService
 		merged.BackendHost = right.BackendHost
+		merged.V4RouteSource = right.V4RouteSource
 		merged.V3SecurityFilterEnabled = right.V3SecurityFilterEnabled
 		merged.V3SelectedTargetID = right.V3SelectedTargetID
 		merged.V3SelectedTargetHost = right.V3SelectedTargetHost
