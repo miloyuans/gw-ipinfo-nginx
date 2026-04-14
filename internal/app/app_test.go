@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/http"
 	"log/slog"
 	"net/http/httptest"
 	"path/filepath"
@@ -11,10 +12,16 @@ import (
 	"time"
 
 	"gw-ipinfo-nginx/internal/alerts"
+	"gw-ipinfo-nginx/internal/audit"
+	"gw-ipinfo-nginx/internal/blockpage"
 	"gw-ipinfo-nginx/internal/config"
 	"gw-ipinfo-nginx/internal/ipctx"
 	"gw-ipinfo-nginx/internal/metrics"
 	"gw-ipinfo-nginx/internal/policy"
+	"gw-ipinfo-nginx/internal/proxy"
+	"gw-ipinfo-nginx/internal/realip"
+	"gw-ipinfo-nginx/internal/routing"
+	"gw-ipinfo-nginx/internal/routesets"
 )
 
 type failingAlertRepo struct{}
@@ -77,5 +84,103 @@ func TestResolveLocalStoragePathKeepsPathWhenPodNameMissing(t *testing.T) {
 	want := filepath.Join(string(filepath.Separator), "data", "shared", "gw-ipinfo-nginx.db")
 	if got != want {
 		t.Fatalf("resolveLocalStoragePath() = %q, want %q", got, want)
+	}
+}
+
+func TestServeHTTPDefaultRouteSetUsesDefaultChainBeforeV4Fallback(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Route-Chain", "default")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer backend.Close()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	realIPExtractor, err := realip.NewExtractor(config.RealIPConfig{
+		TrustAllSources:      true,
+		HeaderPriority:       []string{"CF-Connecting-IP"},
+		UntrustedProxyAction: "use_remote_addr",
+	})
+	if err != nil {
+		t.Fatalf("NewExtractor() error = %v", err)
+	}
+	policyEngine, err := policy.NewEngine(config.SecurityConfig{
+		AcceptLanguage: config.AcceptLanguageConfig{RequireHeader: false},
+	})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	proxyManager, err := proxy.NewManager([]config.ServiceConfig{
+		{
+			Name:              "default",
+			MatchPathPrefixes: []string{"/"},
+			TargetURL:         backend.URL,
+			PreserveHost:      true,
+		},
+	}, config.PerformanceConfig{}, nil, logger)
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+	denyResponder, err := blockpage.NewResponder(config.DenyPageConfig{}, config.PerformanceConfig{}, logger)
+	if err != nil {
+		t.Fatalf("NewResponder() error = %v", err)
+	}
+
+	compiled := &routesets.Compiled{
+		Enabled: true,
+		SourceRulesByHost: map[string][]routesets.CompiledRule{
+			"game.freefun.live": {
+				{
+					Kind:             routesets.KindDefault,
+					ID:               "default:game.freefun.live/",
+					SourceHost:       "game.freefun.live",
+					SourcePathPrefix: "/",
+				},
+			},
+		},
+		AllowedHosts: map[string]struct{}{
+			"game.freefun.live": {},
+		},
+	}
+	handler := &GatewayHandler{
+		cfg: &config.Config{
+			Server: config.ServerConfig{DenyStatusCode: http.StatusForbidden},
+			IPInfo: config.IPInfoConfig{Enabled: false},
+			Security: config.SecurityConfig{
+				AcceptLanguage: config.AcceptLanguageConfig{RequireHeader: false},
+			},
+			Logging: config.LoggingConfig{RedactQuery: true},
+		},
+		logger:          logger,
+		auditor:         audit.New(logger),
+		realIPExtractor: realIPExtractor,
+		resolver: routing.NewResolver(config.RoutingConfig{
+			DefaultService: "default",
+			Services: []config.ServiceConfig{
+				{
+					Name:              "default",
+					MatchPathPrefixes: []string{"/"},
+					TargetURL:         backend.URL,
+					PreserveHost:      true,
+				},
+			},
+		}),
+		routeRuntime:  routesets.NewRuntime(compiled, config.RouteSetsConfig{}, logger),
+		policyEngine:  policyEngine,
+		proxyManager:  proxyManager,
+		denyResponder: denyResponder,
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://game.freefun.live/login", nil)
+	req.Host = "game.freefun.live"
+	req.RemoteAddr = "8.8.8.8:12345"
+	recorder := httptest.NewRecorder()
+
+	handler.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("ServeHTTP() status = %d, want %d", recorder.Code, http.StatusNoContent)
+	}
+	if got := recorder.Header().Get("X-Route-Chain"); got != "default" {
+		t.Fatalf("ServeHTTP() X-Route-Chain = %q, want %q", got, "default")
 	}
 }

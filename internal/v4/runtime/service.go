@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -44,6 +45,7 @@ type Service struct {
 	serviceNames map[string]struct{}
 	mu           sync.RWMutex
 	hostsByName  map[string]v4model.SnapshotHost
+	statesByHost map[string]v4model.HostRuntimeState
 	fingerprint  string
 	snapshotVersion string
 	snapshotUpdatedAt time.Time
@@ -63,6 +65,7 @@ func NewService(cfg config.V4Config, routeFile config.RouteSetFileConfig, baseCo
 		logger:         logger,
 		serviceNames:   names,
 		hostsByName:    make(map[string]v4model.SnapshotHost),
+		statesByHost:   make(map[string]v4model.HostRuntimeState),
 	}
 }
 
@@ -75,6 +78,7 @@ func (s *Service) Run(ctx context.Context) {
 		return
 	}
 	s.refreshSnapshot(ctx)
+	s.refreshStates(ctx)
 	interval := s.cfg.Sync.Interval
 	if interval <= 0 {
 		interval = time.Minute
@@ -87,12 +91,18 @@ func (s *Service) Run(ctx context.Context) {
 			return
 		case <-ticker.C:
 			s.refreshSnapshot(ctx)
+			s.refreshStates(ctx)
 		}
 	}
 }
 
 func (s *Service) ReplaceSnapshot(snapshot v4model.Snapshot, hosts []v4model.SnapshotHost) bool {
-	return s.replaceSnapshot(snapshot, hosts)
+	changed := s.replaceSnapshot(snapshot, hosts)
+	if changed {
+		s.reconcileSnapshotState(context.Background(), snapshot, hosts)
+		s.refreshStates(context.Background())
+	}
+	return changed
 }
 
 func (s *Service) replaceSnapshot(snapshot v4model.Snapshot, hosts []v4model.SnapshotHost) bool {
@@ -126,6 +136,16 @@ func (s *Service) replaceSnapshot(snapshot v4model.Snapshot, hosts []v4model.Sna
 	return true
 }
 
+func (s *Service) clearSnapshotState() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.hostsByName = make(map[string]v4model.SnapshotHost)
+	s.statesByHost = make(map[string]v4model.HostRuntimeState)
+	s.fingerprint = ""
+	s.snapshotVersion = ""
+	s.snapshotUpdatedAt = time.Time{}
+}
+
 func (s *Service) refreshSnapshot(ctx context.Context) {
 	snapshot, hosts, found, err := s.snapshots.LoadLatest(ctx)
 	if err != nil {
@@ -138,6 +158,7 @@ func (s *Service) refreshSnapshot(ctx context.Context) {
 		return
 	}
 	if !found {
+		s.clearSnapshotState()
 		if s.logger != nil {
 			s.logger.Info("v4_runtime_snapshot_missing",
 				"event", "v4_runtime_snapshot_missing",
@@ -149,6 +170,7 @@ func (s *Service) refreshSnapshot(ctx context.Context) {
 	if !s.replaceSnapshot(snapshot, hosts) {
 		return
 	}
+	s.reconcileSnapshotState(ctx, snapshot, hosts)
 	if s.logger != nil {
 		s.logger.Info("v4_runtime_snapshot_refreshed",
 			"event", "v4_runtime_snapshot_refreshed",
@@ -170,6 +192,55 @@ func (s *Service) hostCount() int {
 	return len(s.hostsByName)
 }
 
+func (s *Service) refreshStates(ctx context.Context) {
+	if s == nil || s.states == nil {
+		return
+	}
+
+	s.mu.RLock()
+	if len(s.hostsByName) == 0 {
+		s.mu.RUnlock()
+		return
+	}
+	hosts := make([]v4model.SnapshotHost, 0, len(s.hostsByName))
+	for _, host := range s.hostsByName {
+		hosts = append(hosts, host)
+	}
+	snapshotVersion := s.snapshotVersion
+	snapshotFingerprint := s.fingerprint
+	s.mu.RUnlock()
+
+	states, err := s.states.List(ctx)
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Warn("v4_runtime_state_refresh_error",
+				"event", "v4_runtime_state_refresh_error",
+				"version", strings.TrimSpace(snapshotVersion),
+				"fingerprint", strings.TrimSpace(snapshotFingerprint),
+				"error", err,
+			)
+		}
+		return
+	}
+
+	stateByHost := make(map[string]v4model.HostRuntimeState, len(states))
+	for _, state := range states {
+		stateByHost[strings.TrimSpace(state.Host)] = state
+	}
+
+	next := make(map[string]v4model.HostRuntimeState, len(hosts))
+	for _, host := range hosts {
+		next[host.Host] = normalizeStateForHost(host, stateByHost[host.Host], snapshotVersion, snapshotFingerprint)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.snapshotVersion != snapshotVersion || s.fingerprint != snapshotFingerprint {
+		return
+	}
+	s.statesByHost = next
+}
+
 func (s *Service) Resolve(ctx context.Context, req *http.Request) Resolution {
 	if !s.Enabled() {
 		return Resolution{Reason: "v4_disabled"}
@@ -182,6 +253,9 @@ func (s *Service) Resolve(ctx context.Context, req *http.Request) Resolution {
 	s.mu.RLock()
 	spec, ok := s.hostsByName[host]
 	hasSnapshot := len(s.hostsByName) > 0
+	snapshotVersion := s.snapshotVersion
+	snapshotFingerprint := s.fingerprint
+	state, found := s.statesByHost[host]
 	s.mu.RUnlock()
 	if !hasSnapshot {
 		return Resolution{Reason: "no_snapshot"}
@@ -190,36 +264,94 @@ func (s *Service) Resolve(ctx context.Context, req *http.Request) Resolution {
 		return Resolution{Reason: "host_not_found"}
 	}
 
-	state, found, err := s.states.Get(ctx, host)
-	if err != nil {
-		if s.logger != nil {
-			s.logger.Warn("v4_runtime_state_load_error", "event", "v4_runtime_state_load_error", "host", host, "error", err)
-		}
-	}
 	if !found {
 		state = v4model.HostRuntimeState{
-			ID:        host,
-			Host:      host,
-			Mode:      v4model.ModePassthrough,
-			UpdatedAt: time.Now().UTC(),
+			ID:                 host,
+			Host:               host,
+			SnapshotVersion:    snapshotVersion,
+			SnapshotFingerprint: snapshotFingerprint,
+			Mode:               v4model.ModePassthrough,
+			UpdatedAt:          time.Now().UTC(),
 		}
 	}
-	state = normalizeStateForHost(spec, state)
+	state = normalizeStateForHost(spec, state, snapshotVersion, snapshotFingerprint)
 	return Resolution{Host: spec, State: state, Found: true, Reason: "matched"}
 }
 
-func (s *Service) ApplyProbeUpdate(ctx context.Context, update ProbeUpdate) (v4model.HostRuntimeState, bool, bool, error) {
-	state, _, err := s.states.Get(ctx, update.Host)
-	if err != nil {
-		return v4model.HostRuntimeState{}, false, false, err
+func (s *Service) reconcileSnapshotState(ctx context.Context, snapshot v4model.Snapshot, hosts []v4model.SnapshotHost) {
+	if s == nil || s.states == nil || len(hosts) == 0 {
+		return
 	}
-	if state.Host == "" {
+
+	states, err := s.states.List(ctx)
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Warn("v4_runtime_state_reconcile_list_error",
+				"event", "v4_runtime_state_reconcile_list_error",
+				"version", strings.TrimSpace(snapshot.Version),
+				"fingerprint", strings.TrimSpace(snapshot.Fingerprint),
+				"error", err,
+			)
+		}
+		return
+	}
+
+	stateByHost := make(map[string]v4model.HostRuntimeState, len(states))
+	for _, state := range states {
+		stateByHost[strings.TrimSpace(state.Host)] = state
+	}
+
+	now := time.Now().UTC()
+	updated := 0
+	for _, host := range hosts {
+		current := stateByHost[host.Host]
+		normalized := normalizeStateForHost(host, current, snapshot.Version, snapshot.Fingerprint)
+		if !runtimeStateNeedsUpdate(current, normalized) {
+			continue
+		}
+		normalized.UpdatedAt = now
+		if err := s.states.Upsert(ctx, normalized); err != nil {
+			if s.logger != nil {
+				s.logger.Warn("v4_runtime_state_reconcile_upsert_error",
+					"event", "v4_runtime_state_reconcile_upsert_error",
+					"host", host.Host,
+					"version", strings.TrimSpace(snapshot.Version),
+					"fingerprint", strings.TrimSpace(snapshot.Fingerprint),
+					"error", err,
+				)
+			}
+			continue
+		}
+		updated++
+	}
+
+	if updated > 0 && s.logger != nil {
+		s.logger.Info("v4_runtime_state_reconciled",
+			"event", "v4_runtime_state_reconciled",
+			"version", strings.TrimSpace(snapshot.Version),
+			"fingerprint", strings.TrimSpace(snapshot.Fingerprint),
+			"updated_hosts", updated,
+		)
+	}
+}
+
+func (s *Service) ApplyProbeUpdate(ctx context.Context, update ProbeUpdate) (v4model.HostRuntimeState, bool, bool, error) {
+	s.mu.RLock()
+	snapshotVersion := s.snapshotVersion
+	snapshotFingerprint := s.fingerprint
+	state, found := s.statesByHost[update.Host]
+	s.mu.RUnlock()
+
+	if !found || state.Host == "" {
 		state = v4model.HostRuntimeState{
-			ID:   update.Host,
-			Host: update.Host,
-			Mode: v4model.ModePassthrough,
+			ID:                  update.Host,
+			Host:                update.Host,
+			SnapshotVersion:     snapshotVersion,
+			SnapshotFingerprint: snapshotFingerprint,
+			Mode:                v4model.ModePassthrough,
 		}
 	}
+	state = normalizeStateForHost(v4model.SnapshotHost{Host: update.Host, Probe: update.Spec}, state, snapshotVersion, snapshotFingerprint)
 
 	now := update.ProbeAt.UTC()
 	state.LastProbeAt = now
@@ -268,10 +400,18 @@ func (s *Service) ApplyProbeUpdate(ctx context.Context, update ProbeUpdate) (v4m
 		state.RedirectURL = ""
 	}
 
+	state.SnapshotVersion = snapshotVersion
+	state.SnapshotFingerprint = snapshotFingerprint
 	state.UpdatedAt = now
 	if err := s.states.Upsert(ctx, state); err != nil {
 		return v4model.HostRuntimeState{}, false, false, err
 	}
+	s.mu.Lock()
+	if s.statesByHost == nil {
+		s.statesByHost = make(map[string]v4model.HostRuntimeState)
+	}
+	s.statesByHost[update.Host] = state
+	s.mu.Unlock()
 	return state, modeChanged, recovered, nil
 }
 
@@ -302,12 +442,27 @@ func switchAllowed(lastSwitchAt, now time.Time, interval time.Duration) bool {
 	return !lastSwitchAt.Add(interval).After(now)
 }
 
-func normalizeStateForHost(host v4model.SnapshotHost, state v4model.HostRuntimeState) v4model.HostRuntimeState {
+func normalizeStateForHost(host v4model.SnapshotHost, state v4model.HostRuntimeState, snapshotVersion, snapshotFingerprint string) v4model.HostRuntimeState {
 	if strings.TrimSpace(state.ID) == "" {
 		state.ID = host.Host
 	}
 	if strings.TrimSpace(state.Host) == "" {
 		state.Host = host.Host
+	}
+	if staleStateForSnapshot(state, snapshotVersion, snapshotFingerprint) {
+		state = v4model.HostRuntimeState{
+			ID:                  host.Host,
+			Host:                host.Host,
+			SnapshotVersion:     snapshotVersion,
+			SnapshotFingerprint: snapshotFingerprint,
+			Mode:                v4model.ModePassthrough,
+		}
+	}
+	if strings.TrimSpace(snapshotVersion) != "" {
+		state.SnapshotVersion = snapshotVersion
+	}
+	if strings.TrimSpace(snapshotFingerprint) != "" {
+		state.SnapshotFingerprint = snapshotFingerprint
 	}
 
 	switch strings.TrimSpace(state.Mode) {
@@ -331,6 +486,33 @@ func normalizeStateForHost(host v4model.SnapshotHost, state v4model.HostRuntimeS
 		state.RedirectURL = ""
 	}
 	return state
+}
+
+func staleStateForSnapshot(state v4model.HostRuntimeState, snapshotVersion, snapshotFingerprint string) bool {
+	currentVersion := strings.TrimSpace(snapshotVersion)
+	currentFingerprint := strings.TrimSpace(snapshotFingerprint)
+	stateVersion := strings.TrimSpace(state.SnapshotVersion)
+	stateFingerprint := strings.TrimSpace(state.SnapshotFingerprint)
+
+	if currentVersion == "" && currentFingerprint == "" {
+		return false
+	}
+	if stateVersion == "" && stateFingerprint == "" {
+		return true
+	}
+	if currentVersion != "" && stateVersion != "" && currentVersion != stateVersion {
+		return true
+	}
+	if currentFingerprint != "" && stateFingerprint != "" && currentFingerprint != stateFingerprint {
+		return true
+	}
+	return false
+}
+
+func runtimeStateNeedsUpdate(current, normalized v4model.HostRuntimeState) bool {
+	current.UpdatedAt = time.Time{}
+	normalized.UpdatedAt = time.Time{}
+	return !reflect.DeepEqual(current, normalized)
 }
 
 func isOlderSnapshot(incoming v4model.Snapshot, currentUpdatedAt time.Time, currentVersion string) bool {

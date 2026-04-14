@@ -9,8 +9,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"gw-ipinfo-nginx/internal/runtimex"
-
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -39,10 +37,8 @@ const (
 var ErrNotFound = errors.New("localdisk: not found")
 
 type Store struct {
-	db              *bolt.DB
-	path            string
-	peerPattern     string
-	peerOpenTimeout time.Duration
+	db   *bolt.DB
+	path string
 }
 
 func Open(path string) (*Store, error) {
@@ -63,10 +59,8 @@ func openWithTimeout(path string, timeout time.Duration) (*Store, error) {
 	}
 
 	store := &Store{
-		db:              db,
-		path:            filepath.Clean(path),
-		peerPattern:     peerPatternForPath(path),
-		peerOpenTimeout: 200 * time.Millisecond,
+		db:   db,
+		path: filepath.Clean(path),
 	}
 	if err := store.init(); err != nil {
 		_ = db.Close()
@@ -184,10 +178,7 @@ func (s *Store) GetJSON(ctx context.Context, bucket, key string, dst any) error 
 		}
 		return json.Unmarshal(value, dst)
 	})
-	if err == nil || !errors.Is(err, ErrNotFound) {
-		return err
-	}
-	return s.getJSONFromPeers(ctx, bucket, key, dst)
+	return err
 }
 
 func (s *Store) Delete(ctx context.Context, bucket, key string) error {
@@ -271,56 +262,7 @@ func (s *Store) ForEachJSON(ctx context.Context, bucket string, fn func(key stri
 	}); err != nil {
 		return err
 	}
-	return s.forEachPeerJSON(ctx, bucket, fn)
-}
-
-func (s *Store) getJSONFromPeers(ctx context.Context, bucket, key string, dst any) error {
-	paths, err := s.peerPaths()
-	if err != nil {
-		return err
-	}
-
-	var firstErr error
-	for _, peerPath := range paths {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		peerDB, err := bolt.Open(peerPath, 0o600, &bolt.Options{Timeout: s.peerOpenTimeout, ReadOnly: true})
-		if err != nil {
-			if firstErr == nil && !errors.Is(err, bolt.ErrTimeout) {
-				firstErr = err
-			}
-			continue
-		}
-
-		viewErr := peerDB.View(func(tx *bolt.Tx) error {
-			b := tx.Bucket([]byte(bucket))
-			if b == nil {
-				return ErrNotFound
-			}
-			value := b.Get([]byte(key))
-			if value == nil {
-				return ErrNotFound
-			}
-			return json.Unmarshal(value, dst)
-		})
-		_ = peerDB.Close()
-
-		if viewErr == nil {
-			return nil
-		}
-		if !errors.Is(viewErr, ErrNotFound) && firstErr == nil {
-			firstErr = viewErr
-		}
-	}
-
-	if firstErr != nil {
-		return firstErr
-	}
-	return ErrNotFound
+	return nil
 }
 
 func (s *Store) ForKeyJSON(ctx context.Context, bucket, key string, fn func(raw []byte) error) error {
@@ -344,112 +286,5 @@ func (s *Store) ForKeyJSON(ctx context.Context, bucket, key string, fn func(raw 
 		return err
 	}
 
-	paths, err := s.peerPaths()
-	if err != nil {
-		return err
-	}
-
-	for _, peerPath := range paths {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		peerDB, err := bolt.Open(peerPath, 0o600, &bolt.Options{Timeout: s.peerOpenTimeout, ReadOnly: true})
-		if err != nil {
-			continue
-		}
-		viewErr := peerDB.View(func(tx *bolt.Tx) error {
-			b := tx.Bucket([]byte(bucket))
-			if b == nil {
-				return nil
-			}
-			value := b.Get([]byte(key))
-			if value == nil {
-				return nil
-			}
-			return fn(append([]byte(nil), value...))
-		})
-		_ = peerDB.Close()
-		if viewErr != nil {
-			return viewErr
-		}
-	}
 	return nil
-}
-
-func (s *Store) forEachPeerJSON(ctx context.Context, bucket string, fn func(key string, raw []byte) error) error {
-	paths, err := s.peerPaths()
-	if err != nil {
-		return err
-	}
-
-	for _, peerPath := range paths {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		peerDB, err := bolt.Open(peerPath, 0o600, &bolt.Options{Timeout: s.peerOpenTimeout, ReadOnly: true})
-		if err != nil {
-			continue
-		}
-
-		viewErr := peerDB.View(func(tx *bolt.Tx) error {
-			b := tx.Bucket([]byte(bucket))
-			if b == nil {
-				return nil
-			}
-			cursor := b.Cursor()
-			for key, value := cursor.First(); key != nil; key, value = cursor.Next() {
-				if err := fn(string(key), append([]byte(nil), value...)); err != nil {
-					return err
-				}
-			}
-			return nil
-		})
-		_ = peerDB.Close()
-
-		if viewErr != nil {
-			return viewErr
-		}
-	}
-	return nil
-}
-
-func (s *Store) peerPaths() ([]string, error) {
-	if s.peerPattern == "" {
-		return nil, nil
-	}
-
-	paths, err := filepath.Glob(s.peerPattern)
-	if err != nil {
-		return nil, err
-	}
-
-	filtered := make([]string, 0, len(paths))
-	for _, path := range paths {
-		clean := filepath.Clean(path)
-		if clean == s.path {
-			continue
-		}
-		filtered = append(filtered, clean)
-	}
-	return filtered, nil
-}
-
-func peerPatternForPath(path string) string {
-	scope := runtimex.WorkerScope()
-	if scope == "" {
-		return ""
-	}
-
-	clean := filepath.Clean(path)
-	dir := filepath.Dir(clean)
-	if filepath.Base(dir) != scope {
-		return ""
-	}
-	return filepath.Join(filepath.Dir(dir), "*", filepath.Base(clean))
 }

@@ -84,6 +84,8 @@ type ProbeSpec struct {
 type HostRuntimeState struct {
 	ID                string    `json:"id" bson:"_id"`
 	Host              string    `json:"host" bson:"host"`
+	SnapshotVersion   string    `json:"snapshot_version" bson:"snapshot_version"`
+	SnapshotFingerprint string  `json:"snapshot_fingerprint" bson:"snapshot_fingerprint"`
 	Mode              string    `json:"mode" bson:"mode"`
 	SourceURL         string    `json:"source_url" bson:"source_url"`
 	RedirectURL       string    `json:"redirect_url" bson:"redirect_url"`

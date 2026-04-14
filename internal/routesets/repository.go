@@ -74,46 +74,29 @@ func (r *Repository) ReplaceLatest(ctx context.Context, compiled *Compiled, sour
 }
 
 func (r *Repository) LoadLatest(ctx context.Context) (*Compiled, Manifest, bool, error) {
-	var (
-		mongoManifest Manifest
-		mongoFound    bool
-	)
-	if client := r.mongoClient(); client != nil {
+	if r.mongoAuthoritative() {
+		client := r.mongoClient()
 		manifest, found, err := r.loadMongo(ctx, client)
-		if err == nil {
-			mongoManifest = manifest
-			mongoFound = found
-		} else {
+		if err != nil {
 			r.controller.HandleMongoError(err)
+		} else {
+			if !found {
+				return nil, Manifest{}, false, nil
+			}
+			compiled, decodeErr := decodeManifest(manifest)
+			return compiled, manifest, true, decodeErr
 		}
 	}
 
 	localManifest, localFound, localErr := r.loadLocal(ctx)
 	if localErr != nil {
-		if mongoFound {
-			compiled, err := decodeManifest(mongoManifest)
-			return compiled, mongoManifest, true, err
-		}
 		return nil, Manifest{}, false, localErr
 	}
-
-	switch {
-	case mongoFound && localFound:
-		if newerManifest(localManifest, mongoManifest) {
-			compiled, err := decodeManifest(localManifest)
-			return compiled, localManifest, true, err
-		}
-		compiled, err := decodeManifest(mongoManifest)
-		return compiled, mongoManifest, true, err
-	case mongoFound:
-		compiled, err := decodeManifest(mongoManifest)
-		return compiled, mongoManifest, true, err
-	case localFound:
+	if localFound {
 		compiled, err := decodeManifest(localManifest)
 		return compiled, localManifest, true, err
-	default:
-		return nil, Manifest{}, false, nil
 	}
+	return nil, Manifest{}, false, nil
 }
 
 func (r *Repository) Replay(ctx context.Context, client *mongostore.Client, batchSize int) (int, error) {
@@ -153,11 +136,11 @@ func (r *Repository) loadLocal(ctx context.Context) (Manifest, bool, error) {
 func (r *Repository) replaceMongo(ctx context.Context, client *mongostore.Client, manifest Manifest) error {
 	child, cancel := client.WithTimeout(ctx)
 	defer cancel()
-	_, err := client.Database().Collection(CollectionManifests).UpdateByID(
+	_, err := client.Database().Collection(CollectionManifests).ReplaceOne(
 		child,
-		activeManifestID,
-		bson.M{"$set": manifest},
-		options.Update().SetUpsert(true),
+		bson.M{"_id": activeManifestID},
+		manifest,
+		options.Replace().SetUpsert(true),
 	)
 	return err
 }
@@ -227,16 +210,6 @@ func decodeManifest(manifest Manifest) (*Compiled, error) {
 	return &compiled, nil
 }
 
-func newerManifest(left, right Manifest) bool {
-	leftTime := left.UpdatedAt.UTC()
-	rightTime := right.UpdatedAt.UTC()
-	if !leftTime.IsZero() && !rightTime.IsZero() {
-		if leftTime.After(rightTime) {
-			return true
-		}
-		if leftTime.Before(rightTime) {
-			return false
-		}
-	}
-	return strings.TrimSpace(left.Version) > strings.TrimSpace(right.Version)
+func (r *Repository) mongoAuthoritative() bool {
+	return r != nil && r.controller != nil && r.controller.Client() != nil && r.controller.Mode() != storage.ModeLocal
 }

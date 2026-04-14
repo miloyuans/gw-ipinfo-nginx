@@ -111,7 +111,7 @@ func (s *Service) BuildRoutesSummary(ctx context.Context) (Result, error) {
 
 	summary.WriteString("\n<b>Top Hosts / 摘要域名</b>\n")
 	for _, host := range summaryHosts {
-		state := normalizeDisplayedState(host, stateByHost[host.Host])
+		state := normalizeDisplayedState(snapshot, host, stateByHost[host.Host])
 		mode := strings.TrimSpace(state.Mode)
 		if mode == "" {
 			mode = v4model.ModePassthrough
@@ -178,7 +178,7 @@ func buildHTMLDocument(snapshot v4model.Snapshot, syncView syncView, hosts []v4m
 	buffer.WriteString("<table border=\"1\" cellspacing=\"0\" cellpadding=\"6\">")
 	buffer.WriteString("<tr><th>Host<br/>入口域名</th><th>Mode<br/>运行模式</th><th>Backend Service<br/>后端服务</th><th>Backend Host<br/>后端 Host</th><th>Security<br/>安全检查</th><th>Enrichment<br/>IP 丰富化</th><th>Probe<br/>探测</th><th>Targets<br/>目标数</th><th>Last Reason<br/>最近原因</th><th>Redirect URL<br/>降级跳转</th></tr>")
 	for _, host := range hosts {
-		state := normalizeDisplayedState(host, stateByHost[host.Host])
+		state := normalizeDisplayedState(snapshot, host, stateByHost[host.Host])
 		mode := strings.TrimSpace(state.Mode)
 		if mode == "" {
 			mode = v4model.ModePassthrough
@@ -341,9 +341,24 @@ func trimForSummary(value string, limit int) string {
 	return value[:limit] + "..."
 }
 
-func normalizeDisplayedState(host v4model.SnapshotHost, state v4model.HostRuntimeState) v4model.HostRuntimeState {
+func normalizeDisplayedState(snapshot v4model.Snapshot, host v4model.SnapshotHost, state v4model.HostRuntimeState) v4model.HostRuntimeState {
 	if strings.TrimSpace(state.Host) == "" {
 		state.Host = host.Host
+	}
+	if staleDisplayedState(snapshot, state) {
+		state = v4model.HostRuntimeState{
+			ID:                  host.Host,
+			Host:                host.Host,
+			SnapshotVersion:     strings.TrimSpace(snapshot.Version),
+			SnapshotFingerprint: strings.TrimSpace(snapshot.Fingerprint),
+			Mode:                v4model.ModePassthrough,
+		}
+	}
+	if strings.TrimSpace(snapshot.Version) != "" {
+		state.SnapshotVersion = strings.TrimSpace(snapshot.Version)
+	}
+	if strings.TrimSpace(snapshot.Fingerprint) != "" {
+		state.SnapshotFingerprint = strings.TrimSpace(snapshot.Fingerprint)
 	}
 
 	switch strings.TrimSpace(state.Mode) {
@@ -367,4 +382,25 @@ func normalizeDisplayedState(host v4model.SnapshotHost, state v4model.HostRuntim
 		state.RedirectURL = ""
 	}
 	return state
+}
+
+func staleDisplayedState(snapshot v4model.Snapshot, state v4model.HostRuntimeState) bool {
+	snapshotVersion := strings.TrimSpace(snapshot.Version)
+	snapshotFingerprint := strings.TrimSpace(snapshot.Fingerprint)
+	stateVersion := strings.TrimSpace(state.SnapshotVersion)
+	stateFingerprint := strings.TrimSpace(state.SnapshotFingerprint)
+
+	if snapshotVersion == "" && snapshotFingerprint == "" {
+		return false
+	}
+	if stateVersion == "" && stateFingerprint == "" {
+		return true
+	}
+	if snapshotVersion != "" && stateVersion != "" && snapshotVersion != stateVersion {
+		return true
+	}
+	if snapshotFingerprint != "" && stateFingerprint != "" && snapshotFingerprint != stateFingerprint {
+		return true
+	}
+	return false
 }

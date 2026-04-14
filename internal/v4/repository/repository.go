@@ -72,82 +72,52 @@ func (r *RuntimeStateRepository) Name() string { return "v4_runtime_states" }
 func (r *EventRepository) Name() string        { return "v4_events" }
 
 func (r *SnapshotRepository) LoadLatest(ctx context.Context) (v4model.Snapshot, []v4model.SnapshotHost, bool, error) {
-	var (
-		mongoSnapshot v4model.Snapshot
-		mongoHosts    []v4model.SnapshotHost
-		mongoFound    bool
-	)
-	if client := r.controller.Client(); client != nil && r.controller.Mode() != storage.ModeLocal {
+	if r.mongoAuthoritative() {
+		client := r.controller.Client()
 		snapshot, hosts, found, err := r.loadLatestMongo(ctx, client)
-		if err == nil {
+		if err != nil {
+			r.controller.HandleMongoError(err)
+		} else {
+			if !found {
+				return v4model.Snapshot{}, nil, false, nil
+			}
 			if valid, validationErr := r.validateLoadedSnapshot("mongo", snapshot, hosts); valid {
-				mongoSnapshot = snapshot
-				mongoHosts = hosts
-				mongoFound = found
+				return snapshot, hosts, true, nil
 			} else if validationErr != nil {
 				r.logSnapshotInvalid("mongo", snapshot, validationErr)
 			}
-		} else {
-			r.controller.HandleMongoError(err)
+			return v4model.Snapshot{}, nil, false, nil
 		}
 	}
 	localSnapshot, localHosts, localFound, localErr := r.loadLatestLocal(ctx)
 	if localErr != nil {
-		if mongoFound {
-			return mongoSnapshot, mongoHosts, true, nil
-		}
 		return v4model.Snapshot{}, nil, false, localErr
 	}
 	if valid, validationErr := r.validateLoadedSnapshot("localdisk", localSnapshot, localHosts); !valid {
-		invalidSnapshot := localSnapshot
-		localSnapshot = v4model.Snapshot{}
-		localHosts = nil
-		localFound = false
 		if validationErr != nil {
-			r.logSnapshotInvalid("localdisk", invalidSnapshot, validationErr)
+			r.logSnapshotInvalid("localdisk", localSnapshot, validationErr)
 		}
-	}
-	if mongoFound && localFound {
-		if newerSnapshot(localSnapshot, mongoSnapshot) {
-			return localSnapshot, localHosts, true, nil
-		}
-		return mongoSnapshot, mongoHosts, true, nil
-	}
-	if mongoFound {
-		return mongoSnapshot, mongoHosts, true, nil
+		return v4model.Snapshot{}, nil, false, nil
 	}
 	return localSnapshot, localHosts, localFound, nil
 }
 
 func (r *SnapshotRepository) LoadSyncState(ctx context.Context) (v4model.SyncState, bool, error) {
-	var (
-		mongoState v4model.SyncState
-		mongoFound bool
-	)
-	if client := r.controller.Client(); client != nil && r.controller.Mode() != storage.ModeLocal {
+	if r.mongoAuthoritative() {
+		client := r.controller.Client()
 		state, found, err := r.loadSyncStateMongo(ctx, client)
-		if err == nil {
-			mongoState = state
-			mongoFound = found
-		} else {
+		if err != nil {
 			r.controller.HandleMongoError(err)
+		} else {
+			if !found {
+				return v4model.SyncState{}, false, nil
+			}
+			return state, true, nil
 		}
 	}
 	localState, localFound, localErr := r.loadSyncStateLocal(ctx)
 	if localErr != nil {
-		if mongoFound {
-			return mongoState, true, nil
-		}
 		return v4model.SyncState{}, false, localErr
-	}
-	if mongoFound && localFound {
-		if newerSyncState(localState, mongoState) {
-			return localState, true, nil
-		}
-		return mongoState, true, nil
-	}
-	if mongoFound {
-		return mongoState, true, nil
 	}
 	return localState, localFound, nil
 }
@@ -206,7 +176,8 @@ func (r *SnapshotRepository) Replay(ctx context.Context, client *mongostore.Clie
 }
 
 func (r *RuntimeStateRepository) Get(ctx context.Context, host string) (v4model.HostRuntimeState, bool, error) {
-	if client := r.controller.Client(); client != nil && r.controller.Mode() != storage.ModeLocal {
+	if r.mongoAuthoritative() {
+		client := r.controller.Client()
 		state, found, err := r.getMongo(ctx, client, host)
 		if err == nil {
 			return state, found, nil
@@ -232,14 +203,15 @@ func (r *RuntimeStateRepository) Upsert(ctx context.Context, state v4model.HostR
 }
 
 func (r *RuntimeStateRepository) List(ctx context.Context) ([]v4model.HostRuntimeState, error) {
-	states := map[string]v4model.HostRuntimeState{}
-	if client := r.controller.Client(); client != nil && r.controller.Mode() != storage.ModeLocal {
+	if r.mongoAuthoritative() {
+		client := r.controller.Client()
 		result, err := r.listMongo(ctx, client)
 		if err == nil {
 			return result, nil
 		}
 		r.controller.HandleMongoError(err)
 	}
+	states := map[string]v4model.HostRuntimeState{}
 	err := r.controller.Local().ForEachJSON(ctx, localdisk.BucketV4RuntimeStates, func(key string, raw []byte) error {
 		var state v4model.HostRuntimeState
 		if err := json.Unmarshal(raw, &state); err != nil {
@@ -307,7 +279,8 @@ func (r *EventRepository) Emit(ctx context.Context, event v4model.Event, dedupeW
 }
 
 func (r *EventRepository) ListRecent(ctx context.Context, limit int) ([]v4model.Event, error) {
-	if client := r.controller.Client(); client != nil && r.controller.Mode() != storage.ModeLocal {
+	if r.mongoAuthoritative() {
+		client := r.controller.Client()
 		events, err := r.listRecentMongo(ctx, client, limit)
 		if err == nil {
 			return events, nil
@@ -361,12 +334,6 @@ func (r *SnapshotRepository) loadLatestLocal(ctx context.Context) (v4model.Snaps
 		return v4model.Snapshot{}, nil, false, err
 	}
 	hosts := selectSnapshotHosts(snapshot, hostsMap)
-	if len(hosts) == 0 && len(hostsMap) > 0 {
-		hosts = make([]v4model.SnapshotHost, 0, len(hostsMap))
-		for _, host := range hostsMap {
-			hosts = append(hosts, host)
-		}
-	}
 	sort.Slice(hosts, func(i, j int) bool { return hosts[i].Host < hosts[j].Host })
 	return snapshot, hosts, true, nil
 }
@@ -718,43 +685,16 @@ func (r *EventRepository) persistLocalMirror(ctx context.Context, event v4model.
 	})
 }
 
-func newerSnapshot(left, right v4model.Snapshot) bool {
-	leftUpdated := left.UpdatedAt.UTC()
-	rightUpdated := right.UpdatedAt.UTC()
-	if !leftUpdated.IsZero() && !rightUpdated.IsZero() {
-		if leftUpdated.After(rightUpdated) {
-			return true
-		}
-		if leftUpdated.Before(rightUpdated) {
-			return false
-		}
-	}
-	return strings.TrimSpace(left.Version) > strings.TrimSpace(right.Version)
+func (r *SnapshotRepository) mongoAuthoritative() bool {
+	return r != nil && r.controller != nil && r.controller.Client() != nil && r.controller.Mode() != storage.ModeLocal
 }
 
-func newerSyncState(left, right v4model.SyncState) bool {
-	leftUpdated := maxTime(left.UpdatedAt, left.LastSuccessAt, left.LastSyncAt)
-	rightUpdated := maxTime(right.UpdatedAt, right.LastSuccessAt, right.LastSyncAt)
-	if !leftUpdated.IsZero() && !rightUpdated.IsZero() {
-		if leftUpdated.After(rightUpdated) {
-			return true
-		}
-		if leftUpdated.Before(rightUpdated) {
-			return false
-		}
-	}
-	return strings.TrimSpace(left.LastSnapshotVersion) > strings.TrimSpace(right.LastSnapshotVersion)
+func (r *RuntimeStateRepository) mongoAuthoritative() bool {
+	return r != nil && r.controller != nil && r.controller.Client() != nil && r.controller.Mode() != storage.ModeLocal
 }
 
-func maxTime(values ...time.Time) time.Time {
-	latest := time.Time{}
-	for _, value := range values {
-		value = value.UTC()
-		if value.After(latest) {
-			latest = value
-		}
-	}
-	return latest
+func (r *EventRepository) mongoAuthoritative() bool {
+	return r != nil && r.controller != nil && r.controller.Client() != nil && r.controller.Mode() != storage.ModeLocal
 }
 
 func stampSnapshotHosts(snapshot v4model.Snapshot, hosts []v4model.SnapshotHost) []v4model.SnapshotHost {
