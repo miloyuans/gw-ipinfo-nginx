@@ -498,7 +498,7 @@ func (r *SnapshotRepository) replaceMongo(ctx context.Context, client *mongostor
 			return err
 		}
 	}
-	_, err := hostCollection.DeleteMany(child, bson.M{"_id": bson.M{"$nin": hostIDs}})
+	_, err = hostCollection.DeleteMany(child, bson.M{"_id": bson.M{"$nin": hostIDs}})
 	if err != nil {
 		return err
 	}
@@ -528,7 +528,7 @@ func (r *SnapshotRepository) upsertSyncStateMongo(ctx context.Context, client *m
 	if found && staleSyncStateWrite(current, state) {
 		return nil
 	}
-	_, err := client.Database().Collection(v4model.CollectionSnapshots).ReplaceOne(
+	_, err = client.Database().Collection(v4model.CollectionSnapshots).ReplaceOne(
 		child,
 		bson.M{"_id": v4model.SyncStateID},
 		state,
@@ -592,7 +592,7 @@ func (r *RuntimeStateRepository) upsertMongo(ctx context.Context, client *mongos
 	if found && staleRuntimeStateWrite(current, state) {
 		return nil
 	}
-	_, err := client.Database().Collection(v4model.CollectionRuntimeStates).UpdateByID(child, state.Host, bson.M{"$set": state}, options.Update().SetUpsert(true))
+	_, err = client.Database().Collection(v4model.CollectionRuntimeStates).UpdateByID(child, state.Host, bson.M{"$set": state}, options.Update().SetUpsert(true))
 	return err
 }
 
@@ -744,7 +744,6 @@ func stampSnapshotHosts(snapshot v4model.Snapshot, hosts []v4model.SnapshotHost)
 		if version != "" {
 			host.SnapshotID = version
 		}
-		host.WriterInstanceID = snapshot.WriterInstanceID
 		host.UpdatedAt = host.UpdatedAt.UTC()
 		stamped = append(stamped, host)
 	}

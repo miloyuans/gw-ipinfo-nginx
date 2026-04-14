@@ -156,7 +156,7 @@ func (r *Repository) replaceMongo(ctx context.Context, client *mongostore.Client
 	if found && staleManifestWrite(current, manifest) {
 		return nil
 	}
-	_, err := client.Database().Collection(CollectionManifests).ReplaceOne(
+	_, err = client.Database().Collection(CollectionManifests).ReplaceOne(
 		child,
 		bson.M{"_id": activeManifestID},
 		manifest,
