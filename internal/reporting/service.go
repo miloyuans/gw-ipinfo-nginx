@@ -192,10 +192,14 @@ type Service struct {
 	lastSkipLogKey string
 }
 
-func NewService(cfg *config.Config, controller *storage.Controller, logger *slog.Logger, sender *alerts.Sender, metricsSet *metrics.GatewayMetrics, workerID string) (*Service, error) {
+func NewService(cfg *config.Config, controller *storage.Controller, logger *slog.Logger, sender *alerts.Sender, metricsSet *metrics.GatewayMetrics, workerID string, sharedStoragePath string) (*Service, error) {
 	location, locationName, err := resolveReportLocation(cfg.Reports)
 	if err != nil {
 		return nil, err
+	}
+	leaseBasePath := strings.TrimSpace(sharedStoragePath)
+	if leaseBasePath == "" {
+		leaseBasePath = cfg.Storage.LocalPath
 	}
 	service := &Service{
 		cfg:            cfg,
@@ -208,7 +212,7 @@ func NewService(cfg *config.Config, controller *storage.Controller, logger *slog
 		queue:          make(chan Event, cfg.Perf.StatsQueueSize),
 		workerID:       workerID,
 		collectionName: cfg.Cache.MongoCollections.ReportEvents,
-		leaseStore:     newReportLeaseStore(controller, filepath.Join(filepath.Dir(filepath.Clean(cfg.Storage.LocalPath)), "report-scheduler-lease.json"), cfg.Cache.MongoCollections.ReportEvents, cfg.Reports.LeaderLeaseName),
+		leaseStore:     newReportLeaseStore(controller, filepath.Join(filepath.Dir(filepath.Clean(leaseBasePath)), "report-scheduler-lease.json"), cfg.Cache.MongoCollections.ReportEvents, cfg.Reports.LeaderLeaseName),
 	}
 	if controller != nil {
 		controller.RegisterReplayer(service)
@@ -858,8 +862,14 @@ func (s *Service) loadReportState(ctx context.Context, dayKey string) (reportDel
 		if err == nil {
 			return state, nil
 		}
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return defaultState, nil
+		}
 		if !errors.Is(err, mongo.ErrNoDocuments) {
 			s.controller.HandleMongoError(err)
+			if s.controller.Mode() != storage.ModeLocal {
+				return defaultState, err
+			}
 		}
 	}
 
@@ -891,6 +901,13 @@ func (s *Service) saveReportState(ctx context.Context, state reportDeliveryState
 			options.Replace().SetUpsert(true),
 		)
 		if err == nil {
+			if mirrorErr := s.controller.Local().PutJSON(ctx, localdisk.BucketMetadata, state.ID, state); mirrorErr != nil && s.logger != nil {
+				s.logger.Warn("daily_report_state_local_mirror_error",
+					"event", "daily_report_state_local_mirror_error",
+					"day_key", state.Day,
+					"error", mirrorErr,
+				)
+			}
 			return nil
 		}
 		s.controller.HandleMongoError(err)
@@ -967,6 +984,9 @@ func (s *Service) loadDay(ctx context.Context, dayKey string) ([]Summary, error)
 			return summaries, nil
 		}
 		s.controller.HandleMongoError(err)
+		if s.controller.Mode() != storage.ModeLocal {
+			return nil, err
+		}
 	}
 
 	prefix := dayKey + "|"
@@ -2376,18 +2396,13 @@ func reportHostSummaryTable(values map[string]hostAggregate) string {
 	b.WriteString(`<th class="num">跳转次数</th>`)
 	b.WriteString(`<th>拦截原因</th>`)
 	b.WriteString(`<th>路由策略</th>`)
+	b.WriteString(`<th class="num">路径去重数</th>`)
 	b.WriteString(`<th>路径列表</th>`)
-	b.WriteString(`<th>客户端 IP 列表</th>`)
 	b.WriteString(`</tr></thead><tbody>`)
 	if len(rows) == 0 {
 		b.WriteString(`<tr><td colspan="11" class="muted">No host traffic</td></tr>`)
 	} else {
 		for _, row := range rows {
-			ipRows := topMap(row.ClientIPs, 0)
-			ipValues := make([]string, 0, len(ipRows))
-			for _, ipRow := range ipRows {
-				ipValues = append(ipValues, fmt.Sprintf("%s=%d", ipRow.Key, ipRow.Value))
-			}
 			routeSummary := joinAllCounts(row.RouteSetCounts)
 			routeIDSummary := joinAllCounts(row.RouteIDCounts)
 			if routeIDSummary != "" {
@@ -2406,8 +2421,8 @@ func reportHostSummaryTable(values map[string]hostAggregate) string {
 			b.WriteString(`<td class="num">` + fmt.Sprintf("%d", row.RedirectCount) + `</td>`)
 			b.WriteString(`<td>` + html.EscapeString(reportSafeText(joinAllCounts(row.DenyReasons))) + `</td>`)
 			b.WriteString(`<td>` + html.EscapeString(reportSafeText(routeSummary)) + `</td>`)
+			b.WriteString(`<td class="num">` + fmt.Sprintf("%d", len(row.PathCounts)) + `</td>`)
 			b.WriteString(`<td>` + html.EscapeString(reportSafeText(joinAllCounts(row.PathCounts))) + `</td>`)
-			b.WriteString(`<td>` + html.EscapeString(reportSafeText(strings.Join(ipValues, "; "))) + `</td>`)
 			b.WriteString(`</tr>`)
 		}
 	}

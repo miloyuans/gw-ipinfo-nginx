@@ -289,7 +289,7 @@ func New(configPath string) (*Application, error) {
 
 	var reportingService *reporting.Service
 	if sender != nil || cfg.Reports.Enabled {
-		reportingService, err = reporting.NewService(cfg, storageControl, logger, sender, metricSet, instanceID)
+		reportingService, err = reporting.NewService(cfg, storageControl, logger, sender, metricSet, instanceID, sharedStoragePath)
 		if err != nil {
 			return nil, err
 		}
