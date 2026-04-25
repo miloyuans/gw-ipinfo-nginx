@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"html"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -45,10 +46,13 @@ type Event struct {
 	Host                 string
 	Path                 string
 	RequestURL           string
+	UserAgent            string
 	UserAgentSummary     string
+	AcceptLanguage       string
 	Allowed              bool
 	Result               string
 	ReasonCode           string
+	RedirectTriggered    bool
 	CountryCode          string
 	CountryName          string
 	Region               string
@@ -67,6 +71,21 @@ type Event struct {
 	V4ProbeEnabled          bool
 	IPInfoLookupAction      string
 	DataSourceMode          string
+}
+
+type HostTraffic struct {
+	TotalCount           uint64            `json:"total_count" bson:"total_count"`
+	AllowCount           uint64            `json:"allow_count" bson:"allow_count"`
+	DenyCount            uint64            `json:"deny_count" bson:"deny_count"`
+	RedirectCount        uint64            `json:"redirect_count" bson:"redirect_count"`
+	RouteSetCounts       map[string]uint64 `json:"route_set_counts" bson:"route_set_counts"`
+	RouteIDCounts        map[string]uint64 `json:"route_id_counts" bson:"route_id_counts"`
+	AllowReasons         map[string]uint64 `json:"allow_reasons" bson:"allow_reasons"`
+	DenyReasons          map[string]uint64 `json:"deny_reasons" bson:"deny_reasons"`
+	PathCounts           map[string]uint64 `json:"path_counts" bson:"path_counts"`
+	RequestURLCounts     map[string]uint64 `json:"request_url_counts" bson:"request_url_counts"`
+	UserAgentCounts      map[string]uint64 `json:"user_agent_counts" bson:"user_agent_counts"`
+	AcceptLanguageCounts map[string]uint64 `json:"accept_language_counts" bson:"accept_language_counts"`
 }
 
 type Summary struct {
@@ -96,13 +115,26 @@ type Summary struct {
 	Host                   string             `json:"host" bson:"host"`
 	Path                   string             `json:"path" bson:"path"`
 	RequestURL             string             `json:"request_url" bson:"request_url"`
+	UserAgent              string             `json:"user_agent" bson:"user_agent"`
 	UserAgentSummary       string             `json:"user_agent_summary" bson:"user_agent_summary"`
+	AcceptLanguage         string             `json:"accept_language" bson:"accept_language"`
 	AllowCount             uint64             `json:"allow_count" bson:"allow_count"`
 	DenyCount              uint64             `json:"deny_count" bson:"deny_count"`
+	RedirectCount          uint64             `json:"redirect_count" bson:"redirect_count"`
 	ShortCircuitAllowCount uint64             `json:"short_circuit_allow_count" bson:"short_circuit_allow_count"`
 	ShortCircuitDenyCount  uint64             `json:"short_circuit_deny_count" bson:"short_circuit_deny_count"`
 	AllowReasons           map[string]uint64  `json:"allow_reasons" bson:"allow_reasons"`
 	DenyReasons            map[string]uint64  `json:"deny_reasons" bson:"deny_reasons"`
+	RouteSetCounts         map[string]uint64  `json:"route_set_counts" bson:"route_set_counts"`
+	RouteIDCounts          map[string]uint64  `json:"route_id_counts" bson:"route_id_counts"`
+	RequestURLCounts       map[string]uint64  `json:"request_url_counts" bson:"request_url_counts"`
+	PathCounts             map[string]uint64  `json:"path_counts" bson:"path_counts"`
+	UserAgentCounts        map[string]uint64  `json:"user_agent_counts" bson:"user_agent_counts"`
+	AcceptLanguageCounts   map[string]uint64  `json:"accept_language_counts" bson:"accept_language_counts"`
+	CountryCounts          map[string]uint64  `json:"country_counts" bson:"country_counts"`
+	RegionCounts           map[string]uint64  `json:"region_counts" bson:"region_counts"`
+	CityCounts             map[string]uint64  `json:"city_counts" bson:"city_counts"`
+	HostStats              map[string]HostTraffic `json:"host_stats" bson:"host_stats"`
 	CountryCode            string             `json:"country_code" bson:"country_code"`
 	CountryName            string             `json:"country_name" bson:"country_name"`
 	Region                 string             `json:"region" bson:"region"`
@@ -313,7 +345,7 @@ func (s *Service) persist(ctx context.Context, event Event) error {
 func (s *Service) upsertLocal(ctx context.Context, event Event) (Summary, error) {
 	now := event.Timestamp.UTC()
 	dayKey := event.Timestamp.In(s.location).Format("2006-01-02")
-	summaryID := dayKey + "|" + event.ClientIP
+	summaryID := dayKey + "|" + reportPrimaryHost(event) + "|" + event.ClientIP
 	var summary Summary
 	err := s.controller.Local().Update(ctx, func(tx *bolt.Tx) error {
 		bucket := tx.Bucket([]byte(localdisk.BucketReportRecords))
@@ -330,6 +362,15 @@ func (s *Service) upsertLocal(ctx context.Context, event Event) (Summary, error)
 				ClientIP:     event.ClientIP,
 				AllowReasons: map[string]uint64{},
 				DenyReasons:  map[string]uint64{},
+				RouteSetCounts: map[string]uint64{},
+				RouteIDCounts: map[string]uint64{},
+				RequestURLCounts: map[string]uint64{},
+				PathCounts: map[string]uint64{},
+				UserAgentCounts: map[string]uint64{},
+				AcceptLanguageCounts: map[string]uint64{},
+				CountryCounts: map[string]uint64{},
+				RegionCounts: map[string]uint64{},
+				CityCounts: map[string]uint64{},
 				FirstSeenAt:  now,
 			}
 		}
@@ -356,13 +397,40 @@ func applyEvent(summary *Summary, event Event, now time.Time) {
 	if summary.DenyReasons == nil {
 		summary.DenyReasons = map[string]uint64{}
 	}
+	if summary.RouteSetCounts == nil {
+		summary.RouteSetCounts = map[string]uint64{}
+	}
+	if summary.RouteIDCounts == nil {
+		summary.RouteIDCounts = map[string]uint64{}
+	}
+	if summary.RequestURLCounts == nil {
+		summary.RequestURLCounts = map[string]uint64{}
+	}
+	if summary.PathCounts == nil {
+		summary.PathCounts = map[string]uint64{}
+	}
+	if summary.UserAgentCounts == nil {
+		summary.UserAgentCounts = map[string]uint64{}
+	}
+	if summary.AcceptLanguageCounts == nil {
+		summary.AcceptLanguageCounts = map[string]uint64{}
+	}
+	if summary.CountryCounts == nil {
+		summary.CountryCounts = map[string]uint64{}
+	}
+	if summary.RegionCounts == nil {
+		summary.RegionCounts = map[string]uint64{}
+	}
+	if summary.CityCounts == nil {
+		summary.CityCounts = map[string]uint64{}
+	}
 	summary.ServiceName = event.ServiceName
 	summary.RouteSetKind = event.RouteSetKind
 	summary.RouteID = event.RouteID
-	summary.SourceHost = event.SourceHost
-	summary.TargetHost = event.TargetHost
+	summary.SourceHost = normalizeReportHost(event.SourceHost)
+	summary.TargetHost = normalizeReportHost(event.TargetHost)
 	summary.BackendService = event.BackendService
-	summary.BackendHost = event.BackendHost
+	summary.BackendHost = normalizeReportHost(event.BackendHost)
 	summary.V4RouteSource = event.V4RouteSource
 	summary.V3SecurityFilterEnabled = event.V3SecurityFilterEnabled
 	summary.V3SelectedTargetID = event.V3SelectedTargetID
@@ -375,10 +443,12 @@ func applyEvent(summary *Summary, event Event, now time.Time) {
 	summary.V4ProbeEnabled = event.V4ProbeEnabled
 	summary.IPInfoLookupAction = event.IPInfoLookupAction
 	summary.DataSourceMode = event.DataSourceMode
-	summary.Host = event.Host
+	summary.Host = normalizeReportHost(event.Host)
 	summary.Path = event.Path
 	summary.RequestURL = event.RequestURL
+	summary.UserAgent = event.UserAgent
 	summary.UserAgentSummary = event.UserAgentSummary
+	summary.AcceptLanguage = event.AcceptLanguage
 	summary.CountryCode = event.CountryCode
 	summary.CountryName = event.CountryName
 	summary.Region = event.Region
@@ -386,12 +456,24 @@ func applyEvent(summary *Summary, event Event, now time.Time) {
 	summary.Privacy = event.Privacy
 	summary.LastSeenAt = now
 	summary.UpdatedAt = now
+	incrementCount(summary.RouteSetCounts, event.RouteSetKind)
+	incrementCount(summary.RouteIDCounts, event.RouteID)
+	incrementCount(summary.RequestURLCounts, event.RequestURL)
+	incrementCount(summary.PathCounts, event.Path)
+	incrementCount(summary.UserAgentCounts, event.UserAgent)
+	incrementCount(summary.AcceptLanguageCounts, event.AcceptLanguage)
+	incrementCount(summary.CountryCounts, reportLocationValue(event.CountryCode, event.CountryName))
+	incrementCount(summary.RegionCounts, event.Region)
+	incrementCount(summary.CityCounts, event.City)
 	if event.Allowed {
 		summary.AllowCount++
 		summary.AllowReasons[event.ReasonCode]++
 	} else {
 		summary.DenyCount++
 		summary.DenyReasons[event.ReasonCode]++
+	}
+	if event.RedirectTriggered {
+		summary.RedirectCount++
 	}
 	if event.ShortCircuitHit {
 		if event.ShortCircuitDecision == "allow" {
@@ -410,12 +492,16 @@ func (s *Service) upsertMongo(ctx context.Context, client *mongostore.Client, su
 	s.indexOnce.Do(func() {
 		indexes := []mongo.IndexModel{
 			{
-				Keys:    bson.D{{Key: "day", Value: 1}, {Key: "client_ip", Value: 1}},
-				Options: options.Index().SetName("daily_ip_lookup"),
+				Keys:    bson.D{{Key: "day", Value: 1}, {Key: "host", Value: 1}, {Key: "client_ip", Value: 1}},
+				Options: options.Index().SetName("daily_host_ip_lookup"),
 			},
 			{
 				Keys:    bson.D{{Key: "kind", Value: 1}, {Key: "day", Value: 1}},
 				Options: options.Index().SetName("report_kind_day"),
+			},
+			{
+				Keys:    bson.D{{Key: "day", Value: 1}, {Key: "host", Value: 1}},
+				Options: options.Index().SetName("report_day_host"),
 			},
 		}
 		_, _ = collection.Indexes().CreateMany(child, indexes)
@@ -893,6 +979,9 @@ func (s *Service) loadDay(ctx context.Context, dayKey string) ([]Summary, error)
 		if err := json.Unmarshal(raw, &summary); err != nil {
 			return err
 		}
+		if s.shouldIgnoreStoredSummary(summary) {
+			return nil
+		}
 		if existing, ok := summaryMap[summary.ID]; ok {
 			summaryMap[summary.ID] = mergeSummaries(existing, summary)
 			return nil
@@ -932,6 +1021,9 @@ func (s *Service) loadDayFromMongo(ctx context.Context, client *mongostore.Clien
 		if err := cursor.Decode(&summary); err != nil {
 			return nil, err
 		}
+		if s.shouldIgnoreStoredSummary(summary) {
+			continue
+		}
 		summaries = append(summaries, summary)
 	}
 	if err := cursor.Err(); err != nil {
@@ -947,6 +1039,8 @@ func (s *Service) loadDayFromMongo(ctx context.Context, client *mongostore.Clien
 }
 
 func (s *Service) renderCSV(summaries []Summary) ([]byte, error) {
+	return s.renderCSVHostPrimary(summaries)
+
 	buf := &bytes.Buffer{}
 	writer := csv.NewWriter(buf)
 	rows := [][]string{{
@@ -1014,6 +1108,8 @@ func (s *Service) renderCSV(summaries []Summary) ([]byte, error) {
 }
 
 func (s *Service) renderHTML(dayKey string, summaries []Summary) ([]byte, error) {
+	return s.renderHTMLHostPrimary(dayKey, summaries)
+
 	totalRequests := uint64(0)
 	allowed := uint64(0)
 	denied := uint64(0)
@@ -1610,6 +1706,721 @@ tbody tr:hover{
 	return buf.Bytes(), nil
 }
 
+type hostAggregate struct {
+	Host             string
+	TotalRequests    uint64
+	UniqueClients    uint64
+	AllowCount       uint64
+	DenyCount        uint64
+	RedirectCount    uint64
+	UniqueAllowedIPs uint64
+	DenyReasons      map[string]uint64
+	RouteSetCounts   map[string]uint64
+	RouteIDCounts    map[string]uint64
+	ClientIPs        map[string]uint64
+	PathCounts       map[string]uint64
+	RequestURLCounts map[string]uint64
+}
+
+func (s *Service) renderCSVHostPrimary(summaries []Summary) ([]byte, error) {
+	sort.Slice(summaries, func(i, j int) bool {
+		leftHost := reportFirstNonEmpty(normalizeReportHost(summaries[i].Host), normalizeReportHost(summaries[i].SourceHost), "(unknown)")
+		rightHost := reportFirstNonEmpty(normalizeReportHost(summaries[j].Host), normalizeReportHost(summaries[j].SourceHost), "(unknown)")
+		if leftHost != rightHost {
+			return leftHost < rightHost
+		}
+		leftTotal := summaries[i].AllowCount + summaries[i].DenyCount
+		rightTotal := summaries[j].AllowCount + summaries[j].DenyCount
+		if leftTotal != rightTotal {
+			return leftTotal > rightTotal
+		}
+		return summaries[i].ClientIP < summaries[j].ClientIP
+	})
+
+	buf := &bytes.Buffer{}
+	writer := csv.NewWriter(buf)
+	rows := [][]string{{
+		"host",
+		"client_ip",
+		"total_requests",
+		"allow_count",
+		"deny_count",
+		"redirect_count",
+		"redirect_triggered",
+		"allow_reasons",
+		"deny_reasons",
+		"route_set_kinds",
+		"route_ids",
+		"paths",
+		"request_urls",
+		"country",
+		"region",
+		"city",
+		"user_agents",
+		"accept_languages",
+		"v3_strategy_mode",
+		"v3_selected_target_id",
+		"v3_selected_target_host",
+		"v4_runtime_mode",
+		"v4_route_source",
+		"v4_security_checks_enabled",
+		"v4_enrichment_mode",
+		"v4_probe_enabled",
+		"backend_service",
+		"backend_host",
+		"source_host",
+		"target_host",
+		"short_circuit_allow_count",
+		"short_circuit_deny_count",
+	}}
+	for _, summary := range summaries {
+		host := reportFirstNonEmpty(normalizeReportHost(summary.Host), normalizeReportHost(summary.SourceHost), "(unknown)")
+		totalRequests := summary.AllowCount + summary.DenyCount
+		rows = append(rows, []string{
+			host,
+			summary.ClientIP,
+			fmt.Sprintf("%d", totalRequests),
+			fmt.Sprintf("%d", summary.AllowCount),
+			fmt.Sprintf("%d", summary.DenyCount),
+			fmt.Sprintf("%d", summary.RedirectCount),
+			fmt.Sprintf("%t", summary.RedirectCount > 0),
+			joinAllCounts(summary.AllowReasons),
+			joinAllCounts(summary.DenyReasons),
+			joinAllCounts(summary.RouteSetCounts),
+			joinAllCounts(summary.RouteIDCounts),
+			joinAllCounts(summary.PathCounts),
+			joinAllCounts(summary.RequestURLCounts),
+			reportLocationValue(summary.CountryCode, summary.CountryName),
+			reportSafeText(summary.Region),
+			reportSafeText(summary.City),
+			joinAllCounts(summary.UserAgentCounts),
+			joinAllCounts(summary.AcceptLanguageCounts),
+			summary.V3StrategyMode,
+			summary.V3SelectedTargetID,
+			summary.V3SelectedTargetHost,
+			summary.V4RuntimeMode,
+			summary.V4RouteSource,
+			fmt.Sprintf("%t", summary.V4SecurityChecksEnabled),
+			summary.V4EnrichmentMode,
+			fmt.Sprintf("%t", summary.V4ProbeEnabled),
+			summary.BackendService,
+			summary.BackendHost,
+			summary.SourceHost,
+			summary.TargetHost,
+			fmt.Sprintf("%d", summary.ShortCircuitAllowCount),
+			fmt.Sprintf("%d", summary.ShortCircuitDenyCount),
+		})
+	}
+	if err := writer.WriteAll(rows); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func (s *Service) renderHTMLHostPrimaryLegacy(dayKey string, summaries []Summary) ([]byte, error) {
+	title := strings.TrimSpace(s.cfg.Reports.Title)
+	if title == "" {
+		title = "gw-ipinfo-nginx daily report"
+	}
+
+	dedupedRequestCount := uint64(len(summaries))
+	totalRequests := uint64(0)
+	totalAllows := uint64(0)
+	totalDenies := uint64(0)
+	totalRedirects := uint64(0)
+	shortCircuitTotal := uint64(0)
+	dedupedSuccessCount := uint64(0)
+	hostStats := map[string]hostAggregate{}
+	uaCounts := map[string]uint64{}
+	langCounts := map[string]uint64{}
+	countryCounts := map[string]uint64{}
+	regionCounts := map[string]uint64{}
+	cityCounts := map[string]uint64{}
+	denyReasonCounts := map[string]uint64{}
+	allowReasonCounts := map[string]uint64{}
+	routeSetCounts := map[string]uint64{}
+	routeIDCounts := map[string]uint64{}
+
+	for _, summary := range summaries {
+		host := reportFirstNonEmpty(normalizeReportHost(summary.Host), normalizeReportHost(summary.SourceHost), "(unknown)")
+		total := summary.AllowCount + summary.DenyCount
+		totalRequests += total
+		totalAllows += summary.AllowCount
+		totalDenies += summary.DenyCount
+		totalRedirects += summary.RedirectCount
+		shortCircuitTotal += summary.ShortCircuitAllowCount + summary.ShortCircuitDenyCount
+		if summary.AllowCount > 0 {
+			dedupedSuccessCount++
+		}
+
+		mergeCountMaps(uaCounts, summary.UserAgentCounts)
+		mergeCountMaps(langCounts, summary.AcceptLanguageCounts)
+		mergeCountMaps(countryCounts, summary.CountryCounts)
+		mergeCountMaps(regionCounts, summary.RegionCounts)
+		mergeCountMaps(cityCounts, summary.CityCounts)
+		mergeCountMaps(denyReasonCounts, summary.DenyReasons)
+		mergeCountMaps(allowReasonCounts, summary.AllowReasons)
+		mergeCountMaps(routeSetCounts, summary.RouteSetCounts)
+		mergeCountMaps(routeIDCounts, summary.RouteIDCounts)
+
+		agg := hostStats[host]
+		agg.Host = host
+		agg.TotalRequests += total
+		agg.UniqueClients++
+		agg.AllowCount += summary.AllowCount
+		agg.DenyCount += summary.DenyCount
+		agg.RedirectCount += summary.RedirectCount
+		if summary.AllowCount > 0 {
+			agg.UniqueAllowedIPs++
+		}
+		if agg.DenyReasons == nil {
+			agg.DenyReasons = map[string]uint64{}
+		}
+		if agg.RouteSetCounts == nil {
+			agg.RouteSetCounts = map[string]uint64{}
+		}
+		if agg.RouteIDCounts == nil {
+			agg.RouteIDCounts = map[string]uint64{}
+		}
+		if agg.ClientIPs == nil {
+			agg.ClientIPs = map[string]uint64{}
+		}
+		if agg.PathCounts == nil {
+			agg.PathCounts = map[string]uint64{}
+		}
+		if agg.RequestURLCounts == nil {
+			agg.RequestURLCounts = map[string]uint64{}
+		}
+		mergeCountMaps(agg.DenyReasons, summary.DenyReasons)
+		mergeCountMaps(agg.RouteSetCounts, summary.RouteSetCounts)
+		mergeCountMaps(agg.RouteIDCounts, summary.RouteIDCounts)
+		mergeCountMaps(agg.PathCounts, summary.PathCounts)
+		mergeCountMaps(agg.RequestURLCounts, summary.RequestURLCounts)
+		agg.ClientIPs[summary.ClientIP] = total
+		hostStats[host] = agg
+	}
+
+	buf := &bytes.Buffer{}
+	buf.WriteString(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">`)
+	buf.WriteString(`<meta name="viewport" content="width=device-width,initial-scale=1">`)
+	buf.WriteString(`<title>` + html.EscapeString(title) + `</title>`)
+	buf.WriteString(`
+<style>
+body{font-family:Arial,Helvetica,sans-serif;background:#f5f7fb;color:#111827;margin:0;padding:24px}
+.wrap{max-width:1680px;margin:0 auto}
+.hero{background:#111827;color:#fff;border-radius:18px;padding:24px}
+.hero h1{margin:0 0 8px 0;font-size:30px}
+.hero p{margin:0;font-size:14px;color:#d1d5db}
+.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-top:18px}
+.metric{background:#1f2937;border-radius:14px;padding:14px}
+.metric .k{font-size:12px;color:#9ca3af;text-transform:uppercase}
+.metric .v{margin-top:8px;font-size:28px;font-weight:700}
+.metric .s{margin-top:8px;font-size:12px;color:#cbd5e1}
+.section{margin-top:22px;background:#fff;border:1px solid #dbe5f0;border-radius:18px;padding:18px}
+.section h2{margin:0 0 6px 0;font-size:20px}
+.section p{margin:0 0 14px 0;font-size:13px;color:#64748b}
+.table-wrap{overflow:auto}
+table{width:100%;border-collapse:collapse;min-width:1080px}
+th,td{padding:10px 12px;border-bottom:1px solid #e5e7eb;vertical-align:top;text-align:left;font-size:13px}
+th{background:#eff6ff;color:#1d4ed8;position:sticky;top:0}
+.num{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+.muted{color:#64748b}
+@media (max-width:1100px){.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}
+</style></head><body><div class="wrap">`)
+
+	buf.WriteString(`<section class="hero">`)
+	buf.WriteString(`<h1>` + html.EscapeString(title) + ` · ` + html.EscapeString(dayKey) + `</h1>`)
+	buf.WriteString(`<p>按 host 为主键、按真实客户端 IP 去重汇总。健康探测请求已忽略，CSV 作为该统计视图的明细补充。</p>`)
+	buf.WriteString(`<div class="metrics">`)
+	buf.WriteString(reportMetricCard("总 Host 数", fmt.Sprintf("%d", len(hostStats)), "参与统计的 host 域名数量", "neutral"))
+	buf.WriteString(reportMetricCard("总请求数", fmt.Sprintf("%d", totalRequests), "所有 host 的 allow + deny 总量", "neutral"))
+	buf.WriteString(reportMetricCard("总放行数", fmt.Sprintf("%d", totalAllows), reportPercentString(totalAllows, totalRequests)+" 放行率", "success"))
+	buf.WriteString(reportMetricCard("总拦截数", fmt.Sprintf("%d", totalDenies), reportPercentString(totalDenies, totalRequests)+" 拦截率", "danger"))
+	buf.WriteString(reportMetricCard("重定向触发数", fmt.Sprintf("%d", totalRedirects), "触发 v1/v2/v3/v4 或 deny redirect 的请求数", "warning"))
+	buf.WriteString(reportMetricCard("短路命中数", fmt.Sprintf("%d", shortCircuitTotal), reportPercentString(shortCircuitTotal, totalRequests)+" 的总请求占比", "warning"))
+	buf.WriteString(`</div></section>`)
+
+	buf.WriteString(`<section class="section"><h2>Host 维度汇总</h2><p>按 host 展示总请求数、去重客户端 IP 数、放行/拦截数、拦截原因和路由策略。</p>`)
+	buf.WriteString(reportHostSummaryTable(hostStats))
+	buf.WriteString(`</section>`)
+
+	buf.WriteString(`<section class="section"><h2>UA 统计分析</h2><p>完整展示全部 User-Agent 聚合结果，不做 TopN 截断。</p>`)
+	buf.WriteString(reportCountTable("User-Agent", uaCounts, "UA", "请求数"))
+	buf.WriteString(`</section>`)
+
+	buf.WriteString(`<section class="section"><h2>语言统计分析</h2><p>完整展示全部 Accept-Language 聚合结果。</p>`)
+	buf.WriteString(reportCountTable("Accept-Language", langCounts, "语言", "请求数"))
+	buf.WriteString(`</section>`)
+
+	buf.WriteString(`<section class="section"><h2>地区统计分析</h2><p>完整展示国家、地区、城市聚合结果。</p>`)
+	buf.WriteString(reportCountTable("Country", countryCounts, "国家", "请求数"))
+	buf.WriteString(reportCountTable("Region", regionCounts, "地区", "请求数"))
+	buf.WriteString(reportCountTable("City", cityCounts, "城市", "请求数"))
+	buf.WriteString(`</section>`)
+
+	buf.WriteString(`<section class="section"><h2>拦截分析</h2><p>完整展示拦截原因与放行原因。</p>`)
+	buf.WriteString(reportCountTable("Deny reason", denyReasonCounts, "拦截原因", "次数"))
+	buf.WriteString(reportCountTable("Allow reason", allowReasonCounts, "放行原因", "次数"))
+	buf.WriteString(`</section>`)
+
+	buf.WriteString(`<section class="section"><h2>路由策略分析</h2><p>完整展示 route_set_kind 与 route_id 的聚合结果。</p>`)
+	buf.WriteString(reportCountTable("Route set", routeSetCounts, "路由策略", "次数"))
+	buf.WriteString(reportCountTable("Route ID", routeIDCounts, "规则 ID", "次数"))
+	buf.WriteString(`</section>`)
+
+	buf.WriteString(`</div></body></html>`)
+	return buf.Bytes(), nil
+}
+
+func reportPrimaryHost(event Event) string {
+	return reportFirstNonEmpty(normalizeReportHost(event.Host), normalizeReportHost(event.SourceHost), "(unknown)")
+}
+
+func normalizeReportHost(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return ""
+	}
+	value = strings.TrimSuffix(value, ".")
+	if host, port, err := net.SplitHostPort(value); err == nil && host != "" && port != "" {
+		return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+	}
+	if strings.Count(value, ":") == 1 {
+		if idx := strings.LastIndex(value, ":"); idx > 0 {
+			return strings.TrimSuffix(value[:idx], ".")
+		}
+	}
+	return value
+}
+
+func (s *Service) shouldIgnoreStoredSummary(summary Summary) bool {
+	total := summary.AllowCount + summary.DenyCount
+	if total == 0 {
+		return false
+	}
+
+	if len(summary.UserAgentCounts) > 0 {
+		ignoredCount := uint64(0)
+		for userAgent, count := range summary.UserAgentCounts {
+			if isIgnoredReportUserAgent(userAgent, s.cfg.V4.ProbeDefaults.UserAgent) {
+				ignoredCount += count
+			}
+		}
+		if ignoredCount >= total {
+			return true
+		}
+	}
+
+	if len(summary.PathCounts) > 0 {
+		ignoredCount := uint64(0)
+		for pathValue, count := range summary.PathCounts {
+			if isIgnoredReportPath(pathValue) {
+				ignoredCount += count
+			}
+		}
+		if ignoredCount >= total {
+			return true
+		}
+	}
+
+	return false
+}
+
+func isIgnoredReportUserAgent(userAgent, probeUserAgent string) bool {
+	value := strings.ToLower(strings.TrimSpace(userAgent))
+	if value == "" {
+		return false
+	}
+	probeUserAgent = strings.ToLower(strings.TrimSpace(probeUserAgent))
+	if probeUserAgent != "" && strings.Contains(value, probeUserAgent) {
+		return true
+	}
+	for _, marker := range []string{
+		"kube-probe",
+		"googlehc",
+		"elb-healthchecker",
+		"healthcheck",
+		"health-check",
+		"uptimerobot",
+		"pingdom",
+		"statuscake",
+	} {
+		if strings.Contains(value, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func isIgnoredReportPath(pathValue string) bool {
+	switch strings.TrimSpace(pathValue) {
+	case "/healthz", "/readyz", "/metrics":
+		return true
+	default:
+		return false
+	}
+}
+
+func incrementCount(values map[string]uint64, key string) {
+	if values == nil {
+		return
+	}
+	key = strings.TrimSpace(key)
+	if key == "" {
+		key = "(empty)"
+	}
+	values[key]++
+}
+
+func mergeCountMaps(dst, src map[string]uint64) {
+	for key, value := range src {
+		dst[key] += value
+	}
+}
+
+func joinAllCounts(values map[string]uint64) string {
+	if len(values) == 0 {
+		return ""
+	}
+	rows := topMap(values, 0)
+	parts := make([]string, 0, len(rows))
+	for _, row := range rows {
+		parts = append(parts, fmt.Sprintf("%s=%d", row.Key, row.Value))
+	}
+	return strings.Join(parts, "; ")
+}
+
+func joinHostKeys(values map[string]HostTraffic) string {
+	if len(values) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, "; ")
+}
+
+func reportLocationValue(code, name string) string {
+	if strings.TrimSpace(name) != "" {
+		return strings.TrimSpace(name)
+	}
+	return strings.TrimSpace(code)
+}
+
+func reportCountTableLegacy(title string, values map[string]uint64, keyLabel string, valueLabel string) string {
+	rows := topMap(values, 0)
+	var b strings.Builder
+	b.WriteString(`<div class="panel"><div class="table-wrap"><table><thead><tr>`)
+	b.WriteString(`<th>` + html.EscapeString(keyLabel) + `</th>`)
+	b.WriteString(`<th class="num">` + html.EscapeString(valueLabel) + `</th>`)
+	b.WriteString(`</tr></thead><tbody>`)
+	if len(rows) == 0 {
+		b.WriteString(`<tr><td colspan="2" class="muted">No data</td></tr>`)
+	} else {
+		for _, row := range rows {
+			b.WriteString(`<tr><td>` + html.EscapeString(reportSafeText(row.Key)) + `</td><td class="num">` + fmt.Sprintf("%d", row.Value) + `</td></tr>`)
+		}
+	}
+	b.WriteString(`</tbody></table></div></div>`)
+	return b.String()
+}
+
+func reportHostSummaryTableLegacy(values map[string]hostAggregate) string {
+	rows := make([]hostAggregate, 0, len(values))
+	for _, row := range values {
+		rows = append(rows, row)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].TotalRequests == rows[j].TotalRequests {
+			return rows[i].Host < rows[j].Host
+		}
+		return rows[i].TotalRequests > rows[j].TotalRequests
+	})
+
+	var b strings.Builder
+	b.WriteString(`<div class="panel"><div class="table-wrap"><table><thead><tr>`)
+	b.WriteString(`<th>Host</th>`)
+	b.WriteString(`<th class="num">总请求</th>`)
+	b.WriteString(`<th class="num">去重客户端 IP</th>`)
+	b.WriteString(`<th class="num">放行次数</th>`)
+	b.WriteString(`<th class="num">放行去重数</th>`)
+	b.WriteString(`<th class="num">拦截次数</th>`)
+	b.WriteString(`<th class="num">跳转次数</th>`)
+	b.WriteString(`<th>拦截原因</th>`)
+	b.WriteString(`<th>路由策略</th>`)
+	b.WriteString(`<th>客户端 IP 列表</th>`)
+	b.WriteString(`</tr></thead><tbody>`)
+	if len(rows) == 0 {
+		b.WriteString(`<tr><td colspan="10" class="muted">No host traffic</td></tr>`)
+	} else {
+		for _, row := range rows {
+			ipRows := topMap(row.ClientIPs, 0)
+			ipValues := make([]string, 0, len(ipRows))
+			for _, ipRow := range ipRows {
+				ipValues = append(ipValues, fmt.Sprintf("%s=%d", ipRow.Key, ipRow.Value))
+			}
+			b.WriteString(`<tr>`)
+			b.WriteString(`<td>` + html.EscapeString(reportSafeText(row.Host)) + `</td>`)
+			b.WriteString(`<td class="num">` + fmt.Sprintf("%d", row.TotalRequests) + `</td>`)
+			b.WriteString(`<td class="num">` + fmt.Sprintf("%d", row.UniqueClients) + `</td>`)
+			b.WriteString(`<td class="num">` + fmt.Sprintf("%d", row.AllowCount) + `</td>`)
+			b.WriteString(`<td class="num">` + fmt.Sprintf("%d", row.UniqueAllowedIPs) + `</td>`)
+			b.WriteString(`<td class="num">` + fmt.Sprintf("%d", row.DenyCount) + `</td>`)
+			b.WriteString(`<td class="num">` + fmt.Sprintf("%d", row.RedirectCount) + `</td>`)
+			b.WriteString(`<td>` + html.EscapeString(reportSafeText(joinAllCounts(row.DenyReasons))) + `</td>`)
+			b.WriteString(`<td>` + html.EscapeString(reportSafeText(joinAllCounts(row.RouteSetCounts))) + `</td>`)
+			b.WriteString(`<td>` + html.EscapeString(reportSafeText(strings.Join(ipValues, "; "))) + `</td>`)
+			b.WriteString(`</tr>`)
+		}
+	}
+	b.WriteString(`</tbody></table></div></div>`)
+	return b.String()
+}
+
+func (s *Service) renderHTMLHostPrimary(dayKey string, summaries []Summary) ([]byte, error) {
+	title := strings.TrimSpace(s.cfg.Reports.Title)
+	if title == "" {
+		title = "gw-ipinfo-nginx daily report"
+	}
+
+	dedupedRequestCount := uint64(len(summaries))
+	totalRequests := uint64(0)
+	totalAllows := uint64(0)
+	totalDenies := uint64(0)
+	totalRedirects := uint64(0)
+	shortCircuitTotal := uint64(0)
+	dedupedSuccessCount := uint64(0)
+	hostStats := map[string]hostAggregate{}
+	uaCounts := map[string]uint64{}
+	langCounts := map[string]uint64{}
+	countryCounts := map[string]uint64{}
+	regionCounts := map[string]uint64{}
+	cityCounts := map[string]uint64{}
+	denyReasonCounts := map[string]uint64{}
+	allowReasonCounts := map[string]uint64{}
+	routeSetCounts := map[string]uint64{}
+	routeIDCounts := map[string]uint64{}
+
+	for _, summary := range summaries {
+		host := reportFirstNonEmpty(strings.TrimSpace(summary.Host), strings.TrimSpace(summary.SourceHost), "(unknown)")
+		total := summary.AllowCount + summary.DenyCount
+		totalRequests += total
+		totalAllows += summary.AllowCount
+		totalDenies += summary.DenyCount
+		totalRedirects += summary.RedirectCount
+		shortCircuitTotal += summary.ShortCircuitAllowCount + summary.ShortCircuitDenyCount
+		if summary.AllowCount > 0 {
+			dedupedSuccessCount++
+		}
+
+		mergeCountMaps(uaCounts, summary.UserAgentCounts)
+		mergeCountMaps(langCounts, summary.AcceptLanguageCounts)
+		mergeCountMaps(countryCounts, summary.CountryCounts)
+		mergeCountMaps(regionCounts, summary.RegionCounts)
+		mergeCountMaps(cityCounts, summary.CityCounts)
+		mergeCountMaps(denyReasonCounts, summary.DenyReasons)
+		mergeCountMaps(allowReasonCounts, summary.AllowReasons)
+		mergeCountMaps(routeSetCounts, summary.RouteSetCounts)
+		mergeCountMaps(routeIDCounts, summary.RouteIDCounts)
+
+		agg := hostStats[host]
+		agg.Host = host
+		agg.TotalRequests += total
+		agg.UniqueClients++
+		agg.AllowCount += summary.AllowCount
+		agg.DenyCount += summary.DenyCount
+		agg.RedirectCount += summary.RedirectCount
+		if summary.AllowCount > 0 {
+			agg.UniqueAllowedIPs++
+		}
+		if agg.DenyReasons == nil {
+			agg.DenyReasons = map[string]uint64{}
+		}
+		if agg.RouteSetCounts == nil {
+			agg.RouteSetCounts = map[string]uint64{}
+		}
+		if agg.RouteIDCounts == nil {
+			agg.RouteIDCounts = map[string]uint64{}
+		}
+		if agg.ClientIPs == nil {
+			agg.ClientIPs = map[string]uint64{}
+		}
+		if agg.PathCounts == nil {
+			agg.PathCounts = map[string]uint64{}
+		}
+		if agg.RequestURLCounts == nil {
+			agg.RequestURLCounts = map[string]uint64{}
+		}
+		mergeCountMaps(agg.DenyReasons, summary.DenyReasons)
+		mergeCountMaps(agg.RouteSetCounts, summary.RouteSetCounts)
+		mergeCountMaps(agg.RouteIDCounts, summary.RouteIDCounts)
+		mergeCountMaps(agg.PathCounts, summary.PathCounts)
+		mergeCountMaps(agg.RequestURLCounts, summary.RequestURLCounts)
+		agg.ClientIPs[summary.ClientIP] = total
+		hostStats[host] = agg
+	}
+
+	buf := &bytes.Buffer{}
+	buf.WriteString(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">`)
+	buf.WriteString(`<meta name="viewport" content="width=device-width,initial-scale=1">`)
+	buf.WriteString(`<title>` + html.EscapeString(title) + `</title>`)
+	buf.WriteString(`
+<style>
+body{font-family:Arial,Helvetica,sans-serif;background:#f5f7fb;color:#111827;margin:0;padding:24px}
+.wrap{max-width:1680px;margin:0 auto}
+.hero{background:#111827;color:#fff;border-radius:18px;padding:24px}
+.hero h1{margin:0 0 8px 0;font-size:30px}
+.hero p{margin:0;font-size:14px;color:#d1d5db}
+.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-top:18px}
+.metric-card{background:#1f2937;border-radius:14px;padding:14px}
+.metric-card .label{font-size:12px;color:#9ca3af;text-transform:uppercase}
+.metric-card .value{margin-top:8px;font-size:28px;font-weight:700}
+.metric-card .sub{margin-top:8px;font-size:12px;color:#cbd5e1}
+.section{margin-top:22px;background:#fff;border:1px solid #dbe5f0;border-radius:18px;padding:18px}
+.section h2{margin:0 0 6px 0;font-size:20px}
+.section p{margin:0 0 14px 0;font-size:13px;color:#64748b}
+.panel{margin-top:12px}
+.table-wrap{overflow:auto}
+table{width:100%;border-collapse:collapse;min-width:1180px}
+th,td{padding:10px 12px;border-bottom:1px solid #e5e7eb;vertical-align:top;text-align:left;font-size:13px}
+th{background:#eff6ff;color:#1d4ed8;position:sticky;top:0}
+.num{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+.muted{color:#64748b}
+@media (max-width:1100px){.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}
+</style></head><body><div class="wrap">`)
+
+	buf.WriteString(`<section class="hero">`)
+	buf.WriteString(`<h1>` + html.EscapeString(title) + ` | ` + html.EscapeString(dayKey) + `</h1>`)
+	buf.WriteString(`<p>按 Host 为主键、按真实客户端 IP 去重统计。健康探测请求已自动忽略，CSV 作为当前统计视图的详细明细补充。</p>`)
+	buf.WriteString(`<div class="metrics">`)
+	buf.WriteString(reportMetricCard("总 Host 数", fmt.Sprintf("%d", len(hostStats)), "参与统计的 Host 域名数量", "neutral"))
+	buf.WriteString(reportMetricCard("总请求数", fmt.Sprintf("%d", totalRequests), "所有 Host 的 allow + deny 总量", "neutral"))
+	buf.WriteString(reportMetricCard("去重请求数", fmt.Sprintf("%d", dedupedRequestCount), "按 Host + 客户端 IP 去重后的请求主体数", "info"))
+	buf.WriteString(reportMetricCard("总放行数", fmt.Sprintf("%d", totalAllows), reportPercentString(totalAllows, totalRequests)+" 放行率", "success"))
+	buf.WriteString(reportMetricCard("总拦截数", fmt.Sprintf("%d", totalDenies), reportPercentString(totalDenies, totalRequests)+" 拦截率", "danger"))
+	buf.WriteString(reportMetricCard("成功去重数", fmt.Sprintf("%d", dedupedSuccessCount), "至少发生过一次放行的去重客户端数", "success"))
+	buf.WriteString(reportMetricCard("重定向触发数", fmt.Sprintf("%d", totalRedirects), "触发 v1/v2/v3/v4 或 deny redirect 的请求数", "warning"))
+	buf.WriteString(reportMetricCard("短路命中数", fmt.Sprintf("%d", shortCircuitTotal), reportPercentString(shortCircuitTotal, totalRequests)+" 的总请求占比", "warning"))
+	buf.WriteString(`</div></section>`)
+
+	buf.WriteString(`<section class="section"><h2>Host 维度汇总</h2><p>按 Host 展示总请求数、按客户端 IP 去重后的请求数、放行/拦截结果、路径资源概览和路由策略。</p>`)
+	buf.WriteString(reportHostSummaryTable(hostStats))
+	buf.WriteString(`</section>`)
+
+	buf.WriteString(`<section class="section"><h2>UA 统计分析</h2><p>完整展示全部 User-Agent 聚合结果，不做 TopN 截断。</p>`)
+	buf.WriteString(reportCountTable("User-Agent", uaCounts, "UA", "请求数"))
+	buf.WriteString(`</section>`)
+
+	buf.WriteString(`<section class="section"><h2>语言统计分析</h2><p>完整展示全部 Accept-Language 聚合结果。</p>`)
+	buf.WriteString(reportCountTable("Accept-Language", langCounts, "语言", "请求数"))
+	buf.WriteString(`</section>`)
+
+	buf.WriteString(`<section class="section"><h2>地区统计分析</h2><p>完整展示国家、地区、城市聚合结果。</p>`)
+	buf.WriteString(reportCountTable("Country", countryCounts, "国家", "请求数"))
+	buf.WriteString(reportCountTable("Region", regionCounts, "地区", "请求数"))
+	buf.WriteString(reportCountTable("City", cityCounts, "城市", "请求数"))
+	buf.WriteString(`</section>`)
+
+	buf.WriteString(`<section class="section"><h2>拦截分析</h2><p>完整展示拦截原因与放行原因。</p>`)
+	buf.WriteString(reportCountTable("Deny reason", denyReasonCounts, "拦截原因", "次数"))
+	buf.WriteString(reportCountTable("Allow reason", allowReasonCounts, "放行原因", "次数"))
+	buf.WriteString(`</section>`)
+
+	buf.WriteString(`<section class="section"><h2>路由策略分析</h2><p>完整展示 route_set_kind 与 route_id 的聚合结果。</p>`)
+	buf.WriteString(reportCountTable("Route set", routeSetCounts, "路由策略", "次数"))
+	buf.WriteString(reportCountTable("Route ID", routeIDCounts, "规则 ID", "次数"))
+	buf.WriteString(`</section>`)
+
+	buf.WriteString(`</div></body></html>`)
+	return buf.Bytes(), nil
+}
+
+func reportCountTable(title string, values map[string]uint64, keyLabel string, valueLabel string) string {
+	rows := topMap(values, 0)
+	var b strings.Builder
+	b.WriteString(`<div class="panel">`)
+	if strings.TrimSpace(title) != "" {
+		b.WriteString(`<div class="muted" style="margin:0 0 10px 0;">` + html.EscapeString(reportSafeText(title)) + `</div>`)
+	}
+	b.WriteString(`<div class="table-wrap"><table><thead><tr>`)
+	b.WriteString(`<th>` + html.EscapeString(keyLabel) + `</th>`)
+	b.WriteString(`<th class="num">` + html.EscapeString(valueLabel) + `</th>`)
+	b.WriteString(`</tr></thead><tbody>`)
+	if len(rows) == 0 {
+		b.WriteString(`<tr><td colspan="2" class="muted">No data</td></tr>`)
+	} else {
+		for _, row := range rows {
+			b.WriteString(`<tr><td>` + html.EscapeString(reportSafeText(row.Key)) + `</td><td class="num">` + fmt.Sprintf("%d", row.Value) + `</td></tr>`)
+		}
+	}
+	b.WriteString(`</tbody></table></div></div>`)
+	return b.String()
+}
+
+func reportHostSummaryTable(values map[string]hostAggregate) string {
+	rows := make([]hostAggregate, 0, len(values))
+	for _, row := range values {
+		rows = append(rows, row)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].TotalRequests == rows[j].TotalRequests {
+			return rows[i].Host < rows[j].Host
+		}
+		return rows[i].TotalRequests > rows[j].TotalRequests
+	})
+
+	var b strings.Builder
+	b.WriteString(`<div class="panel"><div class="table-wrap"><table><thead><tr>`)
+	b.WriteString(`<th>Host 域名</th>`)
+	b.WriteString(`<th class="num">总请求次数</th>`)
+	b.WriteString(`<th class="num">去重请求数</th>`)
+	b.WriteString(`<th class="num">总成功次数</th>`)
+	b.WriteString(`<th class="num">成功去重数</th>`)
+	b.WriteString(`<th class="num">拦截次数</th>`)
+	b.WriteString(`<th class="num">跳转次数</th>`)
+	b.WriteString(`<th>拦截原因</th>`)
+	b.WriteString(`<th>路由策略</th>`)
+	b.WriteString(`<th>路径列表</th>`)
+	b.WriteString(`<th>客户端 IP 列表</th>`)
+	b.WriteString(`</tr></thead><tbody>`)
+	if len(rows) == 0 {
+		b.WriteString(`<tr><td colspan="11" class="muted">No host traffic</td></tr>`)
+	} else {
+		for _, row := range rows {
+			ipRows := topMap(row.ClientIPs, 0)
+			ipValues := make([]string, 0, len(ipRows))
+			for _, ipRow := range ipRows {
+				ipValues = append(ipValues, fmt.Sprintf("%s=%d", ipRow.Key, ipRow.Value))
+			}
+			routeSummary := joinAllCounts(row.RouteSetCounts)
+			routeIDSummary := joinAllCounts(row.RouteIDCounts)
+			if routeIDSummary != "" {
+				if routeSummary != "" {
+					routeSummary += "; "
+				}
+				routeSummary += routeIDSummary
+			}
+			b.WriteString(`<tr>`)
+			b.WriteString(`<td>` + html.EscapeString(reportSafeText(row.Host)) + `</td>`)
+			b.WriteString(`<td class="num">` + fmt.Sprintf("%d", row.TotalRequests) + `</td>`)
+			b.WriteString(`<td class="num">` + fmt.Sprintf("%d", row.UniqueClients) + `</td>`)
+			b.WriteString(`<td class="num">` + fmt.Sprintf("%d", row.AllowCount) + `</td>`)
+			b.WriteString(`<td class="num">` + fmt.Sprintf("%d", row.UniqueAllowedIPs) + `</td>`)
+			b.WriteString(`<td class="num">` + fmt.Sprintf("%d", row.DenyCount) + `</td>`)
+			b.WriteString(`<td class="num">` + fmt.Sprintf("%d", row.RedirectCount) + `</td>`)
+			b.WriteString(`<td>` + html.EscapeString(reportSafeText(joinAllCounts(row.DenyReasons))) + `</td>`)
+			b.WriteString(`<td>` + html.EscapeString(reportSafeText(routeSummary)) + `</td>`)
+			b.WriteString(`<td>` + html.EscapeString(reportSafeText(joinAllCounts(row.PathCounts))) + `</td>`)
+			b.WriteString(`<td>` + html.EscapeString(reportSafeText(strings.Join(ipValues, "; "))) + `</td>`)
+			b.WriteString(`</tr>`)
+		}
+	}
+	b.WriteString(`</tbody></table></div></div>`)
+	return b.String()
+}
+
 func topMap(values map[string]uint64, limit int) []aggregateRow {
 	rows := make([]aggregateRow, 0, len(values))
 	for key, value := range values {
@@ -1723,6 +2534,7 @@ func mergeSummaries(left, right Summary) Summary {
 
 	merged.AllowCount += right.AllowCount
 	merged.DenyCount += right.DenyCount
+	merged.RedirectCount += right.RedirectCount
 	merged.ShortCircuitAllowCount += right.ShortCircuitAllowCount
 	merged.ShortCircuitDenyCount += right.ShortCircuitDenyCount
 
@@ -1732,11 +2544,65 @@ func mergeSummaries(left, right Summary) Summary {
 	if merged.DenyReasons == nil {
 		merged.DenyReasons = map[string]uint64{}
 	}
+	if merged.RouteSetCounts == nil {
+		merged.RouteSetCounts = map[string]uint64{}
+	}
+	if merged.RouteIDCounts == nil {
+		merged.RouteIDCounts = map[string]uint64{}
+	}
+	if merged.RequestURLCounts == nil {
+		merged.RequestURLCounts = map[string]uint64{}
+	}
+	if merged.PathCounts == nil {
+		merged.PathCounts = map[string]uint64{}
+	}
+	if merged.UserAgentCounts == nil {
+		merged.UserAgentCounts = map[string]uint64{}
+	}
+	if merged.AcceptLanguageCounts == nil {
+		merged.AcceptLanguageCounts = map[string]uint64{}
+	}
+	if merged.CountryCounts == nil {
+		merged.CountryCounts = map[string]uint64{}
+	}
+	if merged.RegionCounts == nil {
+		merged.RegionCounts = map[string]uint64{}
+	}
+	if merged.CityCounts == nil {
+		merged.CityCounts = map[string]uint64{}
+	}
 	for key, value := range right.AllowReasons {
 		merged.AllowReasons[key] += value
 	}
 	for key, value := range right.DenyReasons {
 		merged.DenyReasons[key] += value
+	}
+	for key, value := range right.RouteSetCounts {
+		merged.RouteSetCounts[key] += value
+	}
+	for key, value := range right.RouteIDCounts {
+		merged.RouteIDCounts[key] += value
+	}
+	for key, value := range right.RequestURLCounts {
+		merged.RequestURLCounts[key] += value
+	}
+	for key, value := range right.PathCounts {
+		merged.PathCounts[key] += value
+	}
+	for key, value := range right.UserAgentCounts {
+		merged.UserAgentCounts[key] += value
+	}
+	for key, value := range right.AcceptLanguageCounts {
+		merged.AcceptLanguageCounts[key] += value
+	}
+	for key, value := range right.CountryCounts {
+		merged.CountryCounts[key] += value
+	}
+	for key, value := range right.RegionCounts {
+		merged.RegionCounts[key] += value
+	}
+	for key, value := range right.CityCounts {
+		merged.CityCounts[key] += value
 	}
 
 	if merged.FirstSeenAt.IsZero() || (!right.FirstSeenAt.IsZero() && right.FirstSeenAt.Before(merged.FirstSeenAt)) {
@@ -1766,7 +2632,9 @@ func mergeSummaries(left, right Summary) Summary {
 		merged.Host = right.Host
 		merged.Path = right.Path
 		merged.RequestURL = right.RequestURL
+		merged.UserAgent = right.UserAgent
 		merged.UserAgentSummary = right.UserAgentSummary
+		merged.AcceptLanguage = right.AcceptLanguage
 		merged.CountryCode = right.CountryCode
 		merged.CountryName = right.CountryName
 		merged.Region = right.Region
@@ -1934,7 +2802,7 @@ func reportPercentString(part, total uint64) string {
 func reportSafeText(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
-		return "—"
+		return "-"
 	}
 	return value
 }
@@ -1953,14 +2821,14 @@ func reportJoinParts(values ...string) string {
 	parts := make([]string, 0, len(values))
 	for _, value := range values {
 		value = strings.TrimSpace(value)
-		if value != "" && value != "—" {
+		if value != "" && value != "-" {
 			parts = append(parts, value)
 		}
 	}
 	if len(parts) == 0 {
-		return "—"
+		return "-"
 	}
-	return strings.Join(parts, " · ")
+	return strings.Join(parts, " | ")
 }
 
 func reportCompactText(value string, limit int) string {
@@ -1974,7 +2842,7 @@ func reportCompactText(value string, limit int) string {
 	if limit <= 1 {
 		return string(runes[:limit])
 	}
-	return string(runes[:limit-1]) + "…"
+	return string(runes[:limit-1]) + "..."
 }
 
 func reportFirstAggregate(rows []aggregateRow, fallback string) aggregateRow {
@@ -2006,13 +2874,23 @@ func (s *Service) summaryFromEvent(event Event) Summary {
 		now = time.Now().UTC()
 	}
 	dayKey := now.In(s.location).Format("2006-01-02")
+	hostKey := reportPrimaryHost(event)
 	summary := Summary{
-		ID:           dayKey + "|" + event.ClientIP,
+		ID:           dayKey + "|" + hostKey + "|" + event.ClientIP,
 		Kind:         "summary",
 		Day:          dayKey,
 		ClientIP:     event.ClientIP,
 		AllowReasons: map[string]uint64{},
 		DenyReasons:  map[string]uint64{},
+		RouteSetCounts: map[string]uint64{},
+		RouteIDCounts: map[string]uint64{},
+		RequestURLCounts: map[string]uint64{},
+		PathCounts: map[string]uint64{},
+		UserAgentCounts: map[string]uint64{},
+		AcceptLanguageCounts: map[string]uint64{},
+		CountryCounts: map[string]uint64{},
+		RegionCounts: map[string]uint64{},
+		CityCounts: map[string]uint64{},
 		FirstSeenAt:  now,
 	}
 	applyEvent(&summary, event, now)

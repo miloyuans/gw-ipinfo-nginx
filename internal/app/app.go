@@ -1329,6 +1329,11 @@ func (h *GatewayHandler) trackReport(req *http.Request, record model.AuditRecord
 	if h.reporting == nil {
 		return
 	}
+	if h.shouldIgnoreReportRequest(req) {
+		return
+	}
+	userAgent := normalizeReportHeaderValue(req.UserAgent())
+	acceptLanguage := normalizeReportHeaderValue(req.Header.Get("Accept-Language"))
 	h.reporting.Track(reporting.Event{
 		Timestamp:            time.Now().UTC(),
 		ClientIP:             record.ClientIP,
@@ -1342,10 +1347,13 @@ func (h *GatewayHandler) trackReport(req *http.Request, record model.AuditRecord
 		Host:                 record.Host,
 		Path:                 record.Path,
 		RequestURL:           record.RequestURL,
+		UserAgent:            userAgent,
 		UserAgentSummary:     summarizeUserAgent(req.UserAgent()),
+		AcceptLanguage:       acceptLanguage,
 		Allowed:              record.Allowed,
 		Result:               record.Result,
 		ReasonCode:           record.ReasonCode,
+		RedirectTriggered:    isRedirectReason(record.ReasonCode),
 		CountryCode:          record.CountryCode,
 		CountryName:          record.CountryName,
 		Region:               record.Region,
@@ -1366,6 +1374,61 @@ func (h *GatewayHandler) trackReport(req *http.Request, record model.AuditRecord
 		IPInfoLookupAction:      record.IPInfoLookupAction,
 		DataSourceMode:          record.DataSourceMode,
 	})
+}
+
+func (h *GatewayHandler) shouldIgnoreReportRequest(req *http.Request) bool {
+	if req == nil {
+		return false
+	}
+	switch req.URL.Path {
+	case "/healthz", "/readyz", "/metrics":
+		return true
+	}
+	ua := strings.ToLower(strings.TrimSpace(req.UserAgent()))
+	if ua == "" {
+		return false
+	}
+	probeUA := strings.ToLower(strings.TrimSpace(h.cfg.V4.ProbeDefaults.UserAgent))
+	if probeUA != "" && strings.Contains(ua, probeUA) {
+		return true
+	}
+	for _, marker := range []string{
+		"kube-probe",
+		"googlehc",
+		"elb-healthchecker",
+		"healthcheck",
+		"health-check",
+		"uptimerobot",
+		"pingdom",
+		"statuscake",
+	} {
+		if strings.Contains(ua, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeReportHeaderValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "(empty)"
+	}
+	if len(value) > 512 {
+		return value[:512]
+	}
+	return value
+}
+
+func isRedirectReason(reason string) bool {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return false
+	}
+	if strings.Contains(reason, "_redirect") {
+		return true
+	}
+	return reason == "allow_v1_exchange"
 }
 
 func summarizeUserAgent(userAgent string) string {
