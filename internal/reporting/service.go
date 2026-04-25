@@ -1823,13 +1823,11 @@ func (s *Service) renderHTMLHostPrimaryLegacy(dayKey string, summaries []Summary
 		title = "gw-ipinfo-nginx daily report"
 	}
 
-	dedupedRequestCount := uint64(len(summaries))
 	totalRequests := uint64(0)
 	totalAllows := uint64(0)
 	totalDenies := uint64(0)
 	totalRedirects := uint64(0)
 	shortCircuitTotal := uint64(0)
-	dedupedSuccessCount := uint64(0)
 	hostStats := map[string]hostAggregate{}
 	uaCounts := map[string]uint64{}
 	langCounts := map[string]uint64{}
@@ -1849,10 +1847,6 @@ func (s *Service) renderHTMLHostPrimaryLegacy(dayKey string, summaries []Summary
 		totalDenies += summary.DenyCount
 		totalRedirects += summary.RedirectCount
 		shortCircuitTotal += summary.ShortCircuitAllowCount + summary.ShortCircuitDenyCount
-		if summary.AllowCount > 0 {
-			dedupedSuccessCount++
-		}
-
 		mergeCountMaps(uaCounts, summary.UserAgentCounts)
 		mergeCountMaps(langCounts, summary.AcceptLanguageCounts)
 		mergeCountMaps(countryCounts, summary.CountryCounts)
