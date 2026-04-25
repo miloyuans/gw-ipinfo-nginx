@@ -221,6 +221,11 @@ func (s *Service) probeHost(ctx context.Context, host v4model.SnapshotHost) v4ru
 	if len(failedURLs) > 0 || len(failureReasons) > 0 {
 		update.Healthy = false
 		update.RedirectURL = s.pickRedirectURL(probeCtx, host)
+		if update.RedirectURL == "" {
+			update.SwitchFailed = true
+			update.SwitchFailureReason = "no healthy redirect target available"
+			failureReasons = append(failureReasons, update.SwitchFailureReason)
+		}
 		update.Error = strings.Join(failureReasons, " | ")
 	}
 	s.writeWorkspace(host, discoveredURLs, failedURLs, update.Error)
@@ -688,7 +693,7 @@ func (s *Service) pickRedirectURL(ctx context.Context, host v4model.SnapshotHost
 		}
 	}
 	if len(healthy) == 0 {
-		healthy = candidates
+		return ""
 	}
 	return randomURLForHost(host.Host, healthy)
 }

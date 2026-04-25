@@ -1281,6 +1281,16 @@ func (h *GatewayHandler) finish(w http.ResponseWriter, req *http.Request, reques
 		http.SetCookie(w, action.cookie)
 	}
 	if action.redirectURL != "" {
+		if h.v4Runtime != nil && routeMeta.RouteSetKind == "v4" {
+			if err := h.v4Runtime.TrackRedirectAccess(req.Context(), routeMeta.SourceHost, clientIP); err != nil && h.logger != nil {
+				h.logger.Warn("v4_redirect_access_track_error",
+					"event", "v4_redirect_access_track_error",
+					"host", routeMeta.SourceHost,
+					"client_ip", clientIP,
+					"error", err,
+				)
+			}
+		}
 		status := action.redirectCode
 		if status == 0 {
 			status = http.StatusFound

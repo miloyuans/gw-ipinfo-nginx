@@ -3,8 +3,10 @@ package runtime
 import (
 	"context"
 	"log/slog"
+	"net"
 	"net/http"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +28,8 @@ type ProbeUpdate struct {
 	Healthy     bool
 	SourceURL   string
 	RedirectURL string
+	SwitchFailed bool
+	SwitchFailureReason string
 	RedirectCandidates []string
 	ProbeTargets []string
 	FailedTargets []string
@@ -374,10 +378,12 @@ func (s *Service) ApplyProbeUpdate(ctx context.Context, update ProbeUpdate) (v4m
 	state.WorkspaceFile = strings.TrimSpace(update.WorkspaceFile)
 	modeChanged := false
 	recovered := false
+	wasFaultActive := state.FaultActive
 
 	if update.Healthy {
 		state.HealthyCount++
 		state.UnhealthyCount = 0
+		state.FaultActive = false
 		state.LastHealthyAt = now
 		if state.Mode == v4model.ModeDegradedRedirect || state.Mode == v4model.ModeRecovering {
 			if state.Mode != v4model.ModeRecovering {
@@ -396,15 +402,29 @@ func (s *Service) ApplyProbeUpdate(ctx context.Context, update ProbeUpdate) (v4m
 		state.UnhealthyCount++
 		state.HealthyCount = 0
 		state.LastUnhealthyAt = now
+		threshold := update.Spec.UnhealthyThreshold
+		if threshold <= 0 {
+			threshold = 1
+		}
+		thresholdReached := state.UnhealthyCount >= threshold
 		if update.RedirectURL != "" {
 			state.RedirectURL = update.RedirectURL
 		}
-		if state.UnhealthyCount >= update.Spec.UnhealthyThreshold && update.RedirectURL != "" && switchAllowed(state.LastSwitchAt, now, update.Spec.MinSwitchInterval) {
+		if thresholdReached && !state.FaultActive {
+			state.FaultActive = true
+			state.FaultCount++
+		}
+		if thresholdReached && update.RedirectURL != "" && switchAllowed(state.LastSwitchAt, now, update.Spec.MinSwitchInterval) {
+			if state.Mode != v4model.ModeDegradedRedirect {
+				state.SwitchSuccessCount++
+			}
 			if state.Mode != v4model.ModeDegradedRedirect || state.RedirectURL != update.RedirectURL {
 				state.Mode = v4model.ModeDegradedRedirect
 				state.LastSwitchAt = now
 				modeChanged = true
 			}
+		} else if thresholdReached && state.Mode != v4model.ModeDegradedRedirect && !wasFaultActive {
+			state.SwitchFailureCount++
 		}
 	}
 	if state.Mode == v4model.ModePassthrough && strings.TrimSpace(state.RedirectURL) != "" {
@@ -426,6 +446,65 @@ func (s *Service) ApplyProbeUpdate(ctx context.Context, update ProbeUpdate) (v4m
 	s.statesByHost[update.Host] = state
 	s.mu.Unlock()
 	return state, modeChanged, recovered, nil
+}
+
+func (s *Service) TrackRedirectAccess(ctx context.Context, host, clientIP string) error {
+	if s == nil || s.states == nil {
+		return nil
+	}
+	host = normalizeRequestHost(host)
+	clientKey := normalizeClientKey(clientIP)
+	if host == "" || clientKey == "" {
+		return nil
+	}
+
+	s.mu.RLock()
+	inMemory, found := s.statesByHost[host]
+	snapshotVersion := s.snapshotVersion
+	snapshotFingerprint := s.fingerprint
+	s.mu.RUnlock()
+	if found {
+		inMemory = normalizeStateForHost(v4model.SnapshotHost{Host: host, Probe: v4model.ProbeSpec{Enabled: true}}, inMemory, snapshotVersion, snapshotFingerprint)
+		if inMemory.Mode != v4model.ModeDegradedRedirect {
+			return nil
+		}
+		if containsString(inMemory.RedirectClientKeys, clientKey) {
+			return nil
+		}
+	}
+
+	current, found, err := s.states.Get(ctx, host)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return nil
+	}
+	current = normalizeStateForHost(v4model.SnapshotHost{Host: host, Probe: v4model.ProbeSpec{Enabled: true}}, current, snapshotVersion, snapshotFingerprint)
+	if current.Mode != v4model.ModeDegradedRedirect {
+		return nil
+	}
+	if containsString(current.RedirectClientKeys, clientKey) {
+		return nil
+	}
+	current.RedirectClientKeys = append(current.RedirectClientKeys, clientKey)
+	sort.Strings(current.RedirectClientKeys)
+	current.RedirectClientKeys = dedupeStrings(current.RedirectClientKeys)
+	current.RedirectUniqueClientCount = len(current.RedirectClientKeys)
+	current.WriterInstanceID = s.instanceID
+	current.WriterStartedAt = s.instanceStartedAt
+	current.UpdatedAt = time.Now().UTC()
+	if err := s.states.Upsert(ctx, current); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	if s.statesByHost == nil {
+		s.statesByHost = make(map[string]v4model.HostRuntimeState)
+	}
+	s.statesByHost[host] = current
+	s.mu.Unlock()
+	return nil
 }
 
 func (s *Service) ProbeHosts() []v4model.SnapshotHost {
@@ -489,8 +568,14 @@ func normalizeStateForHost(host v4model.SnapshotHost, state v4model.HostRuntimeS
 	}
 
 	if !host.Probe.Enabled {
+		state.FaultActive = false
+		state.FaultCount = 0
+		state.SwitchSuccessCount = 0
+		state.SwitchFailureCount = 0
+		state.RedirectUniqueClientCount = 0
 		state.Mode = v4model.ModePassthrough
 		state.RedirectURL = ""
+		state.RedirectClientKeys = nil
 		state.LastProbeTargets = nil
 		state.LastFailedTargets = nil
 		state.LastProbeError = ""
@@ -500,7 +585,50 @@ func normalizeStateForHost(host v4model.SnapshotHost, state v4model.HostRuntimeS
 	if state.Mode == v4model.ModePassthrough {
 		state.RedirectURL = ""
 	}
+	state.RedirectClientKeys = dedupeStrings(state.RedirectClientKeys)
+	state.RedirectUniqueClientCount = len(state.RedirectClientKeys)
 	return state
+}
+
+func normalizeClientKey(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" {
+		return ""
+	}
+	if ip := net.ParseIP(value); ip != nil {
+		return ip.String()
+	}
+	return value
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func dedupeStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result
 }
 
 func staleStateForSnapshot(state v4model.HostRuntimeState, snapshotVersion, snapshotFingerprint string) bool {

@@ -93,9 +93,15 @@ type HostRuntimeState struct {
 	WriterInstanceID  string    `json:"writer_instance_id" bson:"writer_instance_id"`
 	WriterStartedAt   time.Time `json:"writer_started_at" bson:"writer_started_at"`
 	Mode              string    `json:"mode" bson:"mode"`
+	FaultActive       bool      `json:"fault_active" bson:"fault_active"`
+	FaultCount        int       `json:"fault_count" bson:"fault_count"`
+	SwitchSuccessCount int      `json:"switch_success_count" bson:"switch_success_count"`
+	SwitchFailureCount int      `json:"switch_failure_count" bson:"switch_failure_count"`
+	RedirectUniqueClientCount int `json:"redirect_unique_client_count" bson:"redirect_unique_client_count"`
 	SourceURL         string    `json:"source_url" bson:"source_url"`
 	RedirectURL       string    `json:"redirect_url" bson:"redirect_url"`
 	RedirectCandidates []string `json:"redirect_candidates" bson:"redirect_candidates"`
+	RedirectClientKeys []string `json:"redirect_client_keys" bson:"redirect_client_keys"`
 	LastProbeTargets  []string  `json:"last_probe_targets" bson:"last_probe_targets"`
 	LastFailedTargets []string  `json:"last_failed_targets" bson:"last_failed_targets"`
 	WorkspaceFile     string    `json:"workspace_file" bson:"workspace_file"`
