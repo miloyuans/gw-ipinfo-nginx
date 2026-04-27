@@ -190,6 +190,7 @@ type Service struct {
 	indexOnce      sync.Once
 	scheduleMu     sync.Mutex
 	lastSkipLogKey string
+	lastMongoWaitLogKey string
 }
 
 func NewService(cfg *config.Config, controller *storage.Controller, logger *slog.Logger, sender *alerts.Sender, metricsSet *metrics.GatewayMetrics, workerID string, sharedStoragePath string) (*Service, error) {
@@ -268,6 +269,10 @@ func (s *Service) Run(ctx context.Context, workers int) {
 		}
 		go s.runScheduler(ctx)
 	}
+}
+
+func (s *Service) reportMongoAvailable() bool {
+	return s != nil && s.controller != nil && s.controller.Client() != nil && s.controller.Mode() != storage.ModeLocal
 }
 
 func (s *Service) Replay(ctx context.Context, client *mongostore.Client, batchSize int) (int, error) {
@@ -529,7 +534,7 @@ func (s *Service) runScheduler(ctx context.Context) {
 	defer renewTicker.Stop()
 
 	isLeader := false
-	if s.acquireSchedulerLeader(ctx) {
+	if s.reportMongoAvailable() && s.acquireSchedulerLeader(ctx) {
 		isLeader = true
 		if err := s.trySendDailyReport(ctx, time.Now().UTC()); err != nil && s.logger != nil {
 			s.logger.Warn("daily_report_error", "event", "daily_report_error", "error", err)
@@ -544,6 +549,13 @@ func (s *Service) runScheduler(ctx context.Context) {
 			}
 			return
 		case <-renewTicker.C:
+			if !s.reportMongoAvailable() {
+				if isLeader {
+					isLeader = false
+				}
+				s.logMongoUnavailableOnce()
+				continue
+			}
 			if isLeader {
 				ok, err := s.leaseStore.Refresh(ctx, s.workerID, time.Now().UTC(), s.cfg.Reports.LeaderLeaseTTL)
 				if err != nil || !ok {
@@ -560,6 +572,13 @@ func (s *Service) runScheduler(ctx context.Context) {
 			}
 			isLeader = s.acquireSchedulerLeader(ctx)
 		case <-workTicker.C:
+			if !s.reportMongoAvailable() {
+				if isLeader {
+					isLeader = false
+				}
+				s.logMongoUnavailableOnce()
+				continue
+			}
 			if !isLeader {
 				continue
 			}
@@ -853,34 +872,23 @@ func (s *Service) defaultReportState(dayKey string) reportDeliveryState {
 
 func (s *Service) loadReportState(ctx context.Context, dayKey string) (reportDeliveryState, error) {
 	defaultState := s.defaultReportState(dayKey)
-	if client := s.controller.Client(); client != nil && s.controller.Mode() != storage.ModeLocal {
-		child, cancel := client.WithTimeout(ctx)
-		defer cancel()
-
-		var state reportDeliveryState
-		err := client.Database().Collection(s.collectionName).FindOne(child, bson.M{"_id": s.reportStateKey(dayKey)}).Decode(&state)
-		if err == nil {
-			return state, nil
-		}
-		if errors.Is(err, mongo.ErrNoDocuments) {
-			return defaultState, nil
-		}
-		if !errors.Is(err, mongo.ErrNoDocuments) {
-			s.controller.HandleMongoError(err)
-			if s.controller.Mode() != storage.ModeLocal {
-				return defaultState, err
-			}
-		}
+	if !s.reportMongoAvailable() {
+		return defaultState, errors.New("mongo unavailable for report state")
 	}
 
+	client := s.controller.Client()
+	child, cancel := client.WithTimeout(ctx)
+	defer cancel()
+
 	var state reportDeliveryState
-	err := s.controller.Local().GetJSON(ctx, localdisk.BucketMetadata, s.reportStateKey(dayKey), &state)
+	err := client.Database().Collection(s.collectionName).FindOne(child, bson.M{"_id": s.reportStateKey(dayKey)}).Decode(&state)
 	if err == nil {
 		return state, nil
 	}
-	if errors.Is(err, localdisk.ErrNotFound) {
+	if errors.Is(err, mongo.ErrNoDocuments) {
 		return defaultState, nil
 	}
+	s.controller.HandleMongoError(err)
 	return defaultState, err
 }
 
@@ -890,30 +898,25 @@ func (s *Service) saveReportState(ctx context.Context, state reportDeliveryState
 	state.OverallSuccess = state.TelegramSuccess && state.FileSuccess
 	state.UpdatedAt = time.Now().UTC()
 
-	if client := s.controller.Client(); client != nil && s.controller.Mode() != storage.ModeLocal {
-		child, cancel := client.WithTimeout(ctx)
-		defer cancel()
-
-		_, err := client.Database().Collection(s.collectionName).ReplaceOne(
-			child,
-			bson.M{"_id": state.ID},
-			state,
-			options.Replace().SetUpsert(true),
-		)
-		if err == nil {
-			if mirrorErr := s.controller.Local().PutJSON(ctx, localdisk.BucketMetadata, state.ID, state); mirrorErr != nil && s.logger != nil {
-				s.logger.Warn("daily_report_state_local_mirror_error",
-					"event", "daily_report_state_local_mirror_error",
-					"day_key", state.Day,
-					"error", mirrorErr,
-				)
-			}
-			return nil
-		}
-		s.controller.HandleMongoError(err)
+	if !s.reportMongoAvailable() {
+		return errors.New("mongo unavailable for report state")
 	}
 
-	return s.controller.Local().PutJSON(ctx, localdisk.BucketMetadata, state.ID, state)
+	client := s.controller.Client()
+	child, cancel := client.WithTimeout(ctx)
+	defer cancel()
+
+	_, err := client.Database().Collection(s.collectionName).ReplaceOne(
+		child,
+		bson.M{"_id": state.ID},
+		state,
+		options.Replace().SetUpsert(true),
+	)
+	if err != nil {
+		s.controller.HandleMongoError(err)
+		return err
+	}
+	return nil
 }
 
 func (s *Service) telegramReportSatisfied(state reportDeliveryState) bool {
@@ -966,6 +969,25 @@ func (s *Service) logSkipBeforeTimeOnce(now, reportTime time.Time) {
 	}
 }
 
+func (s *Service) logMongoUnavailableOnce() {
+	logKey := time.Now().UTC().Format("2006-01-02T15:04")
+	s.scheduleMu.Lock()
+	if s.lastMongoWaitLogKey == logKey {
+		s.scheduleMu.Unlock()
+		return
+	}
+	s.lastMongoWaitLogKey = logKey
+	s.scheduleMu.Unlock()
+
+	if s.logger != nil {
+		s.logger.Warn("daily_report_waiting_for_mongo",
+			"event", "daily_report_waiting_for_mongo",
+			"title", s.cfg.Reports.Title,
+			"mode", s.controller.Mode(),
+		)
+	}
+}
+
 func (s *Service) reportCaption(dayKey string) string {
 	title := strings.TrimSpace(s.cfg.Reports.Title)
 	if title == "" {
@@ -978,50 +1000,16 @@ func (s *Service) reportCaption(dayKey string) string {
 }
 
 func (s *Service) loadDay(ctx context.Context, dayKey string) ([]Summary, error) {
-	if client := s.controller.Client(); client != nil && s.controller.Mode() != storage.ModeLocal {
-		summaries, err := s.loadDayFromMongo(ctx, client, dayKey)
-		if err == nil {
-			return summaries, nil
-		}
-		s.controller.HandleMongoError(err)
-		if s.controller.Mode() != storage.ModeLocal {
-			return nil, err
-		}
+	if !s.reportMongoAvailable() {
+		return nil, errors.New("mongo unavailable for report data")
 	}
 
-	prefix := dayKey + "|"
-	summaryMap := make(map[string]Summary, 128)
-	err := s.controller.Local().ForEachJSON(ctx, localdisk.BucketReportRecords, func(key string, raw []byte) error {
-		if !strings.HasPrefix(key, prefix) {
-			return nil
-		}
-		var summary Summary
-		if err := json.Unmarshal(raw, &summary); err != nil {
-			return err
-		}
-		if s.shouldIgnoreStoredSummary(summary) {
-			return nil
-		}
-		if existing, ok := summaryMap[summary.ID]; ok {
-			summaryMap[summary.ID] = mergeSummaries(existing, summary)
-			return nil
-		}
-		summaryMap[summary.ID] = summary
-		return nil
-	})
+	client := s.controller.Client()
+	summaries, err := s.loadDayFromMongo(ctx, client, dayKey)
 	if err != nil {
+		s.controller.HandleMongoError(err)
 		return nil, err
 	}
-	summaries := make([]Summary, 0, len(summaryMap))
-	for _, summary := range summaryMap {
-		summaries = append(summaries, summary)
-	}
-	sort.Slice(summaries, func(i, j int) bool {
-		if summaries[i].AllowCount+summaries[i].DenyCount == summaries[j].AllowCount+summaries[j].DenyCount {
-			return summaries[i].ClientIP < summaries[j].ClientIP
-		}
-		return summaries[i].AllowCount+summaries[i].DenyCount > summaries[j].AllowCount+summaries[j].DenyCount
-	})
 	return summaries, nil
 }
 

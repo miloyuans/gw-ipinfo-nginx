@@ -45,25 +45,25 @@ func (s *reportLeaseStore) TryAcquire(ctx context.Context, ownerID string, now t
 	if client := s.mongoClient(); client != nil {
 		return s.tryAcquireMongo(ctx, client, ownerID, now, ttl)
 	}
-	return s.tryAcquireFile(ownerID, now, ttl)
+	return reportSchedulerLease{}, false, errors.New("mongo unavailable for report scheduler lease")
 }
 
 func (s *reportLeaseStore) Refresh(ctx context.Context, ownerID string, now time.Time, ttl time.Duration) (bool, error) {
 	if client := s.mongoClient(); client != nil {
 		return s.refreshMongo(ctx, client, ownerID, now, ttl)
 	}
-	return s.refreshFile(ownerID, now, ttl)
+	return false, errors.New("mongo unavailable for report scheduler lease")
 }
 
 func (s *reportLeaseStore) Release(ctx context.Context, ownerID string) error {
 	if client := s.mongoClient(); client != nil {
 		return s.releaseMongo(ctx, client, ownerID)
 	}
-	return s.releaseFile(ownerID)
+	return nil
 }
 
 func (s *reportLeaseStore) mongoClient() *mongostore.Client {
-	if s == nil || s.controller == nil || s.controller.Mode() == storage.ModeLocal {
+	if s == nil || s.controller == nil {
 		return nil
 	}
 	return s.controller.Client()
