@@ -107,6 +107,8 @@ type HostRuntimeState struct {
 	WorkspaceFile     string    `json:"workspace_file" bson:"workspace_file"`
 	LastProbeAt       time.Time `json:"last_probe_at" bson:"last_probe_at"`
 	LastProbeError    string    `json:"last_probe_error" bson:"last_probe_error"`
+	LastFaultReason   string    `json:"last_fault_reason" bson:"last_fault_reason"`
+	LastSwitchFailureReason string `json:"last_switch_failure_reason" bson:"last_switch_failure_reason"`
 	LastHealthyAt     time.Time `json:"last_healthy_at" bson:"last_healthy_at"`
 	LastUnhealthyAt   time.Time `json:"last_unhealthy_at" bson:"last_unhealthy_at"`
 	LastSwitchAt      time.Time `json:"last_switch_at" bson:"last_switch_at"`

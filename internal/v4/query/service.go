@@ -32,6 +32,17 @@ type Service struct {
 	events         *repository.EventRepository
 }
 
+type syncView struct {
+	Status        string
+	LastSuccessAt time.Time
+	LastError     string
+}
+
+type hostNoteEntry struct {
+	Label string
+	Value string
+}
+
 func NewService(cfg config.V4TelegramConfig, v4Cfg config.V4Config, routeFile config.RouteSetFileConfig, baseConfigPath string, serviceNames []string, snapshots *repository.SnapshotRepository, states *repository.RuntimeStateRepository, events *repository.EventRepository) *Service {
 	names := make(map[string]struct{}, len(serviceNames))
 	for _, name := range serviceNames {
@@ -76,7 +87,7 @@ func (s *Service) BuildRoutesSummary(ctx context.Context) (Result, error) {
 			recentEvents = filterVisibleEvents(snapshot, syncState, items)
 		}
 	}
-	syncView := buildSyncView(snapshot, syncState, recentEvents)
+	syncStateView := buildSyncView(snapshot, syncState, recentEvents)
 
 	sort.Slice(hosts, func(i, j int) bool { return hosts[i].Host < hosts[j].Host })
 	fileHosts := append([]v4model.SnapshotHost(nil), hosts...)
@@ -94,20 +105,21 @@ func (s *Service) BuildRoutesSummary(ctx context.Context) (Result, error) {
 	summary.WriteString("<b>V4 Routes Summary</b>\n")
 	summary.WriteString(html.EscapeString(fmt.Sprintf("快照时间 / Snapshot time: %s\n", snapshot.UpdatedAt.Format(time.RFC3339))))
 	summary.WriteString(html.EscapeString(fmt.Sprintf("主机数量 / Hosts: %d\n", snapshot.HostCount)))
-	summary.WriteString(html.EscapeString(fmt.Sprintf("当前状态 / Current status: %s\n", syncView.Status)))
-	if !syncView.LastSuccessAt.IsZero() {
-		summary.WriteString(html.EscapeString(fmt.Sprintf("最近成功 / Last success: %s\n", syncView.LastSuccessAt.Format(time.RFC3339))))
+	summary.WriteString(html.EscapeString(fmt.Sprintf("当前状态 / Current status: %s\n", syncStateView.Status)))
+	if !syncStateView.LastSuccessAt.IsZero() {
+		summary.WriteString(html.EscapeString(fmt.Sprintf("最近成功 / Last success: %s\n", syncStateView.LastSuccessAt.Format(time.RFC3339))))
 	}
-	if syncView.LastError != "" {
-		summary.WriteString(html.EscapeString(fmt.Sprintf("最近错误 / Last error: %s\n", trimForSummary(syncView.LastError, 180))))
+	if syncStateView.LastError != "" {
+		summary.WriteString(html.EscapeString(fmt.Sprintf("最近错误 / Last error: %s\n", trimForSummary(syncStateView.LastError, 180))))
 	}
 	summary.WriteString(html.EscapeString(fmt.Sprintf("摘要主机数 / Top hosts: %d\n", len(summaryHosts))))
 	if len(fileHosts) > len(summaryHosts) {
-		summary.WriteString(html.EscapeString(fmt.Sprintf("其余 %d 个域名请查看附件 / See attachment for the remaining %d hosts\n", len(fileHosts)-len(summaryHosts), len(fileHosts)-len(summaryHosts))))
+		remaining := len(fileHosts) - len(summaryHosts)
+		summary.WriteString(html.EscapeString(fmt.Sprintf("其余 %d 个域名请查看附件 / See attachment for the remaining %d hosts\n", remaining, remaining)))
 	}
 
 	summary.WriteString("\n<b>字段说明 / Field Guide</b>\n")
-	summary.WriteString(html.EscapeString("Host = 入口域名；Mode = 当前流量模式；Backend Service = 上游服务名；Backend Host = 反代时覆盖的 Host；Security = 是否开启安全检查；Enrichment = IP 丰富化模式；Probe = 是否启用探测；Faults = 故障次数；Switch OK = 成功切换次数；Switch Fail = 切换失败次数；Redirect Clients = 切换后去重客户端访问数；Targets = 当前探测到的目标数；Last Reason = 最近异常原因；Redirect URL = 当前故障跳转地址。\n"))
+	summary.WriteString(html.EscapeString("Host = 入口域名；Mode = 当前流量模式；Backend Service = 上游服务名；Backend Host = 反代覆盖 Host；Security = 是否启用完整安全检查；Enrichment = IP 丰富化模式；Probe = 是否启用探测；Faults = 故障次数；Switch OK = 切换成功次数；Switch Fail = 切换失败次数；Redirect Clients = 切换后去重客户端数；Targets = 当前目标数；Last Reason = 最近探测异常；Notes = 最近故障/切换失败说明；Redirect URL = 当前降级跳转地址。\n"))
 
 	summary.WriteString("\n<b>Top Hosts / 摘要域名</b>\n")
 	for _, host := range summaryHosts {
@@ -117,7 +129,7 @@ func (s *Service) BuildRoutesSummary(ctx context.Context) (Result, error) {
 			mode = v4model.ModePassthrough
 		}
 		summary.WriteString(html.EscapeString(fmt.Sprintf(
-			"• %s | mode=%s | backend=%s | backend_host=%s | security=%t | enrich=%s | probe=%t | faults=%d | switch_ok=%d | switch_fail=%d | redirect_clients=%d | targets=%d | reason=%s\n",
+			"• %s | mode=%s | backend=%s | backend_host=%s | security=%t | enrich=%s | probe=%t | faults=%d | switch_ok=%d | switch_fail=%d | redirect_clients=%d | targets=%d | reason=%s | note=%s\n",
 			host.Host,
 			mode,
 			host.BackendService,
@@ -131,6 +143,7 @@ func (s *Service) BuildRoutesSummary(ctx context.Context) (Result, error) {
 			state.RedirectUniqueClientCount,
 			len(state.LastProbeTargets),
 			trimForSummary(state.LastProbeError, 60),
+			trimForSummary(buildHostNotesText(state), 90),
 		)))
 	}
 
@@ -147,87 +160,126 @@ func (s *Service) BuildRoutesSummary(ctx context.Context) (Result, error) {
 	if s.cfg.SendHTMLFile {
 		result.FileName = "v4-routes.html"
 		result.ContentType = "text/html; charset=utf-8"
-		result.FileContent = []byte(buildHTMLDocument(snapshot, syncView, fileHosts, stateByHost, recentEvents))
+		result.FileContent = []byte(buildHTMLDocument(snapshot, syncStateView, fileHosts, stateByHost, recentEvents))
 	}
 	return result, nil
 }
 
-func buildHTMLDocument(snapshot v4model.Snapshot, syncView syncView, hosts []v4model.SnapshotHost, stateByHost map[string]v4model.HostRuntimeState, recentEvents []v4model.Event) string {
+func buildHTMLDocument(snapshot v4model.Snapshot, syncStateView syncView, hosts []v4model.SnapshotHost, stateByHost map[string]v4model.HostRuntimeState, recentEvents []v4model.Event) string {
 	var buffer bytes.Buffer
-	buffer.WriteString("<html><head><meta charset=\"utf-8\"><title>V4 Routes</title></head><body>")
-	buffer.WriteString("<h1>V4 Routes</h1>")
-	buffer.WriteString("<p>" + html.EscapeString(snapshot.UpdatedAt.Format(time.RFC3339)) + "</p>")
-	buffer.WriteString("<p>" + html.EscapeString("当前状态 / Current status: "+syncView.Status) + "</p>")
-	if !syncView.LastSuccessAt.IsZero() {
-		buffer.WriteString("<p>" + html.EscapeString("最近成功 / Last success: "+syncView.LastSuccessAt.Format(time.RFC3339)) + "</p>")
-	}
-	if syncView.LastError != "" {
-		buffer.WriteString("<p>" + html.EscapeString("最近错误 / Last error: "+syncView.LastError) + "</p>")
-	}
+	buffer.WriteString(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>V4 Routes</title><style>
+:root{color-scheme:dark;--bg:#06111f;--bg2:#091a2b;--panel:rgba(9,26,43,.82);--line:rgba(121,190,255,.18);--text:#e8f1ff;--muted:#8aa6c8;--accent:#6ed6ff;--ok:#78ffcf;--warn:#ffc36e;--danger:#ff8c8c;--shadow:0 18px 60px rgba(0,0,0,.32);}
+*{box-sizing:border-box}html,body{margin:0;padding:0;background:radial-gradient(circle at top left,rgba(27,89,153,.26),transparent 28%),radial-gradient(circle at top right,rgba(17,187,153,.16),transparent 24%),linear-gradient(180deg,var(--bg),var(--bg2));color:var(--text);font:14px/1.55 "Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+body{min-height:100vh}.page{max-width:1880px;margin:0 auto;padding:22px 18px 30px}
+.hero,.panel,.events-panel{background:var(--panel);border:1px solid var(--line);border-radius:18px;box-shadow:var(--shadow);backdrop-filter:blur(14px)}
+.hero{padding:20px 22px;margin-bottom:18px;position:relative;overflow:hidden}.hero:before{content:"";position:absolute;inset:-20% auto auto 68%;width:220px;height:220px;background:radial-gradient(circle,rgba(110,214,255,.18),transparent 72%);pointer-events:none}
+.hero h1{margin:0 0 8px;font-size:34px;letter-spacing:.02em}.hero p{margin:0;color:var(--muted)}
+.hero-meta{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px}.badge{display:inline-flex;align-items:center;gap:8px;padding:8px 12px;border-radius:999px;background:rgba(10,28,48,.72);border:1px solid var(--line);color:var(--text);font-weight:600}
+.badge.status-success{border-color:rgba(120,255,207,.35);color:var(--ok)}.badge.status-degraded{border-color:rgba(255,195,110,.35);color:var(--warn)}.badge.status-failed{border-color:rgba(255,140,140,.35);color:var(--danger)}
+.layout{display:grid;grid-template-columns:320px minmax(0,1fr);gap:18px;align-items:start}.sticky-stack{position:sticky;top:16px;display:grid;gap:18px}
+.panel{padding:16px 16px 14px}.panel h2{margin:0 0 12px}.meta-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.metric{padding:12px 12px 10px;border-radius:14px;background:rgba(7,18,31,.56);border:1px solid var(--line)}.metric .label{display:block;color:var(--muted);font-size:12px;margin-bottom:5px}.metric .value{display:block;font-size:14px;font-weight:700;word-break:break-word}
+.guide-list{display:grid;gap:10px}.guide-item{padding:10px 12px;border-radius:14px;background:rgba(7,18,31,.46);border:1px solid rgba(121,190,255,.1)}.guide-item strong{display:block;margin-bottom:4px}.guide-item span{display:block;color:var(--muted);font-size:12px;line-height:1.45}
+.panel-head{display:flex;justify-content:space-between;align-items:flex-end;gap:12px;margin-bottom:12px}.panel-head p,.muted{margin:0;color:var(--muted)}
+.table-wrap{overflow:auto;border-radius:14px;border:1px solid var(--line)}table{width:100%;border-collapse:collapse;min-width:1660px;background:rgba(5,14,25,.62)}
+th,td{padding:10px 12px;border-bottom:1px solid rgba(121,190,255,.08);vertical-align:top;text-align:left}th{position:sticky;top:0;background:rgba(8,19,33,.96);backdrop-filter:blur(12px);z-index:2;font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+th span{display:block;margin-top:4px;font-size:11px;text-transform:none;letter-spacing:0;color:var(--muted)}tbody tr:nth-child(odd){background:rgba(255,255,255,.015)}tbody tr:hover{background:rgba(110,214,255,.06)}
+.mono{font-family:Consolas,"SFMono-Regular",Menlo,monospace}.bool-true{color:var(--ok);font-weight:700}.bool-false{color:var(--muted)}
+.reason,.notes,.url-list{word-break:break-word}.notes{display:grid;gap:6px;min-width:260px}.note-line{padding:6px 8px;border-radius:10px;background:rgba(6,17,31,.58);border:1px solid rgba(121,190,255,.08)}
+.note-line strong{display:block;font-size:11px;color:var(--accent);margin-bottom:3px;text-transform:uppercase;letter-spacing:.04em}.note-line span{display:block;color:var(--text);font-size:12px;line-height:1.45}.empty-note{color:var(--muted);font-style:italic}
+.events-panel{margin-top:18px;overflow:hidden}.events-panel summary{list-style:none;cursor:pointer;padding:16px 18px;font-weight:700;display:flex;justify-content:space-between;align-items:center;gap:12px}.events-panel summary::-webkit-details-marker{display:none}.events-panel[open] summary{border-bottom:1px solid var(--line)}
+.events-inner{padding:0 18px 18px}.events-hint{margin:12px 0;color:var(--muted)}.mini-table{min-width:980px}
+@media (max-width:1180px){.layout{grid-template-columns:1fr}.sticky-stack{position:static}.meta-grid{grid-template-columns:1fr 1fr}}@media (max-width:720px){.page{padding:16px 12px 24px}.hero h1{font-size:28px}.meta-grid{grid-template-columns:1fr}}
+</style></head><body><div class="page">`)
 
-	buffer.WriteString("<h2>字段说明 / Field Guide</h2>")
-	buffer.WriteString("<ul>")
-	buffer.WriteString("<li><b>Host（入口域名）</b>: 请求命中的站点域名 / Matched host</li>")
-	buffer.WriteString("<li><b>Mode（运行模式）</b>: 当前运行模式，通常是 passthrough 或 degraded_redirect / Current runtime mode</li>")
-	buffer.WriteString("<li><b>Backend Service（后端服务）</b>: 对应 routing.services 里的上游服务名 / Upstream service name</li>")
-	buffer.WriteString("<li><b>Backend Host（后端 Host）</b>: 反向代理时覆盖的 Host 请求头 / Host header override for upstream</li>")
-	buffer.WriteString("<li><b>Security（安全检查）</b>: 是否启用完整安全检查 / Whether full security checks are enabled</li>")
-	buffer.WriteString("<li><b>Enrichment（IP 丰富化）</b>: IP 丰富化模式，disabled、cache_only、full / IP enrichment mode</li>")
-	buffer.WriteString("<li><b>Probe（探测）</b>: 是否为该 host 显式开启探测 / Whether probe is enabled for this host</li>")
-	buffer.WriteString("<li><b>Faults（故障次数）</b>: 已累计识别到的故障事件次数 / Total fault occurrences</li>")
-	buffer.WriteString("<li><b>Switch OK（切换成功）</b>: 成功切换到故障跳转的次数 / Successful failover switch count</li>")
-	buffer.WriteString("<li><b>Switch Fail（切换失败）</b>: 达到切换条件但没有成功切换的次数 / Failed failover switch count</li>")
-	buffer.WriteString("<li><b>Redirect Clients（去重客户端）</b>: 切换后访问过故障跳转的去重客户端数量 / Unique client count after failover</li>")
-	buffer.WriteString("<li><b>Targets（目标数）</b>: 当前探测到的跳转目标数 / Current discovered target count</li>")
-	buffer.WriteString("<li><b>Last Reason（最近原因）</b>: 最近一次探测异常原因 / Most recent probe error</li>")
-	buffer.WriteString("<li><b>Redirect URL（降级跳转）</b>: 当前故障跳转地址，仅在 degraded_redirect 时生效 / Current failover target when degraded redirect is active</li>")
-	buffer.WriteString("</ul>")
+	buffer.WriteString(`<section class="hero"><h1>V4 Routes</h1><p>共享读模型展示页。当前页面只展示数据库中的统一持久化状态，便于多副本一致性排查和故障切换定位。</p><div class="hero-meta">`)
+	buffer.WriteString(`<span class="badge ` + statusClass(syncStateView.Status) + `">当前状态 / Current status: ` + html.EscapeString(syncStateView.Status) + `</span>`)
+	buffer.WriteString(`<span class="badge">快照主机 / Hosts: ` + html.EscapeString(fmt.Sprintf("%d", snapshot.HostCount)) + `</span>`)
+	buffer.WriteString(`<span class="badge">快照时间 / Snapshot: ` + html.EscapeString(snapshot.UpdatedAt.Format(time.RFC3339)) + `</span>`)
+	buffer.WriteString(`</div></section>`)
 
-	buffer.WriteString("<table border=\"1\" cellspacing=\"0\" cellpadding=\"6\">")
-	buffer.WriteString("<tr><th>Host<br/>入口域名</th><th>Mode<br/>运行模式</th><th>Backend Service<br/>后端服务</th><th>Backend Host<br/>后端 Host</th><th>Security<br/>安全检查</th><th>Enrichment<br/>IP 丰富化</th><th>Probe<br/>探测</th><th>Faults<br/>故障次数</th><th>Switch OK<br/>切换成功</th><th>Switch Fail<br/>切换失败</th><th>Redirect Clients<br/>去重客户端</th><th>Targets<br/>目标数</th><th>Last Reason<br/>最近原因</th><th>Redirect URL<br/>降级跳转</th></tr>")
+	buffer.WriteString(`<div class="layout"><aside><div class="sticky-stack">`)
+	buffer.WriteString(`<section class="panel"><h2>总览 / Overview</h2><div class="meta-grid">`)
+	buffer.WriteString(metricCard("当前状态 / Status", syncStateView.Status))
+	buffer.WriteString(metricCard("快照主机 / Hosts", fmt.Sprintf("%d", snapshot.HostCount)))
+	buffer.WriteString(metricCard("最近成功 / Last success", formatTimeValue(syncStateView.LastSuccessAt)))
+	buffer.WriteString(metricCard("最近错误 / Last error", fallbackValue(trimForSummary(syncStateView.LastError, 140))))
+	buffer.WriteString(metricCard("读模型 / Read model", "DB snapshot"))
+	buffer.WriteString(metricCard("事件数量 / Events", fmt.Sprintf("%d", len(recentEvents))))
+	buffer.WriteString(`</div></section>`)
+
+	buffer.WriteString(`<section class="panel"><h2>字段说明 / Field Guide</h2><div class="guide-list">`)
+	buffer.WriteString(fieldGuideItem("Host", "入口域名 / Matched host"))
+	buffer.WriteString(fieldGuideItem("Mode", "当前运行模式，通常是 passthrough 或 degraded_redirect / Runtime mode"))
+	buffer.WriteString(fieldGuideItem("Security", "是否走完整安全检查链 / Whether full security checks are enabled"))
+	buffer.WriteString(fieldGuideItem("Enrichment", "IP 丰富化模式：disabled、cache_only、full / IP enrichment mode"))
+	buffer.WriteString(fieldGuideItem("Faults", "累计故障次数；按一次故障事件计数 / Total fault occurrences"))
+	buffer.WriteString(fieldGuideItem("Switch OK / Switch Fail", "成功或失败切换到故障跳转的次数 / Successful or failed failover switches"))
+	buffer.WriteString(fieldGuideItem("Redirect Clients", "切换后访问过降级跳转的去重客户端数 / Unique clients after failover"))
+	buffer.WriteString(fieldGuideItem("Notes", "最近故障原因、切换失败原因、失败目标等摘要 / Recent fault and failover details"))
+	buffer.WriteString(`</div></section></div></aside><main>`)
+
+	buffer.WriteString(`<section class="panel"><div class="panel-head"><div><h2>Route Matrix / 路由矩阵</h2><p>悬浮总览会固定显示。下方表格聚焦每个 host 的当前路由状态、故障统计和原因细节。</p></div><p>` + html.EscapeString(fmt.Sprintf("Hosts: %d", len(hosts))) + `</p></div>`)
+	buffer.WriteString(`<div class="table-wrap"><table><thead><tr>`)
+	buffer.WriteString(`<th>Host<span>入口域名</span></th>`)
+	buffer.WriteString(`<th>Mode<span>运行模式</span></th>`)
+	buffer.WriteString(`<th>Backend Service<span>后端服务</span></th>`)
+	buffer.WriteString(`<th>Backend Host<span>后端 Host</span></th>`)
+	buffer.WriteString(`<th>Security<span>安全检查</span></th>`)
+	buffer.WriteString(`<th>Enrichment<span>IP 丰富化</span></th>`)
+	buffer.WriteString(`<th>Probe<span>探测</span></th>`)
+	buffer.WriteString(`<th>Faults<span>故障次数</span></th>`)
+	buffer.WriteString(`<th>Switch OK<span>切换成功</span></th>`)
+	buffer.WriteString(`<th>Switch Fail<span>切换失败</span></th>`)
+	buffer.WriteString(`<th>Redirect Clients<span>去重客户端</span></th>`)
+	buffer.WriteString(`<th>Targets<span>目标数</span></th>`)
+	buffer.WriteString(`<th>Last Reason<span>最近原因</span></th>`)
+	buffer.WriteString(`<th>Notes<span>备注说明</span></th>`)
+	buffer.WriteString(`<th>Redirect URL<span>降级跳转</span></th>`)
+	buffer.WriteString(`</tr></thead><tbody>`)
 	for _, host := range hosts {
 		state := normalizeDisplayedState(snapshot, host, stateByHost[host.Host])
 		mode := strings.TrimSpace(state.Mode)
 		if mode == "" {
 			mode = v4model.ModePassthrough
 		}
-		buffer.WriteString("<tr>")
-		buffer.WriteString("<td>" + html.EscapeString(host.Host) + "</td>")
-		buffer.WriteString("<td>" + html.EscapeString(mode) + "</td>")
-		buffer.WriteString("<td>" + html.EscapeString(host.BackendService) + "</td>")
-		buffer.WriteString("<td>" + html.EscapeString(host.BackendHost) + "</td>")
-		buffer.WriteString("<td>" + html.EscapeString(fmt.Sprintf("%t", host.SecurityChecksEnabled)) + "</td>")
-		buffer.WriteString("<td>" + html.EscapeString(host.IPEnrichmentMode) + "</td>")
-		buffer.WriteString("<td>" + html.EscapeString(fmt.Sprintf("%t", host.Probe.Enabled)) + "</td>")
-		buffer.WriteString("<td>" + html.EscapeString(fmt.Sprintf("%d", state.FaultCount)) + "</td>")
-		buffer.WriteString("<td>" + html.EscapeString(fmt.Sprintf("%d", state.SwitchSuccessCount)) + "</td>")
-		buffer.WriteString("<td>" + html.EscapeString(fmt.Sprintf("%d", state.SwitchFailureCount)) + "</td>")
-		buffer.WriteString("<td>" + html.EscapeString(fmt.Sprintf("%d", state.RedirectUniqueClientCount)) + "</td>")
-		buffer.WriteString("<td>" + html.EscapeString(fmt.Sprintf("%d", len(state.LastProbeTargets))) + "</td>")
-		buffer.WriteString("<td>" + html.EscapeString(trimForSummary(state.LastProbeError, 120)) + "</td>")
-		buffer.WriteString("<td>" + html.EscapeString(state.RedirectURL) + "</td>")
-		buffer.WriteString("</tr>")
+		buffer.WriteString(`<tr>`)
+		buffer.WriteString(`<td class="mono">` + html.EscapeString(host.Host) + `</td>`)
+		buffer.WriteString(`<td class="mono">` + html.EscapeString(mode) + `</td>`)
+		buffer.WriteString(`<td>` + html.EscapeString(host.BackendService) + `</td>`)
+		buffer.WriteString(`<td class="mono">` + html.EscapeString(host.BackendHost) + `</td>`)
+		buffer.WriteString(`<td class="` + boolClass(host.SecurityChecksEnabled) + `">` + html.EscapeString(boolText(host.SecurityChecksEnabled)) + `</td>`)
+		buffer.WriteString(`<td class="mono">` + html.EscapeString(host.IPEnrichmentMode) + `</td>`)
+		buffer.WriteString(`<td class="` + boolClass(host.Probe.Enabled) + `">` + html.EscapeString(boolText(host.Probe.Enabled)) + `</td>`)
+		buffer.WriteString(`<td>` + html.EscapeString(fmt.Sprintf("%d", state.FaultCount)) + `</td>`)
+		buffer.WriteString(`<td>` + html.EscapeString(fmt.Sprintf("%d", state.SwitchSuccessCount)) + `</td>`)
+		buffer.WriteString(`<td>` + html.EscapeString(fmt.Sprintf("%d", state.SwitchFailureCount)) + `</td>`)
+		buffer.WriteString(`<td>` + html.EscapeString(fmt.Sprintf("%d", state.RedirectUniqueClientCount)) + `</td>`)
+		buffer.WriteString(`<td>` + html.EscapeString(fmt.Sprintf("%d", len(state.LastProbeTargets))) + `</td>`)
+		buffer.WriteString(`<td class="reason">` + html.EscapeString(fallbackValue(trimForSummary(state.LastProbeError, 180))) + `</td>`)
+		buffer.WriteString(`<td class="notes">` + buildHostNotesHTML(state) + `</td>`)
+		buffer.WriteString(`<td class="url-list mono">` + html.EscapeString(fallbackValue(state.RedirectURL)) + `</td>`)
+		buffer.WriteString(`</tr>`)
 	}
-	buffer.WriteString("</table>")
+	buffer.WriteString(`</tbody></table></div></section>`)
 
 	if len(recentEvents) > 0 {
-		buffer.WriteString("<h2>Recent Events / 最近事件</h2>")
-		buffer.WriteString("<p>仅展示当前仍相关的近期事件；已被后续成功同步覆盖的旧 snapshot_sync_failed 会自动隐藏。</p>")
-		buffer.WriteString("<table border=\"1\" cellspacing=\"0\" cellpadding=\"6\">")
-		buffer.WriteString("<tr><th>Type<br/>事件类型</th><th>Host<br/>域名</th><th>Level<br/>级别</th><th>Message<br/>消息</th><th>Created At<br/>创建时间</th></tr>")
+		buffer.WriteString(`<details class="events-panel"><summary><span>Recent Events / 最近事件</span><span class="muted">默认折叠，点击展开</span></summary><div class="events-inner">`)
+		buffer.WriteString(`<p class="events-hint">仅展示当前仍相关的近期事件；已被后续成功同步覆盖的旧 snapshot_sync_failed 会自动隐藏。</p>`)
+		buffer.WriteString(`<div class="table-wrap"><table class="mini-table"><thead><tr><th>Type<span>事件类型</span></th><th>Host<span>域名</span></th><th>Level<span>级别</span></th><th>Message<span>消息</span></th><th>Created At<span>创建时间</span></th></tr></thead><tbody>`)
 		for _, event := range recentEvents {
-			buffer.WriteString("<tr>")
-			buffer.WriteString("<td>" + html.EscapeString(event.Type) + "</td>")
-			buffer.WriteString("<td>" + html.EscapeString(event.Host) + "</td>")
-			buffer.WriteString("<td>" + html.EscapeString(event.Level) + "</td>")
-			buffer.WriteString("<td>" + html.EscapeString(event.Message) + "</td>")
-			buffer.WriteString("<td>" + html.EscapeString(event.CreatedAt.Format(time.RFC3339)) + "</td>")
-			buffer.WriteString("</tr>")
+			buffer.WriteString(`<tr>`)
+			buffer.WriteString(`<td class="mono">` + html.EscapeString(event.Type) + `</td>`)
+			buffer.WriteString(`<td class="mono">` + html.EscapeString(fallbackValue(event.Host)) + `</td>`)
+			buffer.WriteString(`<td>` + html.EscapeString(event.Level) + `</td>`)
+			buffer.WriteString(`<td class="reason">` + html.EscapeString(event.Message) + `</td>`)
+			buffer.WriteString(`<td class="mono">` + html.EscapeString(event.CreatedAt.Format(time.RFC3339)) + `</td>`)
+			buffer.WriteString(`</tr>`)
 		}
-		buffer.WriteString("</table>")
+		buffer.WriteString(`</tbody></table></div></div></details>`)
 	}
 
-	buffer.WriteString("</body></html>")
+	buffer.WriteString(`</main></div></div></body></html>`)
 	return buffer.String()
 }
 
@@ -247,12 +299,6 @@ func buildNoSnapshotSummary(syncState v4model.SyncState) string {
 		lines = append(lines, "最近错误 / Last error: "+trimForSummary(view.LastError, 180))
 	}
 	return "<pre>" + html.EscapeString(strings.Join(lines, "\n")) + "</pre>"
-}
-
-type syncView struct {
-	Status        string
-	LastSuccessAt time.Time
-	LastError     string
 }
 
 func buildSyncView(snapshot v4model.Snapshot, syncState v4model.SyncState, events []v4model.Event) syncView {
@@ -353,6 +399,148 @@ func trimForSummary(value string, limit int) string {
 	return value[:limit] + "..."
 }
 
+func metricCard(label, value string) string {
+	return `<div class="metric"><span class="label">` + html.EscapeString(label) + `</span><span class="value">` + html.EscapeString(fallbackValue(value)) + `</span></div>`
+}
+
+func fieldGuideItem(label, description string) string {
+	return `<div class="guide-item"><strong>` + html.EscapeString(label) + `</strong><span>` + html.EscapeString(description) + `</span></div>`
+}
+
+func statusClass(status string) string {
+	switch strings.TrimSpace(strings.ToLower(status)) {
+	case "success":
+		return "status-success"
+	case "degraded", "rebuilding":
+		return "status-degraded"
+	case "failed":
+		return "status-failed"
+	default:
+		return ""
+	}
+}
+
+func formatTimeValue(value time.Time) string {
+	if value.IsZero() {
+		return "-"
+	}
+	return value.Format(time.RFC3339)
+}
+
+func boolText(value bool) string {
+	if value {
+		return "true"
+	}
+	return "false"
+}
+
+func boolClass(value bool) string {
+	if value {
+		return "bool-true"
+	}
+	return "bool-false"
+}
+
+func fallbackValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "-"
+	}
+	return value
+}
+
+func buildHostNotesText(state v4model.HostRuntimeState) string {
+	entries := buildHostNoteEntries(state)
+	if len(entries) == 0 {
+		return "none"
+	}
+	parts := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		parts = append(parts, entry.Label+": "+entry.Value)
+	}
+	return strings.Join(parts, " | ")
+}
+
+func buildHostNotesHTML(state v4model.HostRuntimeState) string {
+	entries := buildHostNoteEntries(state)
+	if len(entries) == 0 {
+		return `<span class="empty-note">无 / None</span>`
+	}
+	var builder strings.Builder
+	for _, entry := range entries {
+		builder.WriteString(`<div class="note-line"><strong>`)
+		builder.WriteString(html.EscapeString(entry.Label))
+		builder.WriteString(`</strong><span>`)
+		builder.WriteString(html.EscapeString(entry.Value))
+		builder.WriteString(`</span></div>`)
+	}
+	return builder.String()
+}
+
+func buildHostNoteEntries(state v4model.HostRuntimeState) []hostNoteEntry {
+	entries := make([]hostNoteEntry, 0, 4)
+	faultReason := strings.TrimSpace(state.LastFaultReason)
+	if faultReason == "" {
+		faultReason = strings.TrimSpace(state.LastProbeError)
+	}
+	if state.FaultCount > 0 && faultReason != "" {
+		entries = append(entries, hostNoteEntry{
+			Label: "故障原因 / Fault",
+			Value: trimForSummary(faultReason, 180),
+		})
+	}
+	switchFailureReason := strings.TrimSpace(state.LastSwitchFailureReason)
+	if state.SwitchFailureCount > 0 {
+		if switchFailureReason == "" {
+			switchFailureReason = strings.TrimSpace(state.LastProbeError)
+		}
+		if switchFailureReason == "" {
+			switchFailureReason = "switch failure recorded without explicit detail"
+		}
+		entries = append(entries, hostNoteEntry{
+			Label: "切换失败 / Switch fail",
+			Value: trimForSummary(switchFailureReason, 180),
+		})
+	}
+	if len(state.LastFailedTargets) > 0 {
+		entries = append(entries, hostNoteEntry{
+			Label: "失败目标 / Failed targets",
+			Value: buildTargetSample(state.LastFailedTargets),
+		})
+	}
+	if state.Mode == v4model.ModeDegradedRedirect && strings.TrimSpace(state.RedirectURL) != "" {
+		entries = append(entries, hostNoteEntry{
+			Label: "当前降级 / Active redirect",
+			Value: trimForSummary(state.RedirectURL, 180),
+		})
+	}
+	return entries
+}
+
+func buildTargetSample(values []string) string {
+	if len(values) == 0 {
+		return "0"
+	}
+	parts := make([]string, 0, 2)
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		parts = append(parts, trimForSummary(value, 90))
+		if len(parts) == 2 {
+			break
+		}
+	}
+	if len(parts) == 0 {
+		return fmt.Sprintf("%d", len(values))
+	}
+	if len(values) > len(parts) {
+		return fmt.Sprintf("%d total: %s ...", len(values), strings.Join(parts, " | "))
+	}
+	return strings.Join(parts, " | ")
+}
+
 func normalizeDisplayedState(snapshot v4model.Snapshot, host v4model.SnapshotHost, state v4model.HostRuntimeState) v4model.HostRuntimeState {
 	if strings.TrimSpace(state.Host) == "" {
 		state.Host = host.Host
@@ -393,6 +581,8 @@ func normalizeDisplayedState(snapshot v4model.Snapshot, host v4model.SnapshotHos
 		state.LastProbeTargets = nil
 		state.LastFailedTargets = nil
 		state.LastProbeError = ""
+		state.LastFaultReason = ""
+		state.LastSwitchFailureReason = ""
 		return state
 	}
 

@@ -369,8 +369,9 @@ func (s *Service) ApplyProbeUpdate(ctx context.Context, update ProbeUpdate) (v4m
 	state = normalizeStateForHost(v4model.SnapshotHost{Host: update.Host, Probe: update.Spec}, state, snapshotVersion, snapshotFingerprint)
 
 	now := update.ProbeAt.UTC()
+	probeError := strings.TrimSpace(update.Error)
 	state.LastProbeAt = now
-	state.LastProbeError = strings.TrimSpace(update.Error)
+	state.LastProbeError = probeError
 	state.SourceURL = strings.TrimSpace(update.SourceURL)
 	state.RedirectCandidates = append([]string(nil), update.RedirectCandidates...)
 	state.LastProbeTargets = append([]string(nil), update.ProbeTargets...)
@@ -407,14 +408,18 @@ func (s *Service) ApplyProbeUpdate(ctx context.Context, update ProbeUpdate) (v4m
 			threshold = 1
 		}
 		thresholdReached := state.UnhealthyCount >= threshold
+		switchAllowedNow := switchAllowed(state.LastSwitchAt, now, update.Spec.MinSwitchInterval)
 		if update.RedirectURL != "" {
 			state.RedirectURL = update.RedirectURL
+		}
+		if thresholdReached {
+			state.LastFaultReason = buildFaultReason(update, probeError)
 		}
 		if thresholdReached && !state.FaultActive {
 			state.FaultActive = true
 			state.FaultCount++
 		}
-		if thresholdReached && update.RedirectURL != "" && switchAllowed(state.LastSwitchAt, now, update.Spec.MinSwitchInterval) {
+		if thresholdReached && update.RedirectURL != "" && switchAllowedNow {
 			if state.Mode != v4model.ModeDegradedRedirect {
 				state.SwitchSuccessCount++
 			}
@@ -425,6 +430,7 @@ func (s *Service) ApplyProbeUpdate(ctx context.Context, update ProbeUpdate) (v4m
 			}
 		} else if thresholdReached && state.Mode != v4model.ModeDegradedRedirect && !wasFaultActive {
 			state.SwitchFailureCount++
+			state.LastSwitchFailureReason = buildSwitchFailureReason(update, probeError, switchAllowedNow)
 		}
 	}
 	if state.Mode == v4model.ModePassthrough && strings.TrimSpace(state.RedirectURL) != "" {
@@ -579,6 +585,8 @@ func normalizeStateForHost(host v4model.SnapshotHost, state v4model.HostRuntimeS
 		state.LastProbeTargets = nil
 		state.LastFailedTargets = nil
 		state.LastProbeError = ""
+		state.LastFaultReason = ""
+		state.LastSwitchFailureReason = ""
 		return state
 	}
 
@@ -629,6 +637,35 @@ func dedupeStrings(values []string) []string {
 	}
 	sort.Strings(result)
 	return result
+}
+
+func buildFaultReason(update ProbeUpdate, probeError string) string {
+	if value := strings.TrimSpace(probeError); value != "" {
+		return value
+	}
+	if value := strings.TrimSpace(update.SwitchFailureReason); value != "" {
+		return value
+	}
+	if len(update.FailedTargets) > 0 {
+		return "probe target check failed"
+	}
+	return "probe marked host unhealthy"
+}
+
+func buildSwitchFailureReason(update ProbeUpdate, probeError string, switchAllowedNow bool) string {
+	if value := strings.TrimSpace(update.SwitchFailureReason); value != "" {
+		return value
+	}
+	if !switchAllowedNow {
+		return "switch blocked by min_switch_interval"
+	}
+	if strings.TrimSpace(update.RedirectURL) == "" {
+		return "no healthy redirect target available"
+	}
+	if value := strings.TrimSpace(probeError); value != "" {
+		return value
+	}
+	return "switch conditions met but redirect activation failed"
 }
 
 func staleStateForSnapshot(state v4model.HostRuntimeState, snapshotVersion, snapshotFingerprint string) bool {
