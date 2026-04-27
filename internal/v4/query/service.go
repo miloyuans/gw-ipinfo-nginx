@@ -170,26 +170,26 @@ func buildHTMLDocument(snapshot v4model.Snapshot, syncStateView syncView, hosts 
 	buffer.WriteString(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>V4 Routes</title><style>
 :root{color-scheme:dark;--bg:#06111f;--bg2:#091a2b;--panel:rgba(9,26,43,.82);--line:rgba(121,190,255,.18);--text:#e8f1ff;--muted:#8aa6c8;--accent:#6ed6ff;--ok:#78ffcf;--warn:#ffc36e;--danger:#ff8c8c;--shadow:0 18px 60px rgba(0,0,0,.32);}
 *{box-sizing:border-box}html,body{margin:0;padding:0;background:radial-gradient(circle at top left,rgba(27,89,153,.26),transparent 28%),radial-gradient(circle at top right,rgba(17,187,153,.16),transparent 24%),linear-gradient(180deg,var(--bg),var(--bg2));color:var(--text);font:14px/1.55 "Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
-body{min-height:100vh}.page{max-width:1880px;margin:0 auto;padding:22px 18px 30px}
+body{min-height:100vh}.page{max-width:2048px;margin:0 auto;padding:16px 12px 24px}
 .hero,.panel,.events-panel{background:var(--panel);border:1px solid var(--line);border-radius:18px;box-shadow:var(--shadow);backdrop-filter:blur(14px)}
-.hero{padding:20px 22px;margin-bottom:18px;position:relative;overflow:hidden}.hero:before{content:"";position:absolute;inset:-20% auto auto 68%;width:220px;height:220px;background:radial-gradient(circle,rgba(110,214,255,.18),transparent 72%);pointer-events:none}
-.hero h1{margin:0 0 8px;font-size:34px;letter-spacing:.02em}.hero p{margin:0;color:var(--muted)}
-.hero-meta{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px}.badge{display:inline-flex;align-items:center;gap:8px;padding:8px 12px;border-radius:999px;background:rgba(10,28,48,.72);border:1px solid var(--line);color:var(--text);font-weight:600}
+.hero{padding:16px 18px;margin-bottom:14px;position:relative;overflow:hidden}.hero:before{content:"";position:absolute;inset:-20% auto auto 70%;width:180px;height:180px;background:radial-gradient(circle,rgba(110,214,255,.18),transparent 72%);pointer-events:none}
+.hero h1{margin:0 0 6px;font-size:28px;letter-spacing:.02em}.hero p{margin:0;color:var(--muted);font-size:12px}
+.hero-meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}.badge{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border-radius:999px;background:rgba(10,28,48,.72);border:1px solid var(--line);color:var(--text);font-weight:600;font-size:12px}
 .badge.status-success{border-color:rgba(120,255,207,.35);color:var(--ok)}.badge.status-degraded{border-color:rgba(255,195,110,.35);color:var(--warn)}.badge.status-failed{border-color:rgba(255,140,140,.35);color:var(--danger)}
-.layout{display:grid;grid-template-columns:320px minmax(0,1fr);gap:18px;align-items:start}.sticky-stack{position:sticky;top:16px;display:grid;gap:18px}
-.panel{padding:16px 16px 14px}.panel h2{margin:0 0 12px}.meta-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
-.metric{padding:12px 12px 10px;border-radius:14px;background:rgba(7,18,31,.56);border:1px solid var(--line)}.metric .label{display:block;color:var(--muted);font-size:12px;margin-bottom:5px}.metric .value{display:block;font-size:14px;font-weight:700;word-break:break-word}
-.guide-list{display:grid;gap:10px}.guide-item{padding:10px 12px;border-radius:14px;background:rgba(7,18,31,.46);border:1px solid rgba(121,190,255,.1)}.guide-item strong{display:block;margin-bottom:4px}.guide-item span{display:block;color:var(--muted);font-size:12px;line-height:1.45}
-.panel-head{display:flex;justify-content:space-between;align-items:flex-end;gap:12px;margin-bottom:12px}.panel-head p,.muted{margin:0;color:var(--muted)}
-.table-wrap{overflow:auto;border-radius:14px;border:1px solid var(--line)}table{width:100%;border-collapse:collapse;min-width:1660px;background:rgba(5,14,25,.62)}
-th,td{padding:10px 12px;border-bottom:1px solid rgba(121,190,255,.08);vertical-align:top;text-align:left}th{position:sticky;top:0;background:rgba(8,19,33,.96);backdrop-filter:blur(12px);z-index:2;font-size:12px;text-transform:uppercase;letter-spacing:.04em}
-th span{display:block;margin-top:4px;font-size:11px;text-transform:none;letter-spacing:0;color:var(--muted)}tbody tr:nth-child(odd){background:rgba(255,255,255,.015)}tbody tr:hover{background:rgba(110,214,255,.06)}
+.layout{display:grid;grid-template-columns:270px minmax(0,1fr);gap:14px;align-items:start}.sticky-stack{position:sticky;top:12px;display:grid;gap:12px}
+.panel{padding:12px 12px 10px}.panel h2{margin:0 0 10px;font-size:17px}.meta-grid{display:grid;grid-template-columns:1fr;gap:8px}
+.metric{padding:9px 10px 8px;border-radius:12px;background:rgba(7,18,31,.56);border:1px solid var(--line)}.metric .label{display:block;color:var(--muted);font-size:11px;margin-bottom:4px}.metric .value{display:block;font-size:12px;font-weight:700;word-break:break-word}
+.guide-list{display:grid;gap:8px}.guide-item{padding:8px 10px;border-radius:12px;background:rgba(7,18,31,.46);border:1px solid rgba(121,190,255,.1)}.guide-item strong{display:block;margin-bottom:3px;font-size:12px}.guide-item span{display:block;color:var(--muted);font-size:11px;line-height:1.4}
+.panel-head{display:flex;justify-content:space-between;align-items:flex-end;gap:10px;margin-bottom:10px}.panel-head p,.muted{margin:0;color:var(--muted);font-size:12px}
+.table-wrap{overflow-x:auto;overflow-y:visible;border-radius:14px;border:1px solid var(--line)}table{width:100%;border-collapse:collapse;table-layout:fixed;min-width:1380px;background:rgba(5,14,25,.62)}
+th,td{padding:7px 8px;border-bottom:1px solid rgba(121,190,255,.08);vertical-align:top;text-align:left;font-size:11px;line-height:1.35}th{position:sticky;top:12px;background:rgba(8,19,33,.96);backdrop-filter:blur(12px);z-index:3;font-size:10px;text-transform:uppercase;letter-spacing:.03em}
+th span{display:block;margin-top:3px;font-size:10px;text-transform:none;letter-spacing:0;color:var(--muted)}tbody tr:nth-child(odd){background:rgba(255,255,255,.015)}tbody tr:hover{background:rgba(110,214,255,.06)}
 .mono{font-family:Consolas,"SFMono-Regular",Menlo,monospace}.bool-true{color:var(--ok);font-weight:700}.bool-false{color:var(--muted)}
-.reason,.notes,.url-list{word-break:break-word}.notes{display:grid;gap:6px;min-width:260px}.note-line{padding:6px 8px;border-radius:10px;background:rgba(6,17,31,.58);border:1px solid rgba(121,190,255,.08)}
-.note-line strong{display:block;font-size:11px;color:var(--accent);margin-bottom:3px;text-transform:uppercase;letter-spacing:.04em}.note-line span{display:block;color:var(--text);font-size:12px;line-height:1.45}.empty-note{color:var(--muted);font-style:italic}
+.reason,.notes,.url-list{word-break:break-word}.notes{display:grid;gap:4px;min-width:190px}.note-line{padding:5px 6px;border-radius:8px;background:rgba(6,17,31,.58);border:1px solid rgba(121,190,255,.08)}
+.note-line strong{display:block;font-size:10px;color:var(--accent);margin-bottom:2px;text-transform:uppercase;letter-spacing:.03em}.note-line span{display:block;color:var(--text);font-size:11px;line-height:1.35}.empty-note{color:var(--muted);font-style:italic}
 .events-panel{margin-top:18px;overflow:hidden}.events-panel summary{list-style:none;cursor:pointer;padding:16px 18px;font-weight:700;display:flex;justify-content:space-between;align-items:center;gap:12px}.events-panel summary::-webkit-details-marker{display:none}.events-panel[open] summary{border-bottom:1px solid var(--line)}
 .events-inner{padding:0 18px 18px}.events-hint{margin:12px 0;color:var(--muted)}.mini-table{min-width:980px}
-@media (max-width:1180px){.layout{grid-template-columns:1fr}.sticky-stack{position:static}.meta-grid{grid-template-columns:1fr 1fr}}@media (max-width:720px){.page{padding:16px 12px 24px}.hero h1{font-size:28px}.meta-grid{grid-template-columns:1fr}}
+@media (max-width:1380px){.layout{grid-template-columns:250px minmax(0,1fr)}table{min-width:1260px}}@media (max-width:1180px){.layout{grid-template-columns:1fr}.sticky-stack{position:static}}@media (max-width:720px){.page{padding:12px 10px 20px}.hero h1{font-size:24px}}
 </style></head><body><div class="page">`)
 
 	buffer.WriteString(`<section class="hero"><h1>V4 Routes</h1><p>共享读模型展示页。当前页面只展示数据库中的统一持久化状态，便于多副本一致性排查和故障切换定位。</p><div class="hero-meta">`)
@@ -494,8 +494,14 @@ func buildHostNoteEntries(state v4model.HostRuntimeState) []hostNoteEntry {
 		if switchFailureReason == "" {
 			switchFailureReason = strings.TrimSpace(state.LastProbeError)
 		}
+		if switchFailureReason == "" && len(state.LastFailedTargets) > 0 {
+			switchFailureReason = "recent probe failures exist; see failed targets"
+		}
+		if switchFailureReason == "" && len(state.LastProbeTargets) == 0 {
+			switchFailureReason = "no probe targets discovered"
+		}
 		if switchFailureReason == "" {
-			switchFailureReason = "switch failure recorded without explicit detail"
+			switchFailureReason = "historical state is missing switch-failure detail; wait for the next probe cycle"
 		}
 		entries = append(entries, hostNoteEntry{
 			Label: "切换失败 / Switch fail",

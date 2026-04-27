@@ -394,6 +394,7 @@ func (s *Service) ApplyProbeUpdate(ctx context.Context, update ProbeUpdate) (v4m
 			if state.HealthyCount >= update.Spec.HealthyThreshold && switchAllowed(state.LastSwitchAt, now, update.Spec.MinSwitchInterval) {
 				state.Mode = v4model.ModePassthrough
 				state.RedirectURL = ""
+				state.LastSwitchFailureReason = ""
 				state.LastSwitchAt = now
 				modeChanged = true
 				recovered = true
@@ -425,6 +426,7 @@ func (s *Service) ApplyProbeUpdate(ctx context.Context, update ProbeUpdate) (v4m
 			}
 			if state.Mode != v4model.ModeDegradedRedirect || state.RedirectURL != update.RedirectURL {
 				state.Mode = v4model.ModeDegradedRedirect
+				state.LastSwitchFailureReason = ""
 				state.LastSwitchAt = now
 				modeChanged = true
 			}
