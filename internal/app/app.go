@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -375,13 +376,19 @@ func (a *Application) run(ctx context.Context, listener net.Listener) error {
 		a.routeRuntime.Run(ctx)
 	}
 	if a.v4Runtime != nil {
-		go a.v4Runtime.Run(ctx)
+		a.goSafe("v4_runtime", func() {
+			a.v4Runtime.Run(ctx)
+		})
 	}
 	if a.v4Snapshot != nil {
-		go a.v4Snapshot.Run(ctx)
+		a.goSafe("v4_snapshot", func() {
+			a.v4Snapshot.Run(ctx)
+		})
 	}
 	if a.v4Probe != nil {
-		go a.v4Probe.Run(ctx)
+		a.goSafe("v4_probe", func() {
+			a.v4Probe.Run(ctx)
+		})
 	}
 	if a.reportingService != nil {
 		a.reportingService.Run(ctx, a.cfg.Storage.ReplayWorkers)
@@ -441,6 +448,22 @@ func (a *Application) run(ctx context.Context, listener net.Listener) error {
 		return fmt.Errorf("close local store: %w", err)
 	}
 	return nil
+}
+
+func (a *Application) goSafe(name string, fn func()) {
+	go func() {
+		defer func() {
+			if recovered := recover(); recovered != nil && a.logger != nil {
+				a.logger.Error("background_worker_panic",
+					"event", "background_worker_panic",
+					"worker", strings.TrimSpace(name),
+					"error", fmt.Sprintf("%v", recovered),
+					"stack", string(debug.Stack()),
+				)
+			}
+		}()
+		fn()
+	}()
 }
 
 type GatewayHandler struct {

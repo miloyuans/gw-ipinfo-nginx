@@ -34,21 +34,21 @@ func newSyncLeaseStore(controller *storage.Controller, filePath, leaseName strin
 
 func (s *syncLeaseStore) TryAcquire(ctx context.Context, ownerID string, now time.Time, ttl time.Duration) (v4model.SyncState, bool, error) {
 	if client := s.mongoClient(); client != nil {
-		return s.tryAcquireMongo(ctx, ownerID, now, ttl)
+		return s.tryAcquireMongo(ctx, client, ownerID, now, ttl)
 	}
 	return s.tryAcquireFile(ownerID, now, ttl)
 }
 
 func (s *syncLeaseStore) Refresh(ctx context.Context, ownerID string, now time.Time, ttl time.Duration) (bool, error) {
 	if client := s.mongoClient(); client != nil {
-		return s.refreshMongo(ctx, ownerID, now, ttl)
+		return s.refreshMongo(ctx, client, ownerID, now, ttl)
 	}
 	return s.refreshFile(ownerID, now, ttl)
 }
 
 func (s *syncLeaseStore) Release(ctx context.Context, ownerID string) error {
 	if client := s.mongoClient(); client != nil {
-		return s.releaseMongo(ctx, ownerID)
+		return s.releaseMongo(ctx, client, ownerID)
 	}
 	return s.releaseFile(ownerID)
 }
@@ -60,8 +60,10 @@ func (s *syncLeaseStore) mongoClient() *mongostore.Client {
 	return s.controller.Client()
 }
 
-func (s *syncLeaseStore) tryAcquireMongo(ctx context.Context, ownerID string, now time.Time, ttl time.Duration) (v4model.SyncState, bool, error) {
-	client := s.mongoClient()
+func (s *syncLeaseStore) tryAcquireMongo(ctx context.Context, client *mongostore.Client, ownerID string, now time.Time, ttl time.Duration) (v4model.SyncState, bool, error) {
+	if client == nil {
+		return v4model.SyncState{}, false, errors.New("nil mongo client for v4 snapshot lease")
+	}
 	collection := client.Database().Collection(v4model.CollectionSnapshots)
 	child, cancel := client.WithTimeout(ctx)
 	defer cancel()
@@ -97,7 +99,7 @@ func (s *syncLeaseStore) tryAcquireMongo(ctx context.Context, ownerID string, no
 	if err := result.Decode(&state); err == nil {
 		return state, true, nil
 	} else if mongo.IsDuplicateKeyError(err) {
-		current, readErr := s.readMongo(ctx)
+		current, readErr := s.readMongo(ctx, client)
 		if readErr != nil {
 			if s.controller != nil {
 				s.controller.HandleMongoError(readErr)
@@ -112,7 +114,7 @@ func (s *syncLeaseStore) tryAcquireMongo(ctx context.Context, ownerID string, no
 		return v4model.SyncState{}, false, err
 	}
 
-	current, err := s.readMongo(ctx)
+	current, err := s.readMongo(ctx, client)
 	if err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			return v4model.SyncState{}, false, nil
@@ -125,8 +127,10 @@ func (s *syncLeaseStore) tryAcquireMongo(ctx context.Context, ownerID string, no
 	return current, current.LeaseOwner == ownerID, nil
 }
 
-func (s *syncLeaseStore) refreshMongo(ctx context.Context, ownerID string, now time.Time, ttl time.Duration) (bool, error) {
-	client := s.mongoClient()
+func (s *syncLeaseStore) refreshMongo(ctx context.Context, client *mongostore.Client, ownerID string, now time.Time, ttl time.Duration) (bool, error) {
+	if client == nil {
+		return false, errors.New("nil mongo client for v4 snapshot lease")
+	}
 	collection := client.Database().Collection(v4model.CollectionSnapshots)
 	child, cancel := client.WithTimeout(ctx)
 	defer cancel()
@@ -150,8 +154,10 @@ func (s *syncLeaseStore) refreshMongo(ctx context.Context, ownerID string, now t
 	return result.MatchedCount > 0, nil
 }
 
-func (s *syncLeaseStore) releaseMongo(ctx context.Context, ownerID string) error {
-	client := s.mongoClient()
+func (s *syncLeaseStore) releaseMongo(ctx context.Context, client *mongostore.Client, ownerID string) error {
+	if client == nil {
+		return nil
+	}
 	collection := client.Database().Collection(v4model.CollectionSnapshots)
 	child, cancel := client.WithTimeout(ctx)
 	defer cancel()
@@ -171,8 +177,10 @@ func (s *syncLeaseStore) releaseMongo(ctx context.Context, ownerID string) error
 	return err
 }
 
-func (s *syncLeaseStore) readMongo(ctx context.Context) (v4model.SyncState, error) {
-	client := s.mongoClient()
+func (s *syncLeaseStore) readMongo(ctx context.Context, client *mongostore.Client) (v4model.SyncState, error) {
+	if client == nil {
+		return v4model.SyncState{}, errors.New("nil mongo client for v4 snapshot lease")
+	}
 	child, cancel := client.WithTimeout(ctx)
 	defer cancel()
 
