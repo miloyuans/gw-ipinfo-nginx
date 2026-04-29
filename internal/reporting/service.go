@@ -749,6 +749,9 @@ func (s *Service) deliverReportCandidate(ctx context.Context, now time.Time, can
 				}
 			} else {
 				state.FileHTMLWritten = true
+				if saveErr := s.saveReportState(ctx, state); saveErr != nil {
+					return saveErr
+				}
 				if s.logger != nil {
 					s.logger.Info("daily_report_written", "event", "daily_report_written", "day_key", candidate.DayKey, "format", "html", "path", path)
 				}
@@ -763,6 +766,9 @@ func (s *Service) deliverReportCandidate(ctx context.Context, now time.Time, can
 				}
 			} else {
 				state.FileCSVWritten = true
+				if saveErr := s.saveReportState(ctx, state); saveErr != nil {
+					return saveErr
+				}
 				if s.logger != nil {
 					s.logger.Info("daily_report_written", "event", "daily_report_written", "day_key", candidate.DayKey, "format", "csv", "path", path)
 				}
@@ -779,16 +785,22 @@ func (s *Service) deliverReportCandidate(ctx context.Context, now time.Time, can
 				}
 			} else {
 				state.TelegramHTMLSent = true
+				if saveErr := s.saveReportState(ctx, state); saveErr != nil {
+					return saveErr
+				}
 			}
 		}
 		if s.cfg.Reports.IncludeCSV && !state.TelegramCSVSent {
-			if sendErr := s.sendReportDocument(ctx, candidate.DayLabel, "csv", "text/csv", csvReport, caption); sendErr != nil {
+			if sendErr := s.sendReportDocument(ctx, candidate.DayLabel, "csv", "text/csv; charset=utf-8", csvReport, caption); sendErr != nil {
 				errorsList = append(errorsList, sendErr.Error())
 				if s.logger != nil {
 					s.logger.Warn("daily_report_send_error", "event", "daily_report_send_error", "day_key", candidate.DayKey, "format", "csv", "error", sendErr)
 				}
 			} else {
 				state.TelegramCSVSent = true
+				if saveErr := s.saveReportState(ctx, state); saveErr != nil {
+					return saveErr
+				}
 			}
 		}
 	}
@@ -906,11 +918,53 @@ func (s *Service) saveReportState(ctx context.Context, state reportDeliveryState
 	child, cancel := client.WithTimeout(ctx)
 	defer cancel()
 
-	_, err := client.Database().Collection(s.collectionName).ReplaceOne(
+	update := bson.M{
+		"$setOnInsert": bson.M{
+			"_id":  state.ID,
+			"kind": state.Kind,
+			"day":  state.Day,
+		},
+		"$max": bson.M{
+			"attempt_count":   state.AttemptCount,
+			"last_attempt_at": state.LastAttemptAt,
+			"updated_at":      state.UpdatedAt,
+		},
+	}
+
+	setFields := bson.M{}
+	if state.TelegramHTMLSent {
+		setFields["telegram_html_sent"] = true
+	}
+	if state.TelegramCSVSent {
+		setFields["telegram_csv_sent"] = true
+	}
+	if state.FileHTMLWritten {
+		setFields["file_html_written"] = true
+	}
+	if state.FileCSVWritten {
+		setFields["file_csv_written"] = true
+	}
+	if state.TelegramSuccess {
+		setFields["telegram_success"] = true
+	}
+	if state.FileSuccess {
+		setFields["file_success"] = true
+	}
+	if state.OverallSuccess {
+		setFields["overall_success"] = true
+		setFields["last_error"] = ""
+	} else if strings.TrimSpace(state.LastError) != "" {
+		setFields["last_error"] = state.LastError
+	}
+	if len(setFields) > 0 {
+		update["$set"] = setFields
+	}
+
+	_, err := client.Database().Collection(s.collectionName).UpdateOne(
 		child,
 		bson.M{"_id": state.ID},
-		state,
-		options.Replace().SetUpsert(true),
+		update,
+		options.Update().SetUpsert(true),
 	)
 	if err != nil {
 		s.controller.HandleMongoError(err)
@@ -2485,9 +2539,17 @@ func (s *Service) writeReportFile(dayLabel, format string, data []byte) (string,
 }
 
 func (s *Service) sendReportDocument(ctx context.Context, dayLabel, format, contentType string, data []byte, caption string) error {
-	sendCtx, cancel := context.WithTimeout(ctx, s.cfg.Alerts.Telegram.Timeout)
+	sendCtx, cancel := context.WithTimeout(ctx, s.reportDocumentTimeout())
 	defer cancel()
 	return s.sender.SendDocument(sendCtx, s.buildReportFileName(dayLabel, format), contentType, data, caption)
+}
+
+func (s *Service) reportDocumentTimeout() time.Duration {
+	timeout := s.cfg.Alerts.Telegram.Timeout
+	if timeout < 30*time.Second {
+		timeout = 30 * time.Second
+	}
+	return timeout
 }
 
 func (s *Service) buildReportFileName(dayLabel, format string) string {
