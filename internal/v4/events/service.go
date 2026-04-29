@@ -31,20 +31,43 @@ func (s *Service) Emit(ctx context.Context, event v4model.Event) error {
 	if event.SilentUntil.IsZero() && s.cfg.SilentWindow > 0 {
 		event.SilentUntil = time.Now().UTC().Add(s.cfg.SilentWindow)
 	}
-	inserted, err := s.repo.Emit(ctx, event, s.cfg.DedupeWindow)
+	storedEvent, err := s.repo.Emit(ctx, event)
 	if err != nil {
 		return err
 	}
-	if !inserted || !s.cfg.Enabled || s.sender == nil || !shouldNotify(event.Type) {
+	if !s.cfg.Enabled || s.sender == nil || !shouldNotify(storedEvent.Type) {
 		return nil
 	}
-	go func() {
-		sendCtx, cancel := context.WithTimeout(context.Background(), s.senderTimeout())
-		defer cancel()
-		if err := s.sender.SendText(sendCtx, formatEventMessage(event)); err != nil && s.logger != nil {
-			s.logger.Warn("v4_event_notify_error", "event", "v4_event_notify_error", "type", event.Type, "host", event.Host, "error", err)
+	allowed, reason, err := s.repo.ShouldNotify(ctx, storedEvent, s.cfg.DedupeWindow)
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Warn("v4_event_notify_state_error", "event", "v4_event_notify_state_error", "type", storedEvent.Type, "host", storedEvent.Host, "error", err)
 		}
-	}()
+		return nil
+	}
+	if !allowed {
+		if err := s.repo.MarkNotificationSuppressed(ctx, storedEvent, reason); err != nil && s.logger != nil {
+			s.logger.Warn("v4_event_notify_mark_suppressed_error", "event", "v4_event_notify_mark_suppressed_error", "type", storedEvent.Type, "host", storedEvent.Host, "error", err)
+		}
+		return nil
+	}
+	go func(event v4model.Event) {
+		sendCtx, cancel := context.WithTimeout(context.Background(), s.senderTimeout())
+		sendErr := s.sender.SendText(sendCtx, formatEventMessage(event))
+		cancel()
+		if sendErr != nil {
+			if markErr := s.markNotificationFailed(event, sendErr); markErr != nil && s.logger != nil {
+				s.logger.Warn("v4_event_notify_mark_failed_error", "event", "v4_event_notify_mark_failed_error", "type", event.Type, "host", event.Host, "error", markErr)
+			}
+			if s.logger != nil {
+				s.logger.Warn("v4_event_notify_error", "event", "v4_event_notify_error", "type", event.Type, "host", event.Host, "error", sendErr)
+			}
+			return
+		}
+		if err := s.markNotificationSent(event); err != nil && s.logger != nil {
+			s.logger.Warn("v4_event_notify_mark_sent_error", "event", "v4_event_notify_mark_sent_error", "type", event.Type, "host", event.Host, "error", err)
+		}
+	}(storedEvent)
 	return nil
 }
 
@@ -57,6 +80,18 @@ func (s *Service) ListRecent(ctx context.Context, limit int) ([]v4model.Event, e
 
 func (s *Service) senderTimeout() time.Duration {
 	return 5 * time.Second
+}
+
+func (s *Service) markNotificationSent(event v4model.Event) error {
+	ctx, cancel := context.WithTimeout(context.Background(), s.senderTimeout())
+	defer cancel()
+	return s.repo.MarkNotificationSent(ctx, event)
+}
+
+func (s *Service) markNotificationFailed(event v4model.Event, notifyErr error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), s.senderTimeout())
+	defer cancel()
+	return s.repo.MarkNotificationFailed(ctx, event, notifyErr)
 }
 
 func shouldNotify(eventType string) bool {

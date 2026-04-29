@@ -25,6 +25,12 @@ const (
 	EventTrafficRestoredPassthrough  = "traffic_restored_to_passthrough"
 )
 
+const (
+	EventNotifySent       = "sent"
+	EventNotifyFailed     = "failed"
+	EventNotifySuppressed = "suppressed"
+)
+
 type Snapshot struct {
 	ID          string    `json:"id" bson:"_id"`
 	Version     string    `json:"version" bson:"version"`
@@ -118,16 +124,22 @@ type HostRuntimeState struct {
 }
 
 type Event struct {
-	ID          string         `json:"id" bson:"_id"`
-	Type        string         `json:"type" bson:"type"`
-	Host        string         `json:"host" bson:"host"`
-	Fingerprint string         `json:"fingerprint" bson:"fingerprint"`
-	Level       string         `json:"level" bson:"level"`
-	Title       string         `json:"title" bson:"title"`
-	Message     string         `json:"message" bson:"message"`
-	SilentUntil time.Time      `json:"silent_until" bson:"silent_until"`
-	Recovered   bool           `json:"recovered" bson:"recovered"`
-	Metadata    map[string]any `json:"metadata" bson:"metadata"`
-	CreatedAt   time.Time      `json:"created_at" bson:"created_at"`
-	UpdatedAt   time.Time      `json:"updated_at" bson:"updated_at"`
+	ID                string         `json:"id" bson:"_id"`
+	Type              string         `json:"type" bson:"type"`
+	Host              string         `json:"host" bson:"host"`
+	Fingerprint       string         `json:"fingerprint" bson:"fingerprint"`
+	Level             string         `json:"level" bson:"level"`
+	Title             string         `json:"title" bson:"title"`
+	Message           string         `json:"message" bson:"message"`
+	SilentUntil       time.Time      `json:"silent_until" bson:"silent_until"`
+	Recovered         bool           `json:"recovered" bson:"recovered"`
+	Metadata          map[string]any `json:"metadata" bson:"metadata"`
+	NotifyStatus      string         `json:"notify_status" bson:"notify_status"`
+	NotifyReason      string         `json:"notify_reason" bson:"notify_reason"`
+	NotifyAttempts    int            `json:"notify_attempts" bson:"notify_attempts"`
+	NotifySentAt      time.Time      `json:"notify_sent_at" bson:"notify_sent_at"`
+	NotifySilentUntil time.Time `json:"notify_silent_until" bson:"notify_silent_until"`
+	NotifyUpdatedAt   time.Time `json:"notify_updated_at" bson:"notify_updated_at"`
+	CreatedAt         time.Time `json:"created_at" bson:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at" bson:"updated_at"`
 }

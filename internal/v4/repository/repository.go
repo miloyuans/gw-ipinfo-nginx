@@ -260,27 +260,20 @@ func (r *RuntimeStateRepository) Replay(ctx context.Context, client *mongostore.
 	return replayed, nil
 }
 
-func (r *EventRepository) Emit(ctx context.Context, event v4model.Event, dedupeWindow time.Duration) (bool, error) {
-	now := time.Now().UTC()
-	if event.ID == "" {
-		event.ID = fmt.Sprintf("%s:%d", event.Fingerprint, now.UnixNano())
-	}
-	event.CreatedAt = now
-	event.UpdatedAt = now
-	if event.SilentUntil.IsZero() {
-		event.SilentUntil = now
+func (r *EventRepository) Emit(ctx context.Context, event v4model.Event) (v4model.Event, error) {
+	event = stampEvent(event)
+	if err := r.persistLocalEvent(ctx, event, true); err != nil {
+		return v4model.Event{}, err
 	}
 	if client := r.controller.Client(); client != nil && r.controller.Mode() != storage.ModeLocal {
-		inserted, err := r.emitMongo(ctx, client, event, dedupeWindow)
-		if err == nil {
-			if inserted {
-				_ = r.persistLocalMirror(ctx, event)
-			}
-			return inserted, nil
+		if err := r.upsertMongoEvent(ctx, client, event); err == nil {
+			_ = r.controller.Local().ClearDirty(ctx, localdisk.BucketV4EventsDirty, event.ID)
+			return event, nil
+		} else {
+			r.controller.HandleMongoError(err)
 		}
-		r.controller.HandleMongoError(err)
 	}
-	return r.emitLocal(ctx, event, dedupeWindow)
+	return event, nil
 }
 
 func (r *EventRepository) ListRecent(ctx context.Context, limit int) ([]v4model.Event, error) {
@@ -310,7 +303,7 @@ func (r *EventRepository) Replay(ctx context.Context, client *mongostore.Client,
 			}
 			return replayed, err
 		}
-		if _, err := r.emitMongo(ctx, client, event, 0); err != nil {
+		if err := r.upsertMongoEvent(ctx, client, event); err != nil {
 			return replayed, err
 		}
 		_ = r.controller.Local().ClearDirty(ctx, localdisk.BucketV4EventsDirty, key)
@@ -596,72 +589,214 @@ func (r *RuntimeStateRepository) upsertMongo(ctx context.Context, client *mongos
 	return err
 }
 
-func (r *EventRepository) emitLocal(ctx context.Context, event v4model.Event, dedupeWindow time.Duration) (bool, error) {
+func (r *EventRepository) ShouldNotify(ctx context.Context, event v4model.Event, dedupeWindow time.Duration) (bool, string, error) {
+	if strings.TrimSpace(event.Fingerprint) == "" {
+		return false, "empty_fingerprint", nil
+	}
 	now := time.Now().UTC()
-	metaKey := "v4_event:" + event.Fingerprint
-	var marker eventMarker
-	if err := r.controller.Local().GetJSON(ctx, localdisk.BucketMetadata, metaKey, &marker); err == nil {
-		if marker.SilentUntil.After(now) {
-			return false, nil
+	if r.mongoAuthoritative() {
+		allowed, reason, err := r.shouldNotifyMongo(ctx, r.controller.Client(), event.Fingerprint, dedupeWindow, now)
+		if err == nil {
+			if !allowed {
+				return false, reason, nil
+			}
+			localAllowed, localReason, localErr := r.shouldNotifyLocal(ctx, event.Fingerprint, dedupeWindow, now)
+			if localErr == nil && !localAllowed {
+				return false, localReason, nil
+			}
+			return true, "", nil
 		}
-		if dedupeWindow > 0 && marker.UpdatedAt.After(now.Add(-dedupeWindow)) {
-			return false, nil
-		}
-	} else if !errors.Is(err, localdisk.ErrNotFound) {
-		return false, err
+		r.controller.HandleMongoError(err)
 	}
-	if err := r.controller.Local().PutJSONDirty(ctx, localdisk.BucketV4Events, localdisk.BucketV4EventsDirty, event.ID, event); err != nil {
-		return false, err
-	}
-	if err := r.controller.Local().PutJSON(ctx, localdisk.BucketMetadata, metaKey, eventMarker{
-		UpdatedAt:   now,
-		LastEventID: event.ID,
-		SilentUntil: event.SilentUntil,
-	}); err != nil {
-		return false, err
-	}
-	return true, nil
+	return r.shouldNotifyLocal(ctx, event.Fingerprint, dedupeWindow, now)
 }
 
-func (r *EventRepository) emitMongo(ctx context.Context, client *mongostore.Client, event v4model.Event, dedupeWindow time.Duration) (bool, error) {
+func (r *EventRepository) MarkNotificationSent(ctx context.Context, event v4model.Event) error {
+	return r.updateNotification(ctx, event, notificationUpdate{
+		status:            v4model.EventNotifySent,
+		incrementAttempts: true,
+		sent:              true,
+	})
+}
+
+func (r *EventRepository) MarkNotificationFailed(ctx context.Context, event v4model.Event, notifyErr error) error {
+	reason := ""
+	if notifyErr != nil {
+		reason = notifyErr.Error()
+	}
+	return r.updateNotification(ctx, event, notificationUpdate{
+		status:            v4model.EventNotifyFailed,
+		reason:            reason,
+		incrementAttempts: true,
+	})
+}
+
+func (r *EventRepository) MarkNotificationSuppressed(ctx context.Context, event v4model.Event, reason string) error {
+	return r.updateNotification(ctx, event, notificationUpdate{
+		status: v4model.EventNotifySuppressed,
+		reason: strings.TrimSpace(reason),
+	})
+}
+
+func (r *EventRepository) shouldNotifyLocal(ctx context.Context, fingerprint string, dedupeWindow time.Duration, now time.Time) (bool, string, error) {
+	var marker eventMarker
+	if err := r.controller.Local().GetJSON(ctx, localdisk.BucketMetadata, notificationMarkerKey(fingerprint), &marker); err != nil {
+		if errors.Is(err, localdisk.ErrNotFound) {
+			return true, "", nil
+		}
+		return false, "", err
+	}
+	return notificationMarkerAllows(marker, dedupeWindow, now)
+}
+
+func (r *EventRepository) shouldNotifyMongo(ctx context.Context, client *mongostore.Client, fingerprint string, dedupeWindow time.Duration, now time.Time) (bool, string, error) {
 	child, cancel := client.WithTimeout(ctx)
 	defer cancel()
-	now := time.Now().UTC()
-	existing := client.Database().Collection(v4model.CollectionEvents)
+
 	conditions := make([]bson.M, 0, 2)
+	conditions = append(conditions, bson.M{"notify_silent_until": bson.M{"$gt": now}})
 	if dedupeWindow > 0 {
-		conditions = append(conditions, bson.M{"updated_at": bson.M{"$gte": now.Add(-dedupeWindow)}})
+		conditions = append(conditions, bson.M{"notify_sent_at": bson.M{"$gte": now.Add(-dedupeWindow)}})
 	}
-	if !event.SilentUntil.IsZero() && event.SilentUntil.After(now) {
-		conditions = append(conditions, bson.M{"silent_until": bson.M{"$gte": now}})
-	}
-	filter := bson.M{"fingerprint": event.Fingerprint}
-	if len(conditions) == 0 {
-		_, err := existing.InsertOne(child, event)
-		if err != nil {
-			return false, err
-		}
-		return true, nil
+	filter := bson.M{
+		"fingerprint":    fingerprint,
+		"notify_status":  v4model.EventNotifySent,
 	}
 	if len(conditions) == 1 {
 		for key, value := range conditions[0] {
 			filter[key] = value
 		}
-	} else if len(conditions) > 1 {
+	} else {
 		filter["$or"] = conditions
 	}
-	count, err := existing.CountDocuments(child, filter)
+	count, err := client.Database().Collection(v4model.CollectionEvents).CountDocuments(child, filter)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	if count > 0 {
-		return false, nil
+		return false, "recent_notification_sent", nil
 	}
-	_, err = existing.InsertOne(child, event)
-	if err != nil {
-		return false, err
+	return true, "", nil
+}
+
+func (r *EventRepository) upsertMongoEvent(ctx context.Context, client *mongostore.Client, event v4model.Event) error {
+	child, cancel := client.WithTimeout(ctx)
+	defer cancel()
+	_, err := client.Database().Collection(v4model.CollectionEvents).ReplaceOne(
+		child,
+		bson.M{"_id": event.ID},
+		event,
+		options.Replace().SetUpsert(true),
+	)
+	return err
+}
+
+type notificationUpdate struct {
+	status            string
+	reason            string
+	incrementAttempts bool
+	sent              bool
+}
+
+func (r *EventRepository) updateNotification(ctx context.Context, event v4model.Event, update notificationUpdate) error {
+	event.ID = strings.TrimSpace(event.ID)
+	if event.ID == "" {
+		return errors.New("v4 event notification update requires event id")
 	}
-	return true, nil
+	if r.mongoAuthoritative() {
+		if err := r.updateMongoNotification(ctx, r.controller.Client(), event, update); err == nil {
+			if err := r.updateLocalNotification(ctx, event, update, false); err != nil {
+				return err
+			}
+			if update.sent {
+				return r.setLocalNotificationMarker(ctx, event)
+			}
+			return nil
+		} else {
+			r.controller.HandleMongoError(err)
+		}
+	}
+	if err := r.updateLocalNotification(ctx, event, update, true); err != nil {
+		return err
+	}
+	if update.sent {
+		return r.setLocalNotificationMarker(ctx, event)
+	}
+	return nil
+}
+
+func (r *EventRepository) updateMongoNotification(ctx context.Context, client *mongostore.Client, event v4model.Event, update notificationUpdate) error {
+	child, cancel := client.WithTimeout(ctx)
+	defer cancel()
+	now := time.Now().UTC()
+	set := bson.M{
+		"notify_status":     update.status,
+		"notify_reason":     strings.TrimSpace(update.reason),
+		"notify_updated_at": now,
+	}
+	if update.sent {
+		set["notify_sent_at"] = now
+		set["notify_silent_until"] = event.SilentUntil.UTC()
+	}
+	changes := bson.M{"$set": set}
+	if update.incrementAttempts {
+		changes["$inc"] = bson.M{"notify_attempts": 1}
+	}
+	_, err := client.Database().Collection(v4model.CollectionEvents).UpdateByID(child, event.ID, changes)
+	return err
+}
+
+func (r *EventRepository) updateLocalNotification(ctx context.Context, event v4model.Event, update notificationUpdate, dirty bool) error {
+	current := event
+	if err := r.controller.Local().GetJSON(ctx, localdisk.BucketV4Events, event.ID, &current); err != nil && !errors.Is(err, localdisk.ErrNotFound) {
+		return err
+	}
+	current = applyNotificationUpdate(current, update, time.Now().UTC())
+	return r.persistLocalEvent(ctx, current, dirty)
+}
+
+func (r *EventRepository) setLocalNotificationMarker(ctx context.Context, event v4model.Event) error {
+	return r.controller.Local().PutJSON(ctx, localdisk.BucketMetadata, notificationMarkerKey(event.Fingerprint), eventMarker{
+		UpdatedAt:   time.Now().UTC(),
+		LastEventID: event.ID,
+		SilentUntil: event.SilentUntil.UTC(),
+	})
+}
+
+func (r *EventRepository) persistLocalEvent(ctx context.Context, event v4model.Event, dirty bool) error {
+	if dirty {
+		return r.controller.Local().PutJSONDirty(ctx, localdisk.BucketV4Events, localdisk.BucketV4EventsDirty, event.ID, event)
+	}
+	return r.controller.Local().PutJSON(ctx, localdisk.BucketV4Events, event.ID, event)
+}
+
+func applyNotificationUpdate(event v4model.Event, update notificationUpdate, now time.Time) v4model.Event {
+	event.NotifyStatus = strings.TrimSpace(update.status)
+	event.NotifyReason = strings.TrimSpace(update.reason)
+	event.NotifyUpdatedAt = now
+	if update.incrementAttempts {
+		event.NotifyAttempts++
+	}
+	if update.sent {
+		event.NotifySentAt = now
+		event.NotifySilentUntil = event.SilentUntil.UTC()
+	}
+	event.UpdatedAt = now
+	return event
+}
+
+func notificationMarkerAllows(marker eventMarker, dedupeWindow time.Duration, now time.Time) (bool, string, error) {
+	if marker.SilentUntil.After(now) {
+		return false, "recent_notification_sent", nil
+	}
+	if dedupeWindow > 0 && marker.UpdatedAt.After(now.Add(-dedupeWindow)) {
+		return false, "recent_notification_sent", nil
+	}
+	return true, "", nil
+}
+
+func notificationMarkerKey(fingerprint string) string {
+	return "v4_notify:" + strings.TrimSpace(fingerprint)
 }
 
 func (r *EventRepository) listRecentMongo(ctx context.Context, client *mongostore.Client, limit int) ([]v4model.Event, error) {
@@ -707,15 +842,27 @@ func (r *EventRepository) listRecentLocal(ctx context.Context, limit int) ([]v4m
 	return events, nil
 }
 
-func (r *EventRepository) persistLocalMirror(ctx context.Context, event v4model.Event) error {
-	if err := r.controller.Local().PutJSON(ctx, localdisk.BucketV4Events, event.ID, event); err != nil {
-		return err
+func stampEvent(event v4model.Event) v4model.Event {
+	now := time.Now().UTC()
+	event.Fingerprint = strings.TrimSpace(event.Fingerprint)
+	if event.ID == "" {
+		fingerprint := event.Fingerprint
+		if fingerprint == "" {
+			fingerprint = strings.TrimSpace(event.Type)
+		}
+		if fingerprint == "" {
+			fingerprint = "event"
+		}
+		event.ID = fmt.Sprintf("%s:%d", fingerprint, now.UnixNano())
 	}
-	return r.controller.Local().PutJSON(ctx, localdisk.BucketMetadata, "v4_event:"+event.Fingerprint, eventMarker{
-		UpdatedAt:   event.UpdatedAt,
-		LastEventID: event.ID,
-		SilentUntil: event.SilentUntil,
-	})
+	if event.CreatedAt.IsZero() {
+		event.CreatedAt = now
+	}
+	event.UpdatedAt = now
+	if event.SilentUntil.IsZero() {
+		event.SilentUntil = now
+	}
+	return event
 }
 
 func (r *SnapshotRepository) mongoAuthoritative() bool {
