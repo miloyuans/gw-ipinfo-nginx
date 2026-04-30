@@ -61,6 +61,21 @@ func NewService(cfg config.V4TelegramConfig, v4Cfg config.V4Config, routeFile co
 }
 
 func (s *Service) BuildRoutesSummary(ctx context.Context) (Result, error) {
+	return s.buildRoutesSummary(ctx, s.cfg.SendHTMLFile)
+}
+
+func (s *Service) BuildRoutesDocument(ctx context.Context) ([]byte, error) {
+	result, err := s.buildRoutesSummary(ctx, true)
+	if err != nil {
+		return nil, err
+	}
+	if len(result.FileContent) > 0 {
+		return result.FileContent, nil
+	}
+	return []byte(buildSummaryDocument("V4 Routes", result.SummaryHTML)), nil
+}
+
+func (s *Service) buildRoutesSummary(ctx context.Context, includeHTMLFile bool) (Result, error) {
 	syncState, _, _ := s.snapshots.LoadSyncState(ctx)
 	snapshot, hosts, found, err := s.snapshots.LoadLatest(ctx)
 	if err != nil {
@@ -157,12 +172,21 @@ func (s *Service) BuildRoutesSummary(ctx context.Context) (Result, error) {
 	result := Result{
 		SummaryHTML: summary.String(),
 	}
-	if s.cfg.SendHTMLFile {
+	if includeHTMLFile {
 		result.FileName = "v4-routes.html"
 		result.ContentType = "text/html; charset=utf-8"
 		result.FileContent = []byte(buildHTMLDocument(snapshot, syncStateView, fileHosts, stateByHost, recentEvents))
 	}
 	return result, nil
+}
+
+func buildSummaryDocument(title, bodyHTML string) string {
+	return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">` +
+		`<title>` + html.EscapeString(title) + `</title><style>` +
+		`body{margin:0;padding:20px;background:#f6f8fb;color:#111827;font:14px/1.6 Arial,Helvetica,sans-serif}` +
+		`.wrap{max-width:1100px;margin:0 auto;background:#fff;border:1px solid #dbe5f0;border-radius:12px;padding:20px}` +
+		`pre{white-space:pre-wrap;word-break:break-word}` +
+		`</style></head><body><main class="wrap">` + bodyHTML + `</main></body></html>`
 }
 
 func buildHTMLDocument(snapshot v4model.Snapshot, syncStateView syncView, hosts []v4model.SnapshotHost, stateByHost map[string]v4model.HostRuntimeState, recentEvents []v4model.Event) string {

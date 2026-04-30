@@ -324,6 +324,30 @@ func (s *Service) GenerateDaily(ctx context.Context, day time.Time) ([]byte, []b
 	return htmlReport, csvReport, nil
 }
 
+func (s *Service) GenerateHTMLRange(ctx context.Context, start, end time.Time, label string) ([]byte, error) {
+	if s == nil {
+		return nil, errors.New("reporting service is unavailable")
+	}
+	if end.Before(start) {
+		return nil, fmt.Errorf("invalid report range: end %s is before start %s", end.Format(time.RFC3339), start.Format(time.RFC3339))
+	}
+	summaries, err := s.loadRange(ctx, start, end)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(label) == "" {
+		label = s.formatRangeLabel(start, end)
+	}
+	return s.renderHTML(label, summaries)
+}
+
+func (s *Service) ReportLocation() (*time.Location, string) {
+	if s == nil || s.location == nil {
+		return time.Local, time.Local.String()
+	}
+	return s.location, s.locationName
+}
+
 func (s *Service) runWorker(ctx context.Context) {
 	for {
 		select {
@@ -1054,17 +1078,15 @@ func (s *Service) reportCaption(dayKey string) string {
 }
 
 func (s *Service) loadDay(ctx context.Context, dayKey string) ([]Summary, error) {
-	if !s.reportMongoAvailable() {
-		return nil, errors.New("mongo unavailable for report data")
-	}
-
-	client := s.controller.Client()
-	summaries, err := s.loadDayFromMongo(ctx, client, dayKey)
-	if err != nil {
+	if s.reportMongoAvailable() {
+		client := s.controller.Client()
+		summaries, err := s.loadDayFromMongo(ctx, client, dayKey)
+		if err == nil {
+			return summaries, nil
+		}
 		s.controller.HandleMongoError(err)
-		return nil, err
 	}
-	return summaries, nil
+	return s.loadDayFromLocal(ctx, dayKey)
 }
 
 func (s *Service) loadDayFromMongo(ctx context.Context, client *mongostore.Client, dayKey string) ([]Summary, error) {
@@ -1091,13 +1113,109 @@ func (s *Service) loadDayFromMongo(ctx context.Context, client *mongostore.Clien
 	if err := cursor.Err(); err != nil {
 		return nil, err
 	}
-	sort.Slice(summaries, func(i, j int) bool {
-		if summaries[i].AllowCount+summaries[i].DenyCount == summaries[j].AllowCount+summaries[j].DenyCount {
-			return summaries[i].ClientIP < summaries[j].ClientIP
-		}
-		return summaries[i].AllowCount+summaries[i].DenyCount > summaries[j].AllowCount+summaries[j].DenyCount
-	})
+	sortSummariesByTraffic(summaries)
 	return summaries, nil
+}
+
+func (s *Service) loadDayFromLocal(ctx context.Context, dayKey string) ([]Summary, error) {
+	if s == nil || s.controller == nil || s.controller.Local() == nil {
+		return nil, errors.New("local report store is unavailable")
+	}
+	summaries := make([]Summary, 0)
+	if err := s.controller.Local().ForEachJSON(ctx, localdisk.BucketReportRecords, func(key string, raw []byte) error {
+		var summary Summary
+		if err := json.Unmarshal(raw, &summary); err != nil {
+			return nil
+		}
+		if summary.Day != dayKey || summary.Kind != "summary" || s.shouldIgnoreStoredSummary(summary) {
+			return nil
+		}
+		summaries = append(summaries, summary)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	sortSummariesByTraffic(summaries)
+	return summaries, nil
+}
+
+func (s *Service) loadRange(ctx context.Context, start, end time.Time) ([]Summary, error) {
+	location, _ := s.ReportLocation()
+	start = start.In(location)
+	end = end.In(location)
+	startDay := time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, location)
+	endDay := time.Date(end.Year(), end.Month(), end.Day(), 0, 0, 0, 0, location)
+
+	merged := map[string]Summary{}
+	for day := startDay; !day.After(endDay); day = day.AddDate(0, 0, 1) {
+		dayKey := day.Format("2006-01-02")
+		summaries, err := s.loadDay(ctx, dayKey)
+		if err != nil {
+			return nil, err
+		}
+		for _, summary := range summaries {
+			if !summaryOverlapsRange(summary, start, end) {
+				continue
+			}
+			key := summaryRangeKey(summary)
+			if current, ok := merged[key]; ok {
+				merged[key] = mergeSummaries(current, summary)
+				continue
+			}
+			merged[key] = summary
+		}
+	}
+
+	result := make([]Summary, 0, len(merged))
+	for key, summary := range merged {
+		summary.ID = key
+		summary.Day = s.formatRangeLabel(start, end)
+		result = append(result, summary)
+	}
+	sortSummariesByTraffic(result)
+	return result, nil
+}
+
+func sortSummariesByTraffic(summaries []Summary) {
+	sort.Slice(summaries, func(i, j int) bool {
+		leftTotal := summaries[i].AllowCount + summaries[i].DenyCount
+		rightTotal := summaries[j].AllowCount + summaries[j].DenyCount
+		if leftTotal == rightTotal {
+			leftHost := reportFirstNonEmpty(normalizeReportHost(summaries[i].Host), normalizeReportHost(summaries[i].SourceHost), "(unknown)")
+			rightHost := reportFirstNonEmpty(normalizeReportHost(summaries[j].Host), normalizeReportHost(summaries[j].SourceHost), "(unknown)")
+			if leftHost == rightHost {
+				return summaries[i].ClientIP < summaries[j].ClientIP
+			}
+			return leftHost < rightHost
+		}
+		return leftTotal > rightTotal
+	})
+}
+
+func summaryRangeKey(summary Summary) string {
+	host := reportFirstNonEmpty(normalizeReportHost(summary.Host), normalizeReportHost(summary.SourceHost), "(unknown)")
+	clientIP := strings.TrimSpace(summary.ClientIP)
+	if clientIP == "" {
+		clientIP = "(unknown)"
+	}
+	return host + "|" + clientIP
+}
+
+func summaryOverlapsRange(summary Summary, start, end time.Time) bool {
+	startUTC := start.UTC()
+	endUTC := end.UTC()
+	if !summary.FirstSeenAt.IsZero() && summary.FirstSeenAt.After(endUTC) {
+		return false
+	}
+	if !summary.LastSeenAt.IsZero() && summary.LastSeenAt.Before(startUTC) {
+		return false
+	}
+	return true
+}
+
+func (s *Service) formatRangeLabel(start, end time.Time) string {
+	location, locationName := s.ReportLocation()
+	return start.In(location).Format("2006-01-02 15:04") + " - " + end.In(location).Format("2006-01-02 15:04") + " " + locationName
 }
 
 func (s *Service) renderCSV(summaries []Summary) ([]byte, error) {

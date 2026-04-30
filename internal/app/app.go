@@ -17,6 +17,7 @@ import (
 	"gw-ipinfo-nginx/internal/blockpage"
 	"gw-ipinfo-nginx/internal/cache"
 	"gw-ipinfo-nginx/internal/config"
+	"gw-ipinfo-nginx/internal/dashboard"
 	"gw-ipinfo-nginx/internal/health"
 	"gw-ipinfo-nginx/internal/ipctx"
 	"gw-ipinfo-nginx/internal/ipinfo"
@@ -327,6 +328,9 @@ func New(configPath string) (*Application, error) {
 	if cfg.Metrics.Enabled {
 		mux.Handle(cfg.Metrics.Path, metricsRegistry)
 	}
+	dashboardHandler := dashboard.New(v4QuerySvc, reportingService)
+	mux.Handle(dashboard.BasePath, dashboardHandler)
+	mux.Handle(dashboard.BasePath+"/", dashboardHandler)
 	mux.Handle("/", middleware.WithRequestID(gatewayHandler))
 
 	cleanupStore = false
