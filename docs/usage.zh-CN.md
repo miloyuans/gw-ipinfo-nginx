@@ -406,6 +406,7 @@ routes:
     ip_enrichment_mode: "disabled"
     probe:
       enabled: true
+      direct_redirect_enabled: false
       mode: "html_discovery"
       url: "https://game.freespin.diy/0927/index.html"
       html_paths: []
@@ -439,6 +440,9 @@ routes:
   - `disabled / cache_only / full`
 - `probe.enabled`
   - 是否对该 host 启用探测
+- `probe.direct_redirect_enabled`
+  - 默认 `false`
+  - 设为 `true` 后，该 host 命中 v4 时会直接 `302` 到 `probe.redirect_urls` 配置池中的地址，不等待探测进入故障态
 - `probe.mode`
   - `html_discovery` 或 `local_js`
 - `probe.url`
@@ -477,6 +481,14 @@ routes:
 - 网关行为：`302` 跳转到 `redirect_urls` 中选出的健康目标
 
 当前主线里，v4 故障切换是 **跳转**，不是反代。
+
+#### 直接跳转开关
+
+- 配置：`probe.direct_redirect_enabled: true`
+- 默认：`false`
+- 网关行为：host 命中 v4 后直接 `302` 到 `probe.redirect_urls` 配置池中的地址
+- 多目标：按客户端 IP 稳定选择；拿不到客户端 IP 时按 host 选择
+- 使用场景：临时强制把某个已启用 probe 的域名切到目标地址池，不需要等待连续失败阈值触发
 
 ### 7.7 V4 与路径的关系
 

@@ -13,6 +13,7 @@ const (
 	SyncStateID         = "sync_state"
 	ModePassthrough    = "passthrough"
 	ModeDegradedRedirect = "degraded_redirect"
+	ModeDirectRedirect = "direct_redirect"
 	ModeRecovering     = "recovering"
 )
 
@@ -76,6 +77,7 @@ type SnapshotHost struct {
 
 type ProbeSpec struct {
 	Enabled            bool          `json:"enabled" bson:"enabled"`
+	DirectRedirectEnabled bool       `json:"direct_redirect_enabled" bson:"direct_redirect_enabled"`
 	Mode               string        `json:"mode" bson:"mode"`
 	URL                string        `json:"url" bson:"url"`
 	HTMLPaths          []string      `json:"html_paths" bson:"html_paths"`

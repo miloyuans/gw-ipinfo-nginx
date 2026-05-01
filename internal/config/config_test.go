@@ -254,6 +254,53 @@ alerts:
 	}
 }
 
+func TestLoadRejectsV4DirectRedirectWithoutTargets(t *testing.T) {
+	content := `
+server:
+  listen_address: ":8080"
+real_ip:
+  trusted_proxy_cidrs: ["10.0.0.0/8"]
+routing:
+  default_service: default
+  services:
+    - name: default
+      target_url: "http://127.0.0.1:8081"
+security:
+  ua:
+    enabled: true
+  accept_language:
+    require_header: false
+  geo:
+    default_action: deny
+    whitelist:
+      US: {}
+  privacy:
+    deny_by_default: true
+ipinfo:
+  enabled: false
+alerts:
+  telegram:
+    enabled: false
+  delivery:
+    worker_enabled: false
+v4:
+  enabled: true
+  ingress:
+    config_paths: ["nginx.conf"]
+  overrides:
+    - host: "promo.example.com"
+      enabled: true
+      probe:
+        enabled: true
+        direct_redirect_enabled: true
+`
+	path := writeConfig(t, content)
+
+	if _, err := Load(path); err == nil {
+		t.Fatal("Load() error = nil, want direct redirect target validation failure")
+	}
+}
+
 func writeConfig(t *testing.T, content string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.yaml")

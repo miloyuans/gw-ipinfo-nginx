@@ -436,6 +436,7 @@ type V4OverrideConfig struct {
 
 type V4ProbeConfig struct {
 	Enabled            bool          `yaml:"enabled"`
+	DirectRedirectEnabled bool       `yaml:"direct_redirect_enabled"`
 	Mode               string        `yaml:"mode"`
 	URL                string        `yaml:"url"`
 	HTMLPaths          []string      `yaml:"html_paths"`
@@ -1292,6 +1293,14 @@ func (c *Config) Validate() error {
 			if override.Probe.Mode != "" && !slices.Contains([]string{"local_js", "html_discovery"}, override.Probe.Mode) {
 				errs = append(errs, fmt.Errorf("v4 override probe.mode for host %q must be local_js or html_discovery", override.Host))
 			}
+			if override.Probe.DirectRedirectEnabled {
+				if !override.Probe.Enabled {
+					errs = append(errs, fmt.Errorf("v4 override probe.direct_redirect_enabled for host %q requires probe.enabled=true", override.Host))
+				}
+				if !hasNonEmptyString(override.Probe.RedirectURLs) {
+					errs = append(errs, fmt.Errorf("v4 override probe.direct_redirect_enabled for host %q requires probe.redirect_urls", override.Host))
+				}
+			}
 			for _, path := range append(append([]string(nil), override.Probe.HTMLPaths...), override.Probe.JSPaths...) {
 				if strings.TrimSpace(path) == "" {
 					continue
@@ -1331,4 +1340,13 @@ func (c *Config) Validate() error {
 
 func (c *Config) NeedsMongo() bool {
 	return c.IPInfo.Enabled || c.Alerts.Telegram.Enabled || c.Alerts.Delivery.WorkerEnabled
+}
+
+func hasNonEmptyString(values []string) bool {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return true
+		}
+	}
+	return false
 }

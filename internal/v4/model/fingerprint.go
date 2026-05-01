@@ -14,7 +14,7 @@ func CanonicalSnapshotFingerprint(hosts []SnapshotHost) string {
 	}
 	parts := make([]string, 0, len(hosts))
 	for _, host := range hosts {
-		parts = append(parts, strings.Join([]string{
+		fields := []string{
 			host.Host,
 			host.Source,
 			host.BackendService,
@@ -22,6 +22,11 @@ func CanonicalSnapshotFingerprint(hosts []SnapshotHost) string {
 			host.IPEnrichmentMode,
 			fmt.Sprintf("%t", host.SecurityChecksEnabled),
 			fmt.Sprintf("%t", host.Probe.Enabled),
+		}
+		if host.Probe.DirectRedirectEnabled {
+			fields = append(fields, "direct_redirect_enabled=true")
+		}
+		fields = append(fields,
 			host.Probe.Mode,
 			host.Probe.URL,
 			strings.Join(host.Probe.HTMLPaths, ","),
@@ -35,7 +40,8 @@ func CanonicalSnapshotFingerprint(hosts []SnapshotHost) string {
 			fmt.Sprint(host.Probe.HealthyThreshold),
 			fmt.Sprint(host.Probe.UnhealthyThreshold),
 			host.Probe.MinSwitchInterval.String(),
-		}, "|"))
+		)
+		parts = append(parts, strings.Join(fields, "|"))
 	}
 	sort.Strings(parts)
 	sum := sha1.Sum([]byte(strings.Join(parts, "\n")))

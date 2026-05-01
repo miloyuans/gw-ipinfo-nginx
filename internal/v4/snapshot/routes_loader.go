@@ -79,6 +79,7 @@ func normalizeRouteEntry(path string, idx int, raw routeEntry) (config.V4Overrid
 		IPEnrichmentMode:      strings.TrimSpace(strings.ToLower(raw.IPEnrichmentMode)),
 		Probe: config.V4ProbeConfig{
 			Enabled:              raw.Probe.Enabled,
+			DirectRedirectEnabled: raw.Probe.DirectRedirectEnabled,
 			Mode:                 strings.TrimSpace(strings.ToLower(raw.Probe.Mode)),
 			URL:                  strings.TrimSpace(raw.Probe.URL),
 			HTMLPaths:            normalizeLocalPaths(raw.Probe.HTMLPaths),
@@ -107,6 +108,14 @@ func normalizeRouteEntry(path string, idx int, raw routeEntry) (config.V4Overrid
 	}
 	if entry.Probe.Mode != "" && !isValidV4ProbeMode(entry.Probe.Mode) {
 		return config.V4OverrideConfig{}, fmt.Errorf("invalid v4 route probe.mode for %s in %s: %s", host, path, raw.Probe.Mode)
+	}
+	if entry.Probe.DirectRedirectEnabled {
+		if !entry.Probe.Enabled {
+			return config.V4OverrideConfig{}, fmt.Errorf("invalid v4 route probe.direct_redirect_enabled for %s in %s: probe.enabled must be true", host, path)
+		}
+		if len(entry.Probe.RedirectURLs) == 0 {
+			return config.V4OverrideConfig{}, fmt.Errorf("invalid v4 route probe.direct_redirect_enabled for %s in %s: probe.redirect_urls is required", host, path)
+		}
 	}
 	return entry, nil
 }

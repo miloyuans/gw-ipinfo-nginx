@@ -468,12 +468,16 @@ func (s *Service) TrackRedirectAccess(ctx context.Context, host, clientIP string
 
 	s.mu.RLock()
 	inMemory, found := s.statesByHost[host]
+	hostSpec, specFound := s.hostsByName[host]
 	snapshotVersion := s.snapshotVersion
 	snapshotFingerprint := s.fingerprint
 	s.mu.RUnlock()
+	if !specFound {
+		hostSpec = v4model.SnapshotHost{Host: host, Probe: v4model.ProbeSpec{Enabled: true}}
+	}
 	if found {
-		inMemory = normalizeStateForHost(v4model.SnapshotHost{Host: host, Probe: v4model.ProbeSpec{Enabled: true}}, inMemory, snapshotVersion, snapshotFingerprint)
-		if inMemory.Mode != v4model.ModeDegradedRedirect {
+		inMemory = normalizeStateForHost(hostSpec, inMemory, snapshotVersion, snapshotFingerprint)
+		if !redirectAccessTrackingEnabled(hostSpec, inMemory) {
 			return nil
 		}
 		if containsString(inMemory.RedirectClientKeys, clientKey) {
@@ -488,8 +492,8 @@ func (s *Service) TrackRedirectAccess(ctx context.Context, host, clientIP string
 	if !found {
 		return nil
 	}
-	current = normalizeStateForHost(v4model.SnapshotHost{Host: host, Probe: v4model.ProbeSpec{Enabled: true}}, current, snapshotVersion, snapshotFingerprint)
-	if current.Mode != v4model.ModeDegradedRedirect {
+	current = normalizeStateForHost(hostSpec, current, snapshotVersion, snapshotFingerprint)
+	if !redirectAccessTrackingEnabled(hostSpec, current) {
 		return nil
 	}
 	if containsString(current.RedirectClientKeys, clientKey) {
@@ -513,6 +517,13 @@ func (s *Service) TrackRedirectAccess(ctx context.Context, host, clientIP string
 	s.statesByHost[host] = current
 	s.mu.Unlock()
 	return nil
+}
+
+func redirectAccessTrackingEnabled(host v4model.SnapshotHost, state v4model.HostRuntimeState) bool {
+	if !host.Probe.Enabled {
+		return false
+	}
+	return state.Mode == v4model.ModeDegradedRedirect || host.Probe.DirectRedirectEnabled
 }
 
 func (s *Service) ProbeHosts() []v4model.SnapshotHost {

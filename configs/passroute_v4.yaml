@@ -13,6 +13,7 @@ routes:
   #
   # probe 字段说明：
   # - probe.enabled: 只有显式 true 的 host 才会做探测。
+  # - probe.direct_redirect_enabled: 默认 false；true 时该 host 命中 v4 后直接 302 到 redirect_urls 配置池，不等待故障态；多个目标按 client IP 稳定选择。
   # - probe.mode: html_discovery | local_js。
   # - probe.url: 远程探测入口地址；如果配置了，会抓取这个页面内容，并只分析内联 JS / 同 host 的 script src 对应 JS 文件。
   # - probe.html_paths: 本地 HTML 文件绝对路径列表；会分析 HTML 内联 JS 和同目录引用的本地 JS 文件。
@@ -40,6 +41,7 @@ routes:
     ip_enrichment_mode: "cache_only"
     probe:
       enabled: true
+      direct_redirect_enabled: false
       mode: "html_discovery"
       # 方式一：直接探测线上 HTML 页面并从页面/内联 JS 中提取跳转 URL。
       url: "https://promo.example.com/"

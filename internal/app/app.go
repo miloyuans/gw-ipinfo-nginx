@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"net"
 	"net/http"
@@ -948,17 +949,15 @@ func (h *GatewayHandler) serveV4Fallback(w http.ResponseWriter, r *http.Request,
 		service = fallbackService
 	}
 	outcome := h.evaluateV4Chain(r, service, resolution)
-	runtimeMode := resolution.State.Mode
-	if strings.TrimSpace(runtimeMode) == "" {
-		runtimeMode = v4model.ModePassthrough
-	}
+	redirectURL := v4ActiveRedirectURL(resolution, outcome.clientIP)
+	runtimeMode := v4ActiveRuntimeMode(resolution, redirectURL)
 	routeMeta := routeContext{
 		RouteSetKind:            "v4",
 		RouteID:                 resolution.Host.Host,
 		SourceHost:              resolution.Host.Host,
 		BackendService:          resolution.Host.BackendService,
 		BackendHost:             resolution.Host.BackendHost,
-		TargetPublicURL:         resolution.State.RedirectURL,
+		TargetPublicURL:         redirectURL,
 		V4RuntimeMode:           runtimeMode,
 		V4RouteSource:           resolution.Host.Source,
 		V4SecurityChecksEnabled: resolution.Host.SecurityChecksEnabled,
@@ -968,8 +967,8 @@ func (h *GatewayHandler) serveV4Fallback(w http.ResponseWriter, r *http.Request,
 		V4SnapshotVersion:       resolution.State.SnapshotVersion,
 	}
 	action := responseAction{upstreamHost: resolution.Host.BackendHost}
-	if outcome.decision.Allowed && resolution.State.Mode == v4model.ModeDegradedRedirect && resolution.State.RedirectURL != "" {
-		action.redirectURL = resolution.State.RedirectURL
+	if outcome.decision.Allowed && redirectURL != "" {
+		action.redirectURL = redirectURL
 		action.redirectCode = http.StatusFound
 	}
 	h.finish(w, r, requestID, service, outcome.clientIP, outcome.ipContext, outcome.decision, start, outcome.state, routeMeta, action)
@@ -1079,7 +1078,14 @@ func (h *GatewayHandler) evaluateBypassChain(r *http.Request, service config.Ser
 
 func (h *GatewayHandler) evaluateV4Chain(r *http.Request, service config.ServiceConfig, resolution v4runtime.Resolution) evaluationResult {
 	if resolution.Host.SecurityChecksEnabled {
-		return h.evaluateFullChain(r, service)
+		outcome := h.evaluateFullChain(r, service)
+		if outcome.decision.Allowed {
+			redirectURL := v4ActiveRedirectURL(resolution, outcome.clientIP)
+			if reason := v4RedirectReason(resolution, redirectURL, outcome.clientIP == ""); reason != "" {
+				outcome.decision.Reason = reason
+			}
+		}
+		return outcome
 	}
 
 	state := h.newFlowState()
@@ -1098,12 +1104,13 @@ func (h *GatewayHandler) evaluateV4Chain(r *http.Request, service config.Service
 
 	ipContext := ipctx.Context{}
 	reason := "allow_v4_passthrough"
-	if resolution.State.Mode == v4model.ModeDegradedRedirect && resolution.State.RedirectURL != "" {
-		reason = "allow_v4_redirect"
+	redirectURL := v4ActiveRedirectURL(resolution, clientIP)
+	if redirectReason := v4RedirectReason(resolution, redirectURL, false); redirectReason != "" {
+		reason = redirectReason
 	}
 	if clientIP == "" {
-		if resolution.State.Mode == v4model.ModeDegradedRedirect && resolution.State.RedirectURL != "" {
-			reason = "allow_v4_redirect_no_real_ip"
+		if redirectReason := v4RedirectReason(resolution, redirectURL, true); redirectReason != "" {
+			reason = redirectReason
 		} else {
 			reason = "allow_v4_passthrough_no_real_ip"
 		}
@@ -1677,4 +1684,69 @@ func v4EvaluationMode(resolution v4runtime.Resolution) string {
 		return "full_security_chain"
 	}
 	return "light_passthrough_chain"
+}
+
+func v4ActiveRuntimeMode(resolution v4runtime.Resolution, redirectURL string) string {
+	if v4DirectRedirectActive(resolution, redirectURL) {
+		return v4model.ModeDirectRedirect
+	}
+	mode := strings.TrimSpace(resolution.State.Mode)
+	if mode == "" {
+		return v4model.ModePassthrough
+	}
+	return mode
+}
+
+func v4ActiveRedirectURL(resolution v4runtime.Resolution, clientKey string) string {
+	if resolution.Host.Probe.Enabled && resolution.Host.Probe.DirectRedirectEnabled {
+		key := strings.TrimSpace(clientKey)
+		if key == "" {
+			key = resolution.Host.Host
+		}
+		return selectV4RedirectURL(resolution.Host.Probe.RedirectURLs, key)
+	}
+	if resolution.State.Mode == v4model.ModeDegradedRedirect {
+		return strings.TrimSpace(resolution.State.RedirectURL)
+	}
+	return ""
+}
+
+func v4DirectRedirectActive(resolution v4runtime.Resolution, redirectURL string) bool {
+	return resolution.Host.Probe.Enabled && resolution.Host.Probe.DirectRedirectEnabled && strings.TrimSpace(redirectURL) != ""
+}
+
+func v4RedirectReason(resolution v4runtime.Resolution, redirectURL string, noRealIP bool) string {
+	if v4DirectRedirectActive(resolution, redirectURL) {
+		if noRealIP {
+			return "allow_v4_direct_redirect_no_real_ip"
+		}
+		return "allow_v4_direct_redirect"
+	}
+	if resolution.State.Mode == v4model.ModeDegradedRedirect && strings.TrimSpace(redirectURL) != "" {
+		if noRealIP {
+			return "allow_v4_redirect_no_real_ip"
+		}
+		return "allow_v4_redirect"
+	}
+	return ""
+}
+
+func selectV4RedirectURL(values []string, key string) string {
+	candidates := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		candidates = append(candidates, value)
+	}
+	if len(candidates) == 0 {
+		return ""
+	}
+	if len(candidates) == 1 {
+		return candidates[0]
+	}
+	hasher := fnv.New32a()
+	_, _ = hasher.Write([]byte(strings.TrimSpace(strings.ToLower(key))))
+	return candidates[int(hasher.Sum32()%uint32(len(candidates)))]
 }

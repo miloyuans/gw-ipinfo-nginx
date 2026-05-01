@@ -389,6 +389,7 @@ func (s *Service) logCompiledOverrides(overrides []config.V4OverrideConfig, host
 			"security_checks_enabled", compiled.SecurityChecksEnabled,
 			"ip_enrichment_mode", compiled.IPEnrichmentMode,
 			"probe_enabled", compiled.Probe.Enabled,
+			"direct_redirect_enabled", compiled.Probe.DirectRedirectEnabled,
 			"probe_mode", compiled.Probe.Mode,
 			"redirect_urls_count", len(compiled.Probe.RedirectURLs),
 		)
@@ -432,6 +433,7 @@ func (s *Service) recordSyncFailure(ctx context.Context, now time.Time, err erro
 func mergeProbe(defaults config.V4ProbeDefaultsConfig, probe config.V4ProbeConfig) v4model.ProbeSpec {
 	return v4model.ProbeSpec{
 		Enabled:            probe.Enabled,
+		DirectRedirectEnabled: probe.DirectRedirectEnabled,
 		Mode:               probe.Mode,
 		URL:                strings.TrimSpace(probe.URL),
 		HTMLPaths:          append([]string(nil), probe.HTMLPaths...),

@@ -64,3 +64,21 @@ func TestNormalizeStateForHostPreservesCurrentSnapshotState(t *testing.T) {
 		t.Fatalf("normalizeStateForHost() redirect_url = %q", normalized.RedirectURL)
 	}
 }
+
+func TestRedirectAccessTrackingEnabledForDirectRedirect(t *testing.T) {
+	host := v4model.SnapshotHost{
+		Host: "promo.example.com",
+		Probe: v4model.ProbeSpec{
+			Enabled:               true,
+			DirectRedirectEnabled: true,
+		},
+	}
+	state := v4model.HostRuntimeState{
+		Host: "promo.example.com",
+		Mode: v4model.ModePassthrough,
+	}
+
+	if !redirectAccessTrackingEnabled(host, state) {
+		t.Fatal("redirectAccessTrackingEnabled() = false, want true for direct redirect")
+	}
+}

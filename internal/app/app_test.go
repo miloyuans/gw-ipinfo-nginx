@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 	"io"
-	"net/http"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
@@ -22,6 +22,8 @@ import (
 	"gw-ipinfo-nginx/internal/realip"
 	"gw-ipinfo-nginx/internal/routing"
 	"gw-ipinfo-nginx/internal/routesets"
+	v4model "gw-ipinfo-nginx/internal/v4/model"
+	v4runtime "gw-ipinfo-nginx/internal/v4/runtime"
 )
 
 type failingAlertRepo struct{}
@@ -182,5 +184,54 @@ func TestServeHTTPDefaultRouteSetUsesDefaultChainBeforeV4Fallback(t *testing.T) 
 	}
 	if got := recorder.Header().Get("X-Route-Chain"); got != "default" {
 		t.Fatalf("ServeHTTP() X-Route-Chain = %q, want %q", got, "default")
+	}
+}
+
+func TestV4DirectRedirectUsesConfiguredTargetPool(t *testing.T) {
+	resolution := v4runtime.Resolution{
+		Host: v4model.SnapshotHost{
+			Host: "promo.example.com",
+			Probe: v4model.ProbeSpec{
+				Enabled:               true,
+				DirectRedirectEnabled: true,
+				RedirectURLs:          []string{"", "https://fallback.example.net/"},
+			},
+		},
+		State: v4model.HostRuntimeState{
+			Mode:        v4model.ModePassthrough,
+			RedirectURL: "https://stale.example.net/",
+		},
+	}
+
+	redirectURL := v4ActiveRedirectURL(resolution, "8.8.8.8")
+	if redirectURL != "https://fallback.example.net/" {
+		t.Fatalf("v4ActiveRedirectURL() = %q, want configured redirect URL", redirectURL)
+	}
+	if mode := v4ActiveRuntimeMode(resolution, redirectURL); mode != v4model.ModeDirectRedirect {
+		t.Fatalf("v4ActiveRuntimeMode() = %q, want %q", mode, v4model.ModeDirectRedirect)
+	}
+}
+
+func TestV4RedirectFallsBackToDegradedRuntimeState(t *testing.T) {
+	resolution := v4runtime.Resolution{
+		Host: v4model.SnapshotHost{
+			Host: "promo.example.com",
+			Probe: v4model.ProbeSpec{
+				Enabled:      true,
+				RedirectURLs: []string{"https://configured.example.net/"},
+			},
+		},
+		State: v4model.HostRuntimeState{
+			Mode:        v4model.ModeDegradedRedirect,
+			RedirectURL: "https://healthy-failover.example.net/",
+		},
+	}
+
+	redirectURL := v4ActiveRedirectURL(resolution, "8.8.8.8")
+	if redirectURL != "https://healthy-failover.example.net/" {
+		t.Fatalf("v4ActiveRedirectURL() = %q, want degraded runtime redirect URL", redirectURL)
+	}
+	if mode := v4ActiveRuntimeMode(resolution, redirectURL); mode != v4model.ModeDegradedRedirect {
+		t.Fatalf("v4ActiveRuntimeMode() = %q, want %q", mode, v4model.ModeDegradedRedirect)
 	}
 }
