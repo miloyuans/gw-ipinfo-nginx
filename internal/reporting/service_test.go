@@ -80,6 +80,28 @@ func TestGenerateDailyProducesHTMLAndCSV(t *testing.T) {
 	}
 }
 
+func TestSummaryV4RedirectCounts(t *testing.T) {
+	direct := Summary{
+		RedirectCount: 2,
+		AllowReasons: map[string]uint64{
+			"allow_v4_direct_redirect": 2,
+		},
+	}
+	if got := summaryV4DirectRedirectCount(direct); got != 2 {
+		t.Fatalf("summaryV4DirectRedirectCount() = %d, want 2", got)
+	}
+
+	degraded := Summary{
+		RedirectCount: 3,
+		AllowReasons: map[string]uint64{
+			"allow_v4_redirect_no_real_ip": 3,
+		},
+	}
+	if got := summaryV4DegradedRedirectCount(degraded); got != 3 {
+		t.Fatalf("summaryV4DegradedRedirectCount() = %d, want 3", got)
+	}
+}
+
 func TestLoadRangeMergesLocalSummariesByHostAndIP(t *testing.T) {
 	store, err := localdisk.Open(filepath.Join(t.TempDir(), "report.db"))
 	if err != nil {

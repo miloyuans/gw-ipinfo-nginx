@@ -1887,19 +1887,21 @@ tbody tr:hover{
 }
 
 type hostAggregate struct {
-	Host             string
-	TotalRequests    uint64
-	UniqueClients    uint64
-	AllowCount       uint64
-	DenyCount        uint64
-	RedirectCount    uint64
-	UniqueAllowedIPs uint64
-	DenyReasons      map[string]uint64
-	RouteSetCounts   map[string]uint64
-	RouteIDCounts    map[string]uint64
-	ClientIPs        map[string]uint64
-	PathCounts       map[string]uint64
-	RequestURLCounts map[string]uint64
+	Host                    string
+	TotalRequests           uint64
+	UniqueClients           uint64
+	AllowCount              uint64
+	DenyCount               uint64
+	RedirectCount           uint64
+	V4DirectRedirectCount   uint64
+	V4DegradedRedirectCount uint64
+	UniqueAllowedIPs        uint64
+	DenyReasons             map[string]uint64
+	RouteSetCounts          map[string]uint64
+	RouteIDCounts           map[string]uint64
+	ClientIPs               map[string]uint64
+	PathCounts              map[string]uint64
+	RequestURLCounts        map[string]uint64
 }
 
 func (s *Service) renderCSVHostPrimary(summaries []Summary) ([]byte, error) {
@@ -2007,6 +2009,8 @@ func (s *Service) renderHTMLHostPrimaryLegacy(dayKey string, summaries []Summary
 	totalAllows := uint64(0)
 	totalDenies := uint64(0)
 	totalRedirects := uint64(0)
+	v4DirectRedirects := uint64(0)
+	v4DegradedRedirects := uint64(0)
 	shortCircuitTotal := uint64(0)
 	hostStats := map[string]hostAggregate{}
 	uaCounts := map[string]uint64{}
@@ -2026,6 +2030,10 @@ func (s *Service) renderHTMLHostPrimaryLegacy(dayKey string, summaries []Summary
 		totalAllows += summary.AllowCount
 		totalDenies += summary.DenyCount
 		totalRedirects += summary.RedirectCount
+		directRedirects := summaryV4DirectRedirectCount(summary)
+		degradedRedirects := summaryV4DegradedRedirectCount(summary)
+		v4DirectRedirects += directRedirects
+		v4DegradedRedirects += degradedRedirects
 		shortCircuitTotal += summary.ShortCircuitAllowCount + summary.ShortCircuitDenyCount
 		mergeCountMaps(uaCounts, summary.UserAgentCounts)
 		mergeCountMaps(langCounts, summary.AcceptLanguageCounts)
@@ -2044,6 +2052,8 @@ func (s *Service) renderHTMLHostPrimaryLegacy(dayKey string, summaries []Summary
 		agg.AllowCount += summary.AllowCount
 		agg.DenyCount += summary.DenyCount
 		agg.RedirectCount += summary.RedirectCount
+		agg.V4DirectRedirectCount += directRedirects
+		agg.V4DegradedRedirectCount += degradedRedirects
 		if summary.AllowCount > 0 {
 			agg.UniqueAllowedIPs++
 		}
@@ -2115,6 +2125,10 @@ th{background:#eff6ff;color:#1d4ed8;position:sticky;top:0}
 	buf.WriteString(`</div></section>`)
 
 	buf.WriteString(`<section class="section"><h2>Host 维度汇总</h2><p>按 host 展示总请求数、去重客户端 IP 数、放行/拦截数、拦截原因和路由策略。</p>`)
+	buf.WriteString(`<div class="metrics">`)
+	buf.WriteString(reportMetricCard("V4 直跳次数", fmt.Sprintf("%d", v4DirectRedirects), reportPercentString(v4DirectRedirects, totalRequests)+" of total requests", "warning"))
+	buf.WriteString(reportMetricCard("V4 故障跳转次数", fmt.Sprintf("%d", v4DegradedRedirects), reportPercentString(v4DegradedRedirects, totalRequests)+" of total requests", "warning"))
+	buf.WriteString(`</div>`)
 	buf.WriteString(reportHostSummaryTable(hostStats))
 	buf.WriteString(`</section>`)
 
@@ -2322,12 +2336,14 @@ func reportHostSummaryTableLegacy(values map[string]hostAggregate) string {
 	b.WriteString(`<th class="num">放行去重数</th>`)
 	b.WriteString(`<th class="num">拦截次数</th>`)
 	b.WriteString(`<th class="num">跳转次数</th>`)
+	b.WriteString(`<th class="num">V4 直跳</th>`)
+	b.WriteString(`<th class="num">V4 降级</th>`)
 	b.WriteString(`<th>拦截原因</th>`)
 	b.WriteString(`<th>路由策略</th>`)
 	b.WriteString(`<th>客户端 IP 列表</th>`)
 	b.WriteString(`</tr></thead><tbody>`)
 	if len(rows) == 0 {
-		b.WriteString(`<tr><td colspan="10" class="muted">No host traffic</td></tr>`)
+		b.WriteString(`<tr><td colspan="12" class="muted">No host traffic</td></tr>`)
 	} else {
 		for _, row := range rows {
 			ipRows := topMap(row.ClientIPs, 0)
@@ -2343,6 +2359,8 @@ func reportHostSummaryTableLegacy(values map[string]hostAggregate) string {
 			b.WriteString(`<td class="num">` + fmt.Sprintf("%d", row.UniqueAllowedIPs) + `</td>`)
 			b.WriteString(`<td class="num">` + fmt.Sprintf("%d", row.DenyCount) + `</td>`)
 			b.WriteString(`<td class="num">` + fmt.Sprintf("%d", row.RedirectCount) + `</td>`)
+			b.WriteString(`<td class="num">` + fmt.Sprintf("%d", row.V4DirectRedirectCount) + `</td>`)
+			b.WriteString(`<td class="num">` + fmt.Sprintf("%d", row.V4DegradedRedirectCount) + `</td>`)
 			b.WriteString(`<td>` + html.EscapeString(reportSafeText(joinAllCounts(row.DenyReasons))) + `</td>`)
 			b.WriteString(`<td>` + html.EscapeString(reportSafeText(joinAllCounts(row.RouteSetCounts))) + `</td>`)
 			b.WriteString(`<td>` + html.EscapeString(reportSafeText(strings.Join(ipValues, "; "))) + `</td>`)
@@ -2364,6 +2382,8 @@ func (s *Service) renderHTMLHostPrimary(dayKey string, summaries []Summary) ([]b
 	totalAllows := uint64(0)
 	totalDenies := uint64(0)
 	totalRedirects := uint64(0)
+	v4DirectRedirects := uint64(0)
+	v4DegradedRedirects := uint64(0)
 	shortCircuitTotal := uint64(0)
 	dedupedSuccessCount := uint64(0)
 	hostStats := map[string]hostAggregate{}
@@ -2384,6 +2404,10 @@ func (s *Service) renderHTMLHostPrimary(dayKey string, summaries []Summary) ([]b
 		totalAllows += summary.AllowCount
 		totalDenies += summary.DenyCount
 		totalRedirects += summary.RedirectCount
+		directRedirects := summaryV4DirectRedirectCount(summary)
+		degradedRedirects := summaryV4DegradedRedirectCount(summary)
+		v4DirectRedirects += directRedirects
+		v4DegradedRedirects += degradedRedirects
 		shortCircuitTotal += summary.ShortCircuitAllowCount + summary.ShortCircuitDenyCount
 		if summary.AllowCount > 0 {
 			dedupedSuccessCount++
@@ -2406,6 +2430,8 @@ func (s *Service) renderHTMLHostPrimary(dayKey string, summaries []Summary) ([]b
 		agg.AllowCount += summary.AllowCount
 		agg.DenyCount += summary.DenyCount
 		agg.RedirectCount += summary.RedirectCount
+		agg.V4DirectRedirectCount += directRedirects
+		agg.V4DegradedRedirectCount += degradedRedirects
 		if summary.AllowCount > 0 {
 			agg.UniqueAllowedIPs++
 		}
@@ -2476,6 +2502,8 @@ th{background:#eff6ff;color:#1d4ed8;position:sticky;top:0}
 	buf.WriteString(reportMetricCard("总拦截数", fmt.Sprintf("%d", totalDenies), reportPercentString(totalDenies, totalRequests)+" 拦截率", "danger"))
 	buf.WriteString(reportMetricCard("成功去重数", fmt.Sprintf("%d", dedupedSuccessCount), "至少发生过一次放行的去重客户端数", "success"))
 	buf.WriteString(reportMetricCard("重定向触发数", fmt.Sprintf("%d", totalRedirects), "触发 v1/v2/v3/v4 或 deny redirect 的请求数", "warning"))
+	buf.WriteString(reportMetricCard("V4 直跳次数", fmt.Sprintf("%d", v4DirectRedirects), reportPercentString(v4DirectRedirects, totalRequests)+" of total requests", "warning"))
+	buf.WriteString(reportMetricCard("V4 故障跳转次数", fmt.Sprintf("%d", v4DegradedRedirects), reportPercentString(v4DegradedRedirects, totalRequests)+" of total requests", "warning"))
 	buf.WriteString(reportMetricCard("短路命中数", fmt.Sprintf("%d", shortCircuitTotal), reportPercentString(shortCircuitTotal, totalRequests)+" 的总请求占比", "warning"))
 	buf.WriteString(`</div></section>`)
 
@@ -2554,13 +2582,15 @@ func reportHostSummaryTable(values map[string]hostAggregate) string {
 	b.WriteString(`<th class="num">成功去重数</th>`)
 	b.WriteString(`<th class="num">拦截次数</th>`)
 	b.WriteString(`<th class="num">跳转次数</th>`)
+	b.WriteString(`<th class="num">V4 直跳</th>`)
+	b.WriteString(`<th class="num">V4 降级</th>`)
 	b.WriteString(`<th>拦截原因</th>`)
 	b.WriteString(`<th>路由策略</th>`)
 	b.WriteString(`<th class="num">路径去重数</th>`)
 	b.WriteString(`<th>路径列表</th>`)
 	b.WriteString(`</tr></thead><tbody>`)
 	if len(rows) == 0 {
-		b.WriteString(`<tr><td colspan="11" class="muted">No host traffic</td></tr>`)
+		b.WriteString(`<tr><td colspan="13" class="muted">No host traffic</td></tr>`)
 	} else {
 		for _, row := range rows {
 			routeSummary := joinAllCounts(row.RouteSetCounts)
@@ -2579,6 +2609,8 @@ func reportHostSummaryTable(values map[string]hostAggregate) string {
 			b.WriteString(`<td class="num">` + fmt.Sprintf("%d", row.UniqueAllowedIPs) + `</td>`)
 			b.WriteString(`<td class="num">` + fmt.Sprintf("%d", row.DenyCount) + `</td>`)
 			b.WriteString(`<td class="num">` + fmt.Sprintf("%d", row.RedirectCount) + `</td>`)
+			b.WriteString(`<td class="num">` + fmt.Sprintf("%d", row.V4DirectRedirectCount) + `</td>`)
+			b.WriteString(`<td class="num">` + fmt.Sprintf("%d", row.V4DegradedRedirectCount) + `</td>`)
 			b.WriteString(`<td>` + html.EscapeString(reportSafeText(joinAllCounts(row.DenyReasons))) + `</td>`)
 			b.WriteString(`<td>` + html.EscapeString(reportSafeText(routeSummary)) + `</td>`)
 			b.WriteString(`<td class="num">` + fmt.Sprintf("%d", len(row.PathCounts)) + `</td>`)
@@ -2588,6 +2620,28 @@ func reportHostSummaryTable(values map[string]hostAggregate) string {
 	}
 	b.WriteString(`</tbody></table></div></div>`)
 	return b.String()
+}
+
+func summaryV4DirectRedirectCount(summary Summary) uint64 {
+	count := summary.AllowReasons["allow_v4_direct_redirect"] + summary.AllowReasons["allow_v4_direct_redirect_no_real_ip"]
+	if count > 0 {
+		return count
+	}
+	if strings.TrimSpace(summary.V4RuntimeMode) == "direct_redirect" && summary.RedirectCount > 0 {
+		return summary.RedirectCount
+	}
+	return 0
+}
+
+func summaryV4DegradedRedirectCount(summary Summary) uint64 {
+	count := summary.AllowReasons["allow_v4_redirect"] + summary.AllowReasons["allow_v4_redirect_no_real_ip"]
+	if count > 0 {
+		return count
+	}
+	if strings.TrimSpace(summary.V4RuntimeMode) == "degraded_redirect" && summary.RedirectCount > 0 {
+		return summary.RedirectCount
+	}
+	return 0
 }
 
 func topMap(values map[string]uint64, limit int) []aggregateRow {
