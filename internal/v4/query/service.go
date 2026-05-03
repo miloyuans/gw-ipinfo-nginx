@@ -550,18 +550,19 @@ func buildHostNoteEntries(host v4model.SnapshotHost, state v4model.HostRuntimeSt
 			Value: buildTargetSample(host.Probe.RedirectURLs),
 		})
 	}
+	currentFault := currentFaultDetailVisible(state)
 	faultReason := strings.TrimSpace(state.LastFaultReason)
 	if faultReason == "" {
 		faultReason = strings.TrimSpace(state.LastProbeError)
 	}
-	if state.FaultCount > 0 && faultReason != "" {
+	if currentFault && faultReason != "" {
 		entries = append(entries, hostNoteEntry{
 			Label: "故障原因 / Fault",
 			Value: trimForSummary(faultReason, 180),
 		})
 	}
 	switchFailureReason := strings.TrimSpace(state.LastSwitchFailureReason)
-	if state.SwitchFailureCount > 0 {
+	if currentFault && state.SwitchFailureCount > 0 {
 		if switchFailureReason == "" {
 			switchFailureReason = strings.TrimSpace(state.LastProbeError)
 		}
@@ -592,6 +593,20 @@ func buildHostNoteEntries(host v4model.SnapshotHost, state v4model.HostRuntimeSt
 		})
 	}
 	return entries
+}
+
+func currentFaultDetailVisible(state v4model.HostRuntimeState) bool {
+	if state.FaultActive {
+		return true
+	}
+	switch strings.TrimSpace(state.Mode) {
+	case v4model.ModeDegradedRedirect, v4model.ModeRecovering:
+		return true
+	}
+	if strings.TrimSpace(state.LastProbeError) != "" {
+		return true
+	}
+	return len(state.LastFailedTargets) > 0
 }
 
 func buildTargetSample(values []string) string {

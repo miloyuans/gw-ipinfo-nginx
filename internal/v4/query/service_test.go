@@ -93,3 +93,48 @@ func TestBuildRouteStatsCountsDirectRedirectHosts(t *testing.T) {
 		t.Fatalf("RedirectClients = %d, want 3", stats.RedirectClients)
 	}
 }
+
+func TestBuildHostNoteEntriesOmitsRecoveredHistoricalFault(t *testing.T) {
+	host := v4model.SnapshotHost{
+		Host: "game.freefun.live",
+		Probe: v4model.ProbeSpec{
+			Enabled: true,
+		},
+	}
+	state := v4model.HostRuntimeState{
+		Host:            "game.freefun.live",
+		Mode:            v4model.ModePassthrough,
+		FaultActive:     false,
+		FaultCount:      2,
+		LastFaultReason: "https://apps.apple.com/app/old/id123 returned unhealthy status 404",
+	}
+
+	entries := buildHostNoteEntries(host, state)
+	if len(entries) != 0 {
+		t.Fatalf("buildHostNoteEntries() = %#v, want no current fault notes", entries)
+	}
+}
+
+func TestBuildHostNoteEntriesShowsActiveFault(t *testing.T) {
+	host := v4model.SnapshotHost{
+		Host: "game.freefun.live",
+		Probe: v4model.ProbeSpec{
+			Enabled: true,
+		},
+	}
+	state := v4model.HostRuntimeState{
+		Host:            "game.freefun.live",
+		Mode:            v4model.ModeDegradedRedirect,
+		FaultActive:     true,
+		FaultCount:      2,
+		LastFaultReason: "https://apps.apple.com/app/current/id456 returned unhealthy status 404",
+	}
+
+	entries := buildHostNoteEntries(host, state)
+	if len(entries) == 0 {
+		t.Fatal("buildHostNoteEntries() returned no entries, want active fault note")
+	}
+	if entries[0].Value != state.LastFaultReason {
+		t.Fatalf("fault note value = %q, want %q", entries[0].Value, state.LastFaultReason)
+	}
+}

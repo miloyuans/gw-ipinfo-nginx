@@ -395,10 +395,14 @@ func (s *Service) ApplyProbeUpdate(ctx context.Context, update ProbeUpdate) (v4m
 				state.Mode = v4model.ModePassthrough
 				state.RedirectURL = ""
 				state.LastSwitchFailureReason = ""
+				state.LastFaultReason = ""
 				state.LastSwitchAt = now
 				modeChanged = true
 				recovered = true
 			}
+		} else {
+			state.LastFaultReason = ""
+			state.LastSwitchFailureReason = ""
 		}
 	} else {
 		state.UnhealthyCount++
